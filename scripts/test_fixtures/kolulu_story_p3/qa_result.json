@@ -1,0 +1,10 @@
+{
+  "expected_pass": true,
+  "min_coverage": 0.8,
+  "max_visual_diff": 0.05,
+  "required_checks": [
+    "text_selectable",
+    "images_preserved",
+    "dimensions_match"
+  ]
+}

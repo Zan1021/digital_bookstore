@@ -1,0 +1,31 @@
+{
+  "page_number": 3,
+  "page_type": "story",
+  "span_count": 4,
+  "geometry": {
+    "width": 538.06298828125,
+    "height": 750.6610107421875
+  },
+  "spans_sample": [
+    {
+      "id": "p03_s0001",
+      "text": "1",
+      "font_size": 17.0
+    },
+    {
+      "id": "p03_s0002",
+      "text": "When Kolulu is not at",
+      "font_size": 39.0
+    },
+    {
+      "id": "p03_s0003",
+      "text": "school, he spends most",
+      "font_size": 39.0
+    },
+    {
+      "id": "p03_s0004",
+      "text": "of  his time outdoors.",
+      "font_size": 39.0
+    }
+  ]
+}
