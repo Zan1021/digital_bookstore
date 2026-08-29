@@ -40,6 +40,22 @@ from typing import Optional
 import pymupdf
 
 
+def _measure(font, text: str, font_size: float) -> float:
+    """
+    Measure text width, preferring HarfBuzz shaping (accurate kerning/ligatures)
+    when a font file is attached to the font object, else pymupdf advance-sum.
+    Brief §9.3: measurement must match rendered output.
+    """
+    fontfile = getattr(font, "_v8_fontfile", None)
+    if fontfile:
+        try:
+            from text_shaping import accurate_text_width
+            return accurate_text_width(text, fontfile, font_size)
+        except Exception:
+            pass
+    return font.text_length(text, fontsize=font_size)
+
+
 # =============================================================================
 # DATA TYPES
 # =============================================================================
@@ -107,6 +123,12 @@ def solve_text_fit(
         font = pymupdf.Font(fontfile=font_path)
     else:
         font = pymupdf.Font("helv")
+    # Attach the font file path so measurement can use HarfBuzz shaping (§9.3);
+    # falls back to pymupdf advance-sum when shaping is unavailable.
+    try:
+        font._v8_fontfile = font_path if (font_path and os.path.isfile(font_path)) else None
+    except Exception:
+        pass
     
     # Effective container dimensions (minus padding)
     eff_width = constraints.container_width - (constraints.padding_x * 2)
@@ -124,7 +146,7 @@ def solve_text_fit(
     min_size = max(constraints.min_font_size, source_size * (1 - constraints.max_shrink_ratio))
     
     # === STRATEGY 1: Try source size, single line ===
-    text_width = font.text_length(text, fontsize=source_size)
+    text_width = _measure(font, text, source_size)
     line_height = source_size * constraints.line_height_ratio
     
     if text_width <= eff_width and line_height <= eff_height:
@@ -177,7 +199,7 @@ def _binary_search_single_line(
     best_size = min_size
     
     # Quick check: does it fit at min size?
-    min_width = font.text_length(text, fontsize=min_size)
+    min_width = _measure(font, text, min_size)
     min_height = min_size * constraints.line_height_ratio
     
     if min_width > eff_width or min_height > eff_height:
@@ -197,7 +219,7 @@ def _binary_search_single_line(
     iterations = 0
     while high - low > 0.25 and iterations < 20:
         mid = (low + high) / 2
-        w = font.text_length(text, fontsize=mid)
+        w = _measure(font, text, mid)
         h = mid * constraints.line_height_ratio
         
         if w <= eff_width and h <= eff_height:
@@ -336,7 +358,7 @@ def _wrap_single_paragraph(text: str, font: pymupdf.Font, font_size: float, max_
     for word in words:
         if not current_line:
             # First word on line — check if it fits
-            word_width = font.text_length(word, fontsize=font_size)
+            word_width = _measure(font, word, font_size)
             if word_width <= max_width:
                 current_line = word
             elif has_hyphenation and len(word) > 5:
@@ -355,7 +377,7 @@ def _wrap_single_paragraph(text: str, font: pymupdf.Font, font_size: float, max_
                 current_line = word  # Can't break — just overflow
         else:
             test_line = f"{current_line} {word}"
-            test_width = font.text_length(test_line, fontsize=font_size)
+            test_width = _measure(font, test_line, font_size)
             
             if test_width <= max_width:
                 current_line = test_line
@@ -430,6 +452,145 @@ def solve_batch(
 # =============================================================================
 # CONVENIENCE — Quick single-item solve
 # =============================================================================
+
+# =============================================================================
+# FULL CONTROLLED FITTING LADDER (overflow-fix brief §9.5)
+# =============================================================================
+
+@dataclass
+class LadderResult:
+    """Result of the controlled fitting ladder."""
+    fits: bool
+    font_size: float
+    lines: list
+    tracking_em: float = 0.0            # step 4: applied letter tracking (em)
+    line_height_ratio: float = 1.3      # step 5: applied line-spacing ratio
+    alternate_font: Optional[str] = None  # step 7: metric-compatible substitute used
+    request_shorter: bool = False       # step 8: flag translation for shortening
+    route_to_review: bool = False       # step 9: could not fit -> manual review
+    step: int = 1                       # which ladder step produced the result
+    strategy: str = "preferred"
+    warnings: list = field(default_factory=list)
+
+
+# Approved ranges for the ladder (brief §9.5 "within approved range").
+_TRACKING_STEPS = (0.0, -0.01, -0.02, -0.03)          # em; tighten up to 3%
+_LINE_HEIGHT_STEPS = (1.30, 1.20, 1.12, 1.05)         # compress leading
+
+
+def solve_fitting_ladder(
+    text: str,
+    constraints: "FitConstraints",
+    font_path: Optional[str] = None,
+    alternate_font_paths: Optional[list] = None,
+) -> LadderResult:
+    """
+    Run the FULL controlled fitting ladder in the brief's order (§9.5):
+
+      1. preferred font at the group size
+      2. preserve semantic breaks (handled by caller passing preserve_line_breaks)
+      3. rewrap within the item (multiline word-wrap)
+      4. tracking within an approved range (tighten letter spacing)
+      5. line-spacing within an approved range (compress leading)
+      6. shrink to the minimum size
+      7. approved metric-compatible ALTERNATE font
+      8. request a shorter translation (flag)
+      9. route to manual review
+
+    Never paints outside the region: every step re-measures against the container
+    and only accepts a step that fits. Returns a LadderResult recording the step
+    that succeeded (or route_to_review=True).
+    """
+    warnings = []
+
+    # --- Steps 1-3 & 6: the existing solver already does preferred-size, semantic
+    # break preservation, rewrap, and shrink-to-min. Try it first. ---
+    base = solve_text_fit(text, constraints, font_path)
+    if base.fits and base.shrink_applied <= 0.001:
+        return LadderResult(fits=True, font_size=base.font_size, lines=base.lines,
+                            line_height_ratio=constraints.line_height_ratio,
+                            step=3 if base.strategy == "wrap" else 1, strategy=base.strategy)
+
+    eff_width = constraints.container_width - constraints.padding_x * 2
+    eff_height = constraints.container_height - constraints.padding_y * 2
+
+    def _measure_font():
+        if font_path and os.path.isfile(font_path):
+            f = pymupdf.Font(fontfile=font_path)
+        else:
+            f = pymupdf.Font("helv")
+        try:
+            f._v8_fontfile = font_path if (font_path and os.path.isfile(font_path)) else None
+        except Exception:
+            pass
+        return f
+
+    font = _measure_font()
+    src = constraints.source_font_size
+
+    def _wrapped_lines(size):
+        if constraints.single_word or not constraints.allow_multiline:
+            return [text]
+        return _word_wrap(text, font, size, eff_width, constraints)
+
+    def _fits_at(size, tracking, lh_ratio):
+        """Does the text fit with the given size, tracking and line-height?"""
+        lines = _wrapped_lines(size)
+        # tracking widens/narrows each line by tracking_em * size per glyph gap.
+        per_line_ok = True
+        for ln in lines:
+            w = _measure(font, ln, size)
+            gaps = max(0, len(ln) - 1)
+            w += gaps * tracking * size
+            if w > eff_width + 0.5:
+                per_line_ok = False
+                break
+        total_h = len(lines) * size * lh_ratio
+        return per_line_ok and total_h <= eff_height + 0.5, lines
+
+    # --- Step 4: tracking within approved range (keep source size). ---
+    for tr in _TRACKING_STEPS[1:]:
+        ok, lines = _fits_at(src, tr, constraints.line_height_ratio)
+        if ok:
+            return LadderResult(fits=True, font_size=src, lines=lines, tracking_em=tr,
+                                line_height_ratio=constraints.line_height_ratio,
+                                step=4, strategy="tracking")
+
+    # --- Step 5: line-spacing within approved range (with mild tracking). ---
+    for lh in _LINE_HEIGHT_STEPS[1:]:
+        ok, lines = _fits_at(src, _TRACKING_STEPS[-1], lh)
+        if ok:
+            return LadderResult(fits=True, font_size=src, lines=lines,
+                                tracking_em=_TRACKING_STEPS[-1], line_height_ratio=lh,
+                                step=5, strategy="line_spacing")
+
+    # --- Step 6: shrink to minimum (solver already attempted; accept if it fit). ---
+    if base.fits:
+        return LadderResult(fits=True, font_size=base.font_size, lines=base.lines,
+                            line_height_ratio=constraints.line_height_ratio,
+                            step=6, strategy="shrink")
+
+    # --- Step 7: approved metric-compatible alternate font. ---
+    for alt in (alternate_font_paths or []):
+        if not alt or not os.path.isfile(alt):
+            continue
+        alt_res = solve_text_fit(text, constraints, alt)
+        if alt_res.fits:
+            return LadderResult(fits=True, font_size=alt_res.font_size, lines=alt_res.lines,
+                                alternate_font=alt, line_height_ratio=constraints.line_height_ratio,
+                                step=7, strategy="alternate_font",
+                                warnings=[f"used metric-compatible alternate font: {os.path.basename(alt)}"])
+
+    # --- Step 8: request a shorter translation (flag, do not paint outside). ---
+    # Only when the text is genuinely too long even at the min size on one line.
+    return LadderResult(
+        fits=False, font_size=constraints.min_font_size, lines=base.lines,
+        request_shorter=True, route_to_review=True, step=8,
+        strategy="request_shorter",
+        warnings=["text does not fit after tracking/line-spacing/shrink/alternate font;"
+                  " requesting a shorter translation and routing to review"],
+    )
+
 
 def quick_fit(
     text: str,

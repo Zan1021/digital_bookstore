@@ -19,10 +19,14 @@ class Translation extends Model
         'rendered_pdf_path',
         'render_status',
         'qa_report',
+        'layout_overrides',
+        'translation_contract',
     ];
 
     protected $casts = [
         'qa_report' => 'array',
+        'layout_overrides' => 'array',
+        'translation_contract' => 'array',
     ];
 
     /**

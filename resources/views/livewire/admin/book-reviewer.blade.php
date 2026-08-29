@@ -55,7 +55,7 @@
                 @if(count($manifest))
                     <table class="w-full text-xs">
                         <thead><tr class="text-left text-gray-500">
-                            <th class="py-1">Page</th><th>Type</th><th>Status</th><th>Units</th><th>Failure reasons</th>
+                            <th class="py-1">Page</th><th>Type</th><th>Status</th><th>Units</th><th>Failure reasons</th><th></th>
                         </tr></thead>
                         <tbody>
                         @foreach($manifest as $mp)
@@ -65,6 +65,12 @@
                                 <td class="{{ ($mp['fitStatus'] ?? '') === 'FAILED' ? 'text-red-700 font-semibold' : 'text-green-700' }}">{{ $mp['fitStatus'] ?? 'OK' }}</td>
                                 <td>{{ $mp['unit_count'] ?? 0 }}</td>
                                 <td class="text-red-600">{{ implode('; ', $mp['failureReasons'] ?? []) }}</td>
+                                <td>
+                                    <button type="button" wire:click="loadOverlay({{ $mp['page'] }})"
+                                        class="px-2 py-0.5 text-[11px] rounded bg-indigo-600 text-white hover:bg-indigo-700">
+                                        Open overlay
+                                    </button>
+                                </td>
                             </tr>
                         @endforeach
                         </tbody>
@@ -82,7 +88,112 @@
         </div>
     @endif
 
-    {{-- Stats Bar --}}
+    {{-- INTERACTIVE LAYOUT-DEBUG OVERLAY (brief §15): page image with toggleable
+         overlay boxes (source / safe inner / rendered glyph bounds / reading order),
+         invalid regions in red, per-region edit + single-page re-render + side-by-side. --}}
+    @if($showOverlay && !empty($overlayData))
+        @php($regions = $overlayData['regions'] ?? [])
+        <div class="mb-4 border border-indigo-300 rounded-lg bg-white">
+            <div class="flex items-center justify-between px-4 py-2 border-b bg-indigo-50">
+                <span class="text-sm font-semibold text-indigo-800">
+                    🧭 Layout overlay — page {{ $overlayData['page'] }} ({{ $overlayData['page_type'] }})
+                    — status: <strong>{{ $overlayData['status'] }}</strong>
+                </span>
+                <div class="flex items-center gap-2">
+                    <button type="button" wire:click="reRenderPage({{ $overlayData['page'] }})"
+                        class="px-3 py-1 text-xs rounded bg-emerald-600 text-white hover:bg-emerald-700">
+                        Re-render this page
+                    </button>
+                    <button type="button" wire:click="closeOverlay"
+                        class="px-3 py-1 text-xs rounded bg-gray-200 hover:bg-gray-300">Close</button>
+                </div>
+            </div>
+
+            {{-- Toggle bar --}}
+            <div class="flex flex-wrap gap-3 px-4 py-2 text-xs border-b bg-gray-50">
+                @foreach(['sourceBounds' => 'Source boxes', 'safeInnerBounds' => 'Safe inner', 'renderedGlyphBounds' => 'Glyph bounds', 'readingOrder' => 'Reading order', 'invalidRegions' => 'Invalid (red)'] as $key => $label)
+                    <label class="inline-flex items-center gap-1 cursor-pointer">
+                        <input type="checkbox" wire:click="toggleOverlayLayer('{{ $key }}')"
+                            @checked($overlayToggles[$key] ?? false) class="rounded">
+                        <span>{{ $label }}</span>
+                    </label>
+                @endforeach
+            </div>
+
+            <div class="grid grid-cols-3 gap-3 p-4">
+                {{-- Image + SVG overlay --}}
+                <div class="col-span-2 relative border rounded overflow-hidden"
+                     style="max-height: 640px; overflow:auto;">
+                    <div class="relative inline-block">
+                        <img src="{{ $overlayData['image_url'] }}" alt="page {{ $overlayData['page'] }}"
+                             style="display:block; max-width:100%; height:auto;">
+                        <svg class="absolute inset-0" width="100%" height="100%"
+                             viewBox="0 0 {{ $overlayData['image_width'] }} {{ $overlayData['image_height'] }}"
+                             preserveAspectRatio="xMinYMin meet" style="pointer-events:none;">
+                            @foreach($regions as $r)
+                                @php($sel = $selectedRegionId === ($r['regionId'] ?? null))
+                                @if(($overlayToggles['sourceBounds'] ?? false) && !empty($r['sourceBounds']))
+                                    @php($b = $r['sourceBounds'])
+                                    <rect x="{{ $b[0] }}" y="{{ $b[1] }}" width="{{ $b[2]-$b[0] }}" height="{{ $b[3]-$b[1] }}"
+                                          fill="none" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="4 3"/>
+                                @endif
+                                @if(($overlayToggles['safeInnerBounds'] ?? false) && !empty($r['safeInnerBounds']))
+                                    @php($b = $r['safeInnerBounds'])
+                                    <rect x="{{ $b[0] }}" y="{{ $b[1] }}" width="{{ $b[2]-$b[0] }}" height="{{ $b[3]-$b[1] }}"
+                                          fill="none" stroke="#16a34a" stroke-width="1"/>
+                                @endif
+                                @if(($overlayToggles['renderedGlyphBounds'] ?? false) && !empty($r['renderedGlyphBounds']))
+                                    @php($b = $r['renderedGlyphBounds'])
+                                    <rect x="{{ $b[0] }}" y="{{ $b[1] }}" width="{{ $b[2]-$b[0] }}" height="{{ $b[3]-$b[1] }}"
+                                          fill="none" stroke="#a855f7" stroke-width="1"/>
+                                @endif
+                                @if(($overlayToggles['invalidRegions'] ?? false) && ($r['invalid'] ?? false) && !empty($r['sourceBounds']))
+                                    @php($b = $r['sourceBounds'])
+                                    <rect x="{{ $b[0] }}" y="{{ $b[1] }}" width="{{ $b[2]-$b[0] }}" height="{{ $b[3]-$b[1] }}"
+                                          fill="rgba(220,38,38,0.15)" stroke="#dc2626" stroke-width="2"/>
+                                @endif
+                                @if(($overlayToggles['readingOrder'] ?? false) && !empty($r['sourceBounds']))
+                                    @php($b = $r['sourceBounds'])
+                                    <text x="{{ $b[0]+2 }}" y="{{ $b[1]+12 }}" fill="#111827" font-size="12">{{ $r['readingOrderIndex'] }}</text>
+                                @endif
+                                @if($sel && !empty($r['sourceBounds']))
+                                    @php($b = $r['sourceBounds'])
+                                    <rect x="{{ $b[0] }}" y="{{ $b[1] }}" width="{{ $b[2]-$b[0] }}" height="{{ $b[3]-$b[1] }}"
+                                          fill="none" stroke="#f59e0b" stroke-width="3"/>
+                                @endif
+                            @endforeach
+                        </svg>
+                    </div>
+                </div>
+
+                {{-- Region list + per-region actions --}}
+                <div class="col-span-1 text-xs">
+                    <p class="font-semibold text-gray-700 mb-1">Regions ({{ count($regions) }})</p>
+                    <div class="space-y-1 max-h-[560px] overflow-auto">
+                        @foreach($regions as $r)
+                            <button type="button" wire:click="selectRegion('{{ $r['regionId'] }}')"
+                                class="w-full text-left px-2 py-1 rounded border
+                                    {{ ($r['invalid'] ?? false) ? 'border-red-300 bg-red-50' : 'border-gray-200' }}
+                                    {{ $selectedRegionId === ($r['regionId'] ?? null) ? 'ring-2 ring-amber-400' : '' }}">
+                                <span class="font-mono">{{ $r['regionId'] }}</span>
+                                <span class="text-gray-500">— {{ $r['semanticType'] }}</span>
+                                @if($r['invalid'] ?? false)
+                                    <span class="block text-red-600">{{ implode('; ', $r['reasons'] ?? []) }}</span>
+                                @endif
+                                <span class="block text-gray-400">
+                                    scale {{ $r['visualScaleRatio'] ?? '—' }} · clipped {{ $r['clippedGlyphCount'] ?? 0 }}
+                                </span>
+                            </button>
+                        @endforeach
+                    </div>
+                    <p class="mt-2 text-[11px] text-gray-500">
+                        Select a region to highlight it. Edit its translation in the page editor below,
+                        then "Re-render this page" to update just this page (§15).
+                    </p>
+                </div>
+            </div>
+        </div>
+    @endif
     @if(!empty($stats))
         <div class="grid grid-cols-5 gap-4 mb-6">
             <div class="bg-white rounded-lg border p-3 text-center">

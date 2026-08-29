@@ -262,24 +262,13 @@ def legacy_text_to_manifest_items(translated_text: str, page_manifest: dict) -> 
     """
     Convert legacy flat translated text into a list of {id, translation} items
     by mapping line-by-line to the manifest's item IDs.
-    
-    This is a bridge for existing translations that were generated before
-    the manifest system. It maps by reading order (column by column).
-    
-    .. deprecated::
-        Use DocumentScene.to_translation_request() + scene_renderer._map_legacy_to_ids()
-        instead. This function will be removed once all stored translations are
-        migrated to ID-mapped format. The scene graph path handles legacy text
-        mapping natively via the `legacy_page_text` parameter.
+
+    This maps flat per-page translated text to stable manifest item IDs by
+    reading order (column by column). It is the live bridge used by the V8
+    vocabulary renderer until the PHP translation contract emits stable IDs
+    directly (§2.2). Book-agnostic: mapping is by geometry/reading order.
     """
     import re
-    import warnings
-    warnings.warn(
-        "legacy_text_to_manifest_items() is deprecated. "
-        "Use scene_renderer.render_from_scene(legacy_page_text=...) instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
     
     page_type = page_manifest.get("page_type", "story")
     regions = page_manifest.get("regions", [])

@@ -24,6 +24,18 @@ class BookReviewer extends Component
     // Filters
     public string $filterStatus = 'all'; // all, unreviewed, approved, needs_edit
 
+    // Interactive layout-debug overlay (§15)
+    public bool $showOverlay = false;
+    public array $overlayData = [];
+    public array $overlayToggles = [
+        'sourceBounds' => true,
+        'safeInnerBounds' => true,
+        'renderedGlyphBounds' => false,
+        'readingOrder' => false,
+        'invalidRegions' => true,
+    ];
+    public ?string $selectedRegionId = null;
+
     public function mount(Book $book, string $language = 'af')
     {
         $this->book = $book;
@@ -223,6 +235,116 @@ class BookReviewer extends Component
     public function updatedFilterStatus()
     {
         $this->loadPages();
+    }
+
+    // ===================================================================
+    // INTERACTIVE LAYOUT-DEBUG OVERLAY (overflow-fix brief §15)
+    // ===================================================================
+
+    /**
+     * Load the overlay data (page image + region boxes) for the current page.
+     */
+    public function loadOverlay(?int $page = null)
+    {
+        if (!$this->translation) return;
+        $page = $page ?? $this->currentPage;
+        try {
+            $service = app(PdfTranslationService::class);
+            $this->overlayData = $service->buildOverlayData($this->book, $this->translation, $page);
+            $this->showOverlay = true;
+            $this->selectedRegionId = null;
+        } catch (\Throwable $e) {
+            session()->flash('error', 'Could not build overlay: ' . $e->getMessage());
+        }
+    }
+
+    public function toggleOverlayLayer(string $layer)
+    {
+        if (array_key_exists($layer, $this->overlayToggles)) {
+            $this->overlayToggles[$layer] = !$this->overlayToggles[$layer];
+        }
+    }
+
+    public function selectRegion(string $regionId)
+    {
+        $this->selectedRegionId = $regionId;
+    }
+
+    /**
+     * Persist a per-region override for THIS edition (edited translation, chosen
+     * font, size/tracking/line-height, boundary edit). Stored keyed by region ID
+     * with an audit trail — never in code (§15).
+     */
+    public function saveRegionOverride(string $regionId, array $override)
+    {
+        if (!$this->translation) return;
+        $overrides = $this->translation->layout_overrides ?? [];
+        $overrides[$regionId] = array_merge($overrides[$regionId] ?? [], $override, [
+            '_updated_at' => now()->toIso8601String(),
+            '_updated_by' => auth()->id(),
+        ]);
+        $this->translation->update(['layout_overrides' => $overrides]);
+        session()->flash('success', "Override saved for region {$regionId}.");
+    }
+
+    /**
+     * Re-render ONLY the current page (§15 single-page re-render). Uses the stored
+     * stable-ID contract + per-item translations so unrelated pages are untouched.
+     */
+    public function reRenderPage(?int $page = null)
+    {
+        if (!$this->translation) return;
+        $page = $page ?? $this->currentPage;
+        set_time_limit(300);
+
+        try {
+            $service = app(PdfTranslationService::class);
+            $contract = $this->translation->translation_contract['items'] ?? [];
+            if (empty($contract)) {
+                // No stored contract yet — build and persist one.
+                $full = $service->buildStableIdContract($this->book, $this->translation->language_code);
+                $contract = $full['items'] ?? [];
+                $this->translation->update(['translation_contract' => ['items' => $contract]]);
+            }
+
+            // Collect the stable IDs that belong to this page + their translations.
+            $itemIds = [];
+            $itemTranslations = [];
+            $overrides = $this->translation->layout_overrides ?? [];
+            foreach ($contract as $item) {
+                if (($item['page_number'] ?? null) !== $page) continue;
+                $id = $item['id'];
+                $itemIds[] = $id;
+                // Prefer an edited override translation; else the source (round-trip).
+                $itemTranslations[$id] = $overrides[$id]['translation']
+                    ?? ($item['source_text'] ?? '');
+            }
+
+            if (empty($itemIds)) {
+                session()->flash('error', "No contract items found for page {$page}.");
+                return;
+            }
+
+            $result = $service->reRenderItems(
+                $this->book, $this->translation, $contract, $itemTranslations, $itemIds
+            );
+            $this->translation->refresh();
+            $this->loadOverlay($page);
+
+            if ($result['publishable']) {
+                session()->flash('success', "Page {$page} re-rendered and passed layout QA.");
+            } else {
+                session()->flash('error', "Page {$page} re-rendered but still NEEDS_LAYOUT_REVIEW.");
+            }
+        } catch (\Throwable $e) {
+            session()->flash('error', 'Single-page re-render failed: ' . $e->getMessage());
+        }
+    }
+
+    public function closeOverlay()
+    {
+        $this->showOverlay = false;
+        $this->overlayData = [];
     }
 
     public function getStats(): array

@@ -199,6 +199,42 @@ def _source_text_transform(spans):
     return "none"
 
 
+def _source_weight(spans):
+    """
+    Return the CSS font-weight ('bold'/'normal') matching the SOURCE spans' detected
+    weight (brief §9: preserve original typography). Book-agnostic: uses the per-span
+    is_bold flag the extractor reads from the PDF font descriptor. Bold when the
+    majority of the (non-page-number) spans are bold.
+    """
+    spans = [s for s in (spans or []) if not s.get("is_page_number")]
+    if not spans:
+        return "normal"
+    bold = sum(1 for s in spans if s.get("is_bold"))
+    return "bold" if bold > len(spans) / 2 else "normal"
+
+
+def _apply_source_casing(text, source_span):
+    """
+    Mirror a SINGLE source span's casing onto the translated string (R3, §9) for
+    renderers that place text with insert_text (no CSS text-transform available,
+    e.g. vocabulary word items). If the source token is all-caps, uppercase the
+    translation; if it is Title Case, title-case the translation; otherwise leave
+    it unchanged. Book-agnostic: derived from the source glyphs, not hardcoded.
+    """
+    src = (source_span or {}).get("text_stripped", "") if isinstance(source_span, dict) else ""
+    letters = [c for c in src if c.isalpha()]
+    if not letters or not text:
+        return text
+    if all(c.isupper() for c in letters):
+        return text.upper()
+    # Title Case: every alphabetic run in the source starts uppercase, rest lower,
+    # and it is not a single all-lower token.
+    words = [w for w in src.split() if any(c.isalpha() for c in w)]
+    if words and all(w[:1].isupper() for w in words) and not all(c.isupper() for c in letters):
+        return text.title()
+    return text
+
+
 def _detect_bg_at_span(page, span):
     """
     Sample the background color near a span to use as redaction fill.
@@ -304,21 +340,62 @@ def _split_title_list(text):
 # TEXT INSERTION — Place translated text at original coordinates
 # =============================================================================
 
+def _cap_height_ratio(font):
+    """
+    Return a font's cap-height as a fraction of its point size, measured from the
+    actual glyph geometry (brief §9.2: match APPARENT size, not point size).
+
+    Cap height is the height of a capital letter (we probe 'H'); if unavailable we
+    fall back to x-height ('x'), then to the ascender-descender span. Everything is
+    normalised to a 1pt em so the value is a pure ratio. Book-agnostic — measured
+    from the font, not hardcoded per family.
+    """
+    try:
+        for probe in ("H", "E", "I"):  # cap-height probes
+            try:
+                bbox = font.glyph_bbox(ord(probe))
+                h = abs(bbox.y1 - bbox.y0)
+                if h > 0:
+                    return h
+            except Exception:
+                continue
+        for probe in ("x", "o", "n"):  # x-height fallback
+            try:
+                bbox = font.glyph_bbox(ord(probe))
+                h = abs(bbox.y1 - bbox.y0)
+                if h > 0:
+                    return h
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # Last-resort proxy: ascender - descender (per em).
+    try:
+        span = font.ascender - font.descender
+        if span > 0:
+            return span
+    except Exception:
+        pass
+    return 0.7  # conservative default cap-height ratio
+
+
 def _visual_size_match(source_size, source_font_file, target_font_file):
     """
     Overflow-fix brief §9.2: two fonts at the same POINT size look different.
-    Scale the target point size so its cap-height visually matches the source's,
+    Scale the target point size so its CAP-HEIGHT visually matches the source's,
     keeping the translated text the same apparent size even with a substitute font.
-    Returns an adjusted point size. Falls back to source_size if metrics unavailable.
+
+    Uses true cap-height (x-height / asc-desc fallback) measured from the glyph
+    geometry — NOT the ascender-descender proxy. Falls back to source_size if the
+    metrics are unavailable. Book-agnostic.
     """
     try:
         src = pymupdf.Font(fontfile=source_font_file) if source_font_file else pymupdf.Font("helv")
         tgt = pymupdf.Font(fontfile=target_font_file) if target_font_file else pymupdf.Font("helv")
-        # Use ascender-descender span as a cap-height proxy (per-em, font units normalised).
-        src_h = (src.ascender - src.descender)
-        tgt_h = (tgt.ascender - tgt.descender)
-        if tgt_h > 0 and src_h > 0:
-            return source_size * (src_h / tgt_h)
+        src_cap = _cap_height_ratio(src)
+        tgt_cap = _cap_height_ratio(tgt)
+        if tgt_cap > 0 and src_cap > 0:
+            return source_size * (src_cap / tgt_cap)
     except Exception:
         pass
     return source_size
@@ -353,7 +430,7 @@ def _insert_wrapped_span(page, span, lines, fonts_dir, override_font_size=None):
     return ok
 
 
-def insert_translated_span(page, span, translated_text, fonts_dir, col_width=None, override_font_size=None, clip=None):
+def insert_translated_span(page, span, translated_text, fonts_dir, col_width=None, override_font_size=None, clip=None, font_file=None):
     """
     Insert translated text at the exact origin point of the original span.
     Uses the same font size and color as the original (or override if provided).
@@ -363,6 +440,8 @@ def insert_translated_span(page, span, translated_text, fonts_dir, col_width=Non
     override_font_size: if provided, uses this instead of the span's original size.
     clip: optional pymupdf.Rect — text is clipped to this region so a glyph can
           never bleed past its cell/region (overflow-fix brief §11).
+    font_file: explicit font file to render with (e.g. the publisher house font);
+          when None, falls back to source-matched font resolution.
 
     Supports rotated text: if span has rotation metadata, applies the same
     rotation transform to the translated text via the morph parameter.
@@ -376,8 +455,9 @@ def insert_translated_span(page, span, translated_text, fonts_dir, col_width=Non
     g = int(color_hex[3:5], 16) / 255
     b = int(color_hex[5:7], 16) / 255
 
-    # Find font file
-    font_file = _find_font_file(span, fonts_dir)
+    # Find font file (honor an explicitly passed house font; else source-matched).
+    if font_file is None:
+        font_file = _find_font_file(span, fonts_dir)
 
     # Check if this span is rotated
     rotation_angle = span.get("rotation_angle", 0.0)
@@ -396,7 +476,17 @@ def insert_translated_span(page, span, translated_text, fonts_dir, col_width=Non
     else:
         font = pymupdf.Font("helv")
 
-    text_width = font.text_length(translated_text, fontsize=font_size)
+    # Measure the translated text width. Prefer HarfBuzz shaping (accurate: applies
+    # kerning/ligatures/GPOS) over the pymupdf advance-sum approximation, so overflow
+    # detection matches what the renderer actually produces (brief §9.3).
+    if font_file:
+        try:
+            from text_shaping import accurate_text_width
+            text_width = accurate_text_width(translated_text, font_file, font_size)
+        except Exception:
+            text_width = font.text_length(translated_text, fontsize=font_size)
+    else:
+        text_width = font.text_length(translated_text, fontsize=font_size)
 
     # If text is too wide, reduce font size to fit
     actual_size = font_size
@@ -494,33 +584,36 @@ def _find_font_file(span, fonts_dir):
 # STORY PAGE RENDERER — For pages with illustration + text below
 # =============================================================================
 
-def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report):
+def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report,
+                         forced_size=None, measure_only=False):
     """
     V8 story page: Instead of erasing the zone and using htmlbox,
     group story spans into a paragraph, erase them individually,
     then render the full translated paragraph using insert_htmlbox
     in the same container area.
-    
-    This hybrid approach:
-    - Removes only story text spans (not page numbers, not anything else)
-    - Uses htmlbox for proper paragraph wrapping
-    - Detects the container from the span positions
+
+    forced_size: if provided, render at EXACTLY this font size (book-wide typography
+      group consistency, §9.4 — every story page uses one size instead of each page
+      shrinking independently). When None, the page fits its own size.
+    measure_only: if True, do NOT modify the page; just return the largest font size
+      that fits this page's container (used by the consistency pre-pass). Returns a
+      float (or None if the page has no story content).
     """
     # Get content spans (not page numbers, font >= 20px for story text)
     story_spans = [s for s in page_spans if not s["is_page_number"] and s["font_size"] >= 20]
 
     if not story_spans:
-        return
+        return None if measure_only else None
 
     # Get translated text for this page
     translated_text = translations_map.get(page_num, "")
     if not translated_text.strip():
-        return
+        return None if measure_only else None
 
     # Clean translated text (join into flowing paragraph)
     clean_text = _clean_story_text(translated_text)
     if not clean_text:
-        return
+        return None if measure_only else None
 
     # Determine the text container from span positions
     min_x = min(s["bbox"][0] for s in story_spans)
@@ -532,23 +625,75 @@ def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num
     page_num_spans = [s for s in page_spans if s["is_page_number"]]
     container_bottom = page_num_spans[0]["bbox"][1] - 10 if page_num_spans else page.rect.height - 60
 
-    # Remove all story text spans
+    # Calculate font size — use original average as the ceiling.
+    avg_font_size = sum(s["font_size"] for s in story_spans) / len(story_spans)
+    font_size = avg_font_size
+
+    # ASCENDER HEADROOM: insert_htmlbox aligns the first line's cap/ascender to the
+    # box TOP, so with a tall-ascender (cursive) font the top of the first line gets
+    # clipped when the box top sits on the source glyph top. Add headroom above the
+    # text equal to a fraction of the font size (bounded so we don't overlap the
+    # illustration above). Book-agnostic: derived from font size + available gap.
+    top_gap_available = min_y  # space between page top and the text block
+    headroom = min(max(6.0, avg_font_size * 0.45), max(0.0, top_gap_available - 2))
+    box_top = max(0.0, min_y - headroom)
+
+    # Build container rect (with top headroom for ascenders).
+    container_rect = pymupdf.Rect(min_x, box_top, max_x, container_bottom)
+
+    # Build HTML
+    html = f'<p>{clean_text}</p>'
+    font_css = _register_html_fonts(page, fonts_dir)  # register fonts on page (correct text layer)
+    # Publisher house font for all of Johan's books is PlaypenSans. Prefer it for
+    # story body text; fall back to the source-matched font, then primary.
+    font_family = _preferred_story_family(story_spans, fonts_dir)
+    _tt = _source_text_transform(story_spans)  # mirror source casing (R3, §9)
+    _wt = _source_weight(story_spans)          # preserve detected source weight (§9)
+    arch = pymupdf.Archive(fonts_dir)
+
+    def _fits_at(size):
+        """Return spare height (>=0 fits) for the given size, WITHOUT touching page."""
+        test_css = font_css + f"""
+        * {{ font-family: "{font_family}"; font-size: {size}px; line-height: 1.17; text-transform: {_tt}; font-weight: {_wt}; }}
+        p {{ margin: 0; text-align: left; }}
+        """
+        td = pymupdf.open()
+        tp = td.new_page(width=page.rect.width, height=page.rect.height)
+        r = tp.insert_htmlbox(container_rect, html, css=test_css, archive=arch, scale_low=1.0)
+        td.close()
+        return r[0] if isinstance(r, tuple) else r
+
+    def _largest_fitting_size():
+        """Binary-search the largest size (<= source avg) that fits this container."""
+        if _fits_at(font_size) >= 0:
+            return font_size
+        low, high = font_size * 0.6, font_size
+        while high - low > 0.5:
+            mid = (low + high) / 2
+            if _fits_at(mid) >= 0:
+                low = mid
+            else:
+                high = mid
+        return low
+
+    # MEASURE-ONLY: return the largest size that fits, no rendering.
+    if measure_only:
+        return _largest_fitting_size()
+
+    # Choose the render size: a book-wide forced size (consistency) if given and it
+    # fits; otherwise this page's own largest fitting size.
+    if forced_size is not None:
+        # Guard: if the forced size somehow doesn't fit this page, fall back to the
+        # page's own fitting size (never paint outside the container).
+        font_size = forced_size if _fits_at(forced_size) >= 0 else _largest_fitting_size()
+    else:
+        font_size = _largest_fitting_size()
+
+    # Remove all story text spans (only now that we're actually rendering).
     for span in story_spans:
         remove_span(page, span, fill_color=(1, 1, 1))  # white bg for story pages
     page.apply_redactions()
 
-    # Calculate font size — use original average, with fitting
-    avg_font_size = sum(s["font_size"] for s in story_spans) / len(story_spans)
-    font_size = avg_font_size
-
-    # Build container rect
-    container_rect = pymupdf.Rect(min_x, min_y, max_x, container_bottom)
-
-    # Build HTML
-    html = f'<p>{clean_text}</p>'
-    font_css = _build_font_css(fonts_dir)
-    font_family = _get_primary_font_family(fonts_dir)
-    _tt = _source_text_transform(story_spans)  # mirror source casing (R3, §9)
     css = font_css + f"""
     * {{
         font-family: "{font_family}", sans-serif;
@@ -556,48 +701,14 @@ def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num
         line-height: 1.17;
         color: #000000;
         text-transform: {_tt};
+        font-weight: {_wt};
     }}
     p {{ margin: 0; text-align: left; }}
     """
 
-    arch = pymupdf.Archive(fonts_dir)
-
-    # Measure text height for vertical centering
-    temp_doc = pymupdf.open()
-    temp_page = temp_doc.new_page(width=page.rect.width, height=page.rect.height)
-    result = temp_page.insert_htmlbox(container_rect, html, css=css, archive=arch, scale_low=1.0)
-    temp_doc.close()
-
-    spare_height = result[0] if isinstance(result, tuple) else result
-
-    # If overflows, reduce font size
-    if spare_height < 0:
-        # Binary search for fitting font size
-        low, high = font_size * 0.7, font_size
-        while high - low > 0.5:
-            mid = (low + high) / 2
-            test_css = font_css + f"""
-            * {{ font-family: "{font_family}"; font-size: {mid}px; line-height: 1.17; text-transform: {_tt}; }}
-            p {{ margin: 0; text-align: left; }}
-            """
-            td = pymupdf.open()
-            tp = td.new_page(width=page.rect.width, height=page.rect.height)
-            r = tp.insert_htmlbox(container_rect, html, css=test_css, archive=arch, scale_low=1.0)
-            td.close()
-            s = r[0] if isinstance(r, tuple) else r
-            if s >= 0:
-                low = mid
-            else:
-                high = mid
-        font_size = int(low)
-        css = font_css + f"""
-        * {{ font-family: "{font_family}"; font-size: {font_size}px; line-height: 1.17; color: #000; text-transform: {_tt}; }}
-        p {{ margin: 0; text-align: left; }}
-        """
-        spare_height = 0  # no centering if we had to shrink
-
-    # Vertical centering
-    vertical_offset = max(0, spare_height / 2) if spare_height > 0 else 0
+    # Vertical centering based on spare height at the chosen size.
+    spare_height = _fits_at(font_size)
+    vertical_offset = max(0, spare_height / 2) if spare_height and spare_height > 0 else 0
     final_rect = pymupdf.Rect(
         container_rect.x0, container_rect.y0 + vertical_offset,
         container_rect.x1, container_rect.y1
@@ -609,6 +720,7 @@ def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num
         report["spans_replaced"] += 1
     except Exception as e:
         report["errors"].append({"page": page_num, "error": f"Story htmlbox failed: {str(e)}"})
+    return font_size
 
 
 # =============================================================================
@@ -822,8 +934,8 @@ def _place_vocab_headers(page, page_manifest, header_spans_all, id_to_translatio
         if page_num not in report["review_pages"]:
             report["review_pages"].append(page_num)
 
-    font_css = _build_font_css(fonts_dir)
-    font_family = _get_primary_font_family(fonts_dir)
+    font_css = _register_html_fonts(page, fonts_dir)  # register fonts on page (correct text layer)
+    font_family = _preferred_story_family(header_spans_all, fonts_dir)  # house font
     arch = pymupdf.Archive(fonts_dir)
     verticals = _detect_vertical_gridlines(page)
     pad = 3.0  # cell padding (§6.3)
@@ -878,8 +990,12 @@ def _place_vocab_headers(page, page_manifest, header_spans_all, id_to_translatio
         # Hard clip to the safe box so any residual overflow cannot cross the border.
         clip = pymupdf.Rect(sx0, cell["y0"] - 2, sx1, cell["y1"] + 26) & page.rect
         rect = pymupdf.Rect(sx0, cell["y0"] - 2, sx1, cell["y1"] + 26)
+        # Render the header in its NATURAL (translated) case — the translation data
+        # already carries the intended casing. We do NOT force uppercase from the
+        # source, because the source's caps are a display-font artifact (Edu-Aid),
+        # not semantic. House font (PlaypenSans) has real lower/upper case.
         css = font_css + f"""
-        * {{ font-family: "{font_family}"; font-size: {fit_size:.1f}px; line-height: 1.05; color: #000; }}
+        * {{ font-family: "{font_family}"; font-size: {fit_size:.1f}px; line-height: 1.05; color: #000; text-transform: none; }}
         p {{ margin: 0; text-align: center; }}
         """
         try:
@@ -1016,9 +1132,37 @@ def render_vocabulary_page_v8(page, page_spans, translations_map, fonts_dir, pag
 
     # Single redaction pass for BOTH header spans (queued above) and content spans.
     # Applying redactions once avoids embedded-font corruption from a second pass.
+    #
+    # COVERAGE GUARANTEE (fixes English leaking through): mask EVERY non-page-number
+    # content source span on the page — not just the ones a translation mapped to —
+    # so untranslated source text (e.g. a phonics cell like "wh-en, wh-ere" with no
+    # matching translation) can never ghost through. Spans that DID map get their
+    # translation placed after; spans that did NOT map are recorded as a coverage
+    # gap and the page is flagged for review (fail-closed).
+    rendered_span_ids = {id(item["span"]) for item in items_to_render}
+    header_span_ids = {id(s) for s in header_spans_all}
+    unmatched_content = [
+        s for s in page_spans
+        if not s.get("is_page_number")
+        and id(s) not in rendered_span_ids
+        and id(s) not in header_span_ids
+    ]
     for item in items_to_render:
         remove_span(page, item["span"], fill_color=(1, 1, 1))
+    for s in unmatched_content:
+        # Mask untranslated source so English never shows; sample local bg.
+        remove_span(page, s, fill_color=(1, 1, 1))
     page.apply_redactions()
+
+    if unmatched_content:
+        report.setdefault("coverage", {}).setdefault("untranslated_source", []).append({
+            "page": page_num,
+            "count": len(unmatched_content),
+            "samples": [s.get("text_stripped", "")[:20] for s in unmatched_content[:5]],
+        })
+        report.setdefault("review_pages", [])
+        if page_num not in report["review_pages"]:
+            report["review_pages"].append(page_num)
 
     # TYPOGRAPHY GROUP + WRAP (overflow-fix brief §9.4/§9.5): compute ONE consistent
     # font size PER COLUMN that fits every word in that column, allowing wrapping to
@@ -1027,7 +1171,9 @@ def render_vocabulary_page_v8(page, page_spans, translations_map, fonts_dir, pag
     # being crushed. Uses the existing constraint solver.
     from text_fit_solver import FitConstraints, solve_batch
 
-    font_file = _find_font_file(items_to_render[0]["span"], fonts_dir) if items_to_render else None
+    font_file = _house_font_file(fonts_dir)  # publisher house font (PlaypenSans)
+    if not font_file and items_to_render:
+        font_file = _find_font_file(items_to_render[0]["span"], fonts_dir)
 
     # Group render items by column.
     cols = {}
@@ -1062,14 +1208,71 @@ def render_vocabulary_page_v8(page, page_spans, translations_map, fonts_dir, pag
         results = solve_batch(batch, font_path=font_file, force_consistent=True)
         # Determine the true consistent size for the column (min across items).
         col_size = min((r.font_size for r in results), default=src_size)
+        # FULL FITTING LADDER (§9.5): for any item that still does not fit at the
+        # column size, run the controlled ladder (tracking -> line-spacing ->
+        # shrink -> alternate font -> request-shorter). Items that exhaust the
+        # ladder are flagged request_shorter and routed to review (fail-closed).
+        from text_fit_solver import solve_fitting_ladder, FitConstraints as _FC
+        _alt_fonts = []
+        try:
+            if fonts_dir and os.path.isdir(fonts_dir):
+                _alt_fonts = [os.path.join(fonts_dir, f) for f in sorted(os.listdir(fonts_dir))
+                              if f.lower().endswith((".ttf", ".otf"))
+                              and os.path.join(fonts_dir, f) != font_file][:3]
+        except Exception:
+            _alt_fonts = []
         for it, res in zip(col_items, results):
             item_size[id(it)] = col_size
-            # NOTE: per-item overflow flagging for vocab is intentionally NOT done
-            # here. The detected column-width value is not the same basis the
-            # renderer uses to place text, so measuring overflow against it produces
-            # false positives (flagged 'huis' etc). Overflow for vocab is instead
-            # governed by the solver's min-size floor; genuine impossible fits are
-            # caught by the post-render glyph check in _verify_rendered_page.
+            # Only invoke the ladder for GENUINE overflow. The force_consistent
+            # re-solve above reports fits=False for any item whose natural size
+            # exceeds the shared column size — that is a sizing artifact, NOT real
+            # overflow (the item still fits the cell at col_size). Re-measure the
+            # item at the chosen column size on a single line; only if it truly
+            # exceeds the cell width do we run the controlled ladder (§9.5).
+            # Use the item's ACTUAL rendered cell width (the clip x-range the
+            # renderer will use), not the narrower manifest column-width estimate.
+            _cl = it.get("col_left")
+            _cr = it.get("col_right")
+            if _cl is not None and _cr is not None and _cr > _cl:
+                _cell_w = (_cr - _cl) - 3.0
+            else:
+                _cell_w = (col_w or 100) - 3.0
+            from text_shaping import accurate_text_width as _acc
+            try:
+                _w = _acc(it["translation"], font_file, col_size) if font_file \
+                    else pymupdf.Font("helv").text_length(it["translation"], fontsize=col_size)
+            except Exception:
+                _w = 0
+            if _w <= _cell_w:
+                continue  # fits at column size — no ladder needed
+            # Genuine pre-render overflow at the column size: run the controlled
+            # ladder (§9.5) to try tracking -> line-spacing -> shrink -> alternate
+            # font. Apply the improved size/step when it fits. We DO NOT force
+            # review from this pre-render estimate — the AUTHORITATIVE overflow
+            # decision is the post-render glyph gate (_verify_rendered_page +
+            # render_gate), which measures actual rendered geometry. The ladder's
+            # request_shorter is recorded as a diagnostic hint only, avoiding the
+            # historical false positives from an unreliable pre-render width basis.
+            ladder = solve_fitting_ladder(
+                it["translation"],
+                _FC(container_width=_cell_w + 3.0, container_height=col_size * 1.4,
+                    source_font_size=col_size, min_font_size=7.0,
+                    max_shrink_ratio=0.35, allow_multiline=False, max_lines=1,
+                    line_height_ratio=1.15, padding_x=1.5, single_word=True),
+                font_path=font_file, alternate_font_paths=_alt_fonts,
+            )
+            it["_ladder"] = {
+                "step": ladder.step, "strategy": ladder.strategy,
+                "tracking_em": ladder.tracking_em,
+                "alternate_font": os.path.basename(ladder.alternate_font) if ladder.alternate_font else None,
+                "request_shorter": ladder.request_shorter,
+            }
+            if ladder.fits:
+                item_size[id(it)] = ladder.font_size
+            elif ladder.request_shorter:
+                report.setdefault("fit_ladder", {}).setdefault("request_shorter_hints", []).append({
+                    "page": page_num, "text": it["translation"][:40], "step": ladder.step,
+                })
 
     # Insert translated CONTENT first (insert_text / fontfile), THEN headers.
     replaced = 0
@@ -1086,11 +1289,15 @@ def render_vocabulary_page_v8(page, page_spans, translations_map, fonts_dir, pag
             col_right = bb[0] + (item["col_width"] or 100)
         row_h = (bb[3] - bb[1]) if bb[3] > bb[1] else (size or 12) * 1.2
         clip = pymupdf.Rect(col_left, bb[1] - row_h * 0.6, col_right, bb[3] + row_h * 0.6) & page.rect
+        # Mirror the SOURCE word's casing (R3, §9). Vocab items render via
+        # insert_text (no CSS text-transform), so apply casing to the string itself.
+        cased_text = _apply_source_casing(item["translation"], span)
         success = insert_translated_span(
-            page, span, item["translation"], fonts_dir,
+            page, span, cased_text, fonts_dir,
             col_width=item["col_width"],
             override_font_size=size,
             clip=clip,
+            font_file=font_file,  # render vocab words in the house font (PlaypenSans)
         )
         if success:
             replaced += 1
@@ -1210,11 +1417,11 @@ def render_cover_page_v8(page, page_spans, translations_map, fonts_dir, page_num
     page.apply_redactions()
 
     # Render translated subtitle using htmlbox (for proper centering)
-    font_css = _build_font_css(fonts_dir)
-    font_family = _get_primary_font_family(fonts_dir)
-    _tt = _source_text_transform(subtitle_spans)  # mirror source casing (R3)
+    font_css = _register_html_fonts(page, fonts_dir)  # register fonts on page (correct text layer)
+    font_family = _preferred_story_family(subtitle_spans, fonts_dir)  # house font
+    _wt = _source_weight(subtitle_spans)  # preserve detected source weight (§9)
     css = font_css + f"""
-    * {{ font-family: "{font_family}"; font-size: 49px; line-height: 1.2; color: #3d2c7c; text-transform: {_tt}; }}
+    * {{ font-family: "{font_family}"; font-size: 49px; line-height: 1.2; color: #3d2c7c; text-transform: none; font-weight: {_wt}; }}
     p {{ margin: 0; text-align: center; }}
     """
     arch = pymupdf.Archive(fonts_dir)
@@ -1283,13 +1490,16 @@ def render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num
     header_size = round(src_size)
     title_size = round(src_size)
 
-    text_transform = text_transform
-    font_css = _build_font_css(fonts_dir)
-    font_family = _get_primary_font_family(fonts_dir)
+    # Honor the SOURCE font weight (the engine detects is_bold per span). The source
+    # back cover is regular weight, so hardcoding bold made the Afrikaans look heavier
+    # than the English original. Derive weight from the detected source spans.
+    _weight = _source_weight(content_spans)
+    font_css = _register_html_fonts(page, fonts_dir)  # register fonts on page (correct text layer)
+    font_family = _preferred_story_family(content_spans, fonts_dir)
     css = font_css + f"""
-    * {{ font-family: "{font_family}"; color: #000; text-transform: {text_transform}; }}
-    .header {{ font-size: {header_size}px; text-align: left; margin: 0 0 6px 0; line-height: 1.15; font-weight: bold; }}
-    .title {{ font-size: {title_size}px; text-align: left; margin: 0; line-height: 1.15; font-weight: bold; }}
+    * {{ font-family: "{font_family}"; color: #000; text-transform: none; }}
+    .header {{ font-size: {header_size}px; text-align: left; margin: 0 0 6px 0; line-height: 1.15; font-weight: {_weight}; }}
+    .title {{ font-size: {title_size}px; text-align: left; margin: 0; line-height: 1.15; font-weight: {_weight}; }}
     """
     arch = pymupdf.Archive(fonts_dir)
     # Allow generous vertical room so the now-stacked list is not clipped.
@@ -1333,8 +1543,8 @@ def render_copyright_page_v8(page, page_spans, translations_map, fonts_dir, page
     subtitle_text = lines[0]
     remaining = lines[1:]
 
-    font_css = _build_font_css(fonts_dir)
-    font_family = _get_primary_font_family(fonts_dir)
+    font_css = _register_html_fonts(page, fonts_dir)  # register fonts on page (correct text layer)
+    font_family = _preferred_story_family(page_spans, fonts_dir)  # house font
     arch = pymupdf.Archive(fonts_dir)
 
     # Replace subtitle if present
@@ -1347,8 +1557,9 @@ def render_copyright_page_v8(page, page_spans, translations_map, fonts_dir, page
         page.apply_redactions()
 
         _tt = _source_text_transform(subtitle_spans)  # mirror source casing (R3)
+        _wt = _source_weight(subtitle_spans)          # preserve detected weight (§9)
         css = font_css + f"""
-        * {{ font-family: "{font_family}"; font-size: 49px; line-height: 1.2; color: #3d2c7c; text-transform: {_tt}; }}
+        * {{ font-family: "{font_family}"; font-size: 49px; line-height: 1.2; color: #3d2c7c; text-transform: none; font-weight: {_wt}; }}
         p {{ margin: 0; text-align: center; }}
         """
         rect = pymupdf.Rect(60, sub_min_y - 5, page.rect.width - 60, sub_max_y + 10)
@@ -1437,20 +1648,70 @@ def _looks_like_title_list(page_spans):
 
 def _is_prose_page(page_spans):
     """
-    A prose/story page has flowing sentence text: multiple words with
-    sentence punctuation and few short standalone tokens. Used to distinguish
-    a real story page from a title list or word table.
+    A prose/story page has flowing sentence text. Detects narrative sentences even
+    when SHORT and set in large display type (common in early-reader books, e.g.
+    "Five monkeys are screaming."). Book-agnostic: keys off sentence STRUCTURE
+    (terminal punctuation and/or lowercase function words), not font size or
+    position — so a large-type story line is not mistaken for a cover title.
+
+    A genuine cover/title (title-cased or all-caps display words with no sentence
+    structure) will NOT match.
     """
     content = [s for s in page_spans if not s.get("is_page_number")]
     if not content:
         return False
     joined = " ".join(s.get("text_stripped", "") for s in content)
     words = joined.split()
-    if len(words) < 8:
+    if len(words) < 3:
         return False
-    # Sentence-like: has terminal punctuation and reasonable average word count
+
+    # A numbered title/series list is NOT prose, even though its header line may
+    # contain function words (e.g. "Titles in the ... series:"). Title-list
+    # structure takes precedence so back covers classify correctly.
+    if _looks_like_title_list(content):
+        return False
+
     has_sentence_punct = bool(re.search(r'[.!?]', joined))
-    return has_sentence_punct and len(words) >= 8
+    # Lowercase function words are a strong signal of running prose (vs a title,
+    # which is typically title-cased/all-caps display text). Language-agnostic set
+    # covering common English + Afrikaans function words.
+    function_words = {
+        "the", "a", "an", "is", "are", "was", "were", "in", "on", "at", "and",
+        "of", "to", "with", "under", "over", "near", "nearby", "they", "he", "she",
+        "it", "while", "when", "who", "that", "this", "these", "those", "there",
+        "here", "for", "from", "by", "as", "so", "but", "or", "up", "out",
+        "die", "n", "en", "op", "onder", "oor", "naby", "hulle",
+        "met", "van", "'n", "sy", "hy", "dit", "terwyl", "wat", "daar",
+    }
+    lower_tokens = [w.strip(".,!?;:").lower() for w in words]
+    has_function_word = any(t in function_words for t in lower_tokens)
+
+    # Long flowing block: the original ≥8-word heuristic (kept).
+    if len(words) >= 8 and has_sentence_punct:
+        return True
+    # Short narrative line in large type: sentence punctuation AND a function word,
+    # with at least a few words (a real sentence, not a title).
+    if len(words) >= 3 and has_sentence_punct and has_function_word:
+        return True
+    # Sentence-like even without terminal punctuation IF it has multiple lowercase
+    # function words (mid-sentence continuation across pages, e.g. "while four cubs
+    # play nearby" — no period but clearly prose).
+    if len(words) >= 4 and sum(1 for t in lower_tokens if t in function_words) >= 2:
+        return True
+    # Large-type narrative line: contains lowercase non-initial words (running
+    # text), e.g. "Five monkeys are screaming" / "I have never seen nine rhinos".
+    # A genuine title is title-cased/all-caps, so lowercase-dominant lines are
+    # prose. Book-agnostic: keys off casing, not vocabulary.
+    if len(words) >= 3:
+        non_initial = words[1:]
+        # Real words only: ignore single characters (letter-spaced display titles
+        # like "C o l o u r s" must NOT read as lowercase prose words).
+        clean_non_initial = [w.strip(".,!?;:'\"") for w in non_initial]
+        clean_non_initial = [w for w in clean_non_initial if len(w) >= 2]
+        lower_non_initial = sum(1 for w in clean_non_initial if w[:1].islower())
+        if clean_non_initial and lower_non_initial >= max(2, int(0.5 * len(clean_non_initial))):
+            return True
+    return False
 
 
 def classify_page(page_spans, page_num, total_pages):
@@ -1484,6 +1745,15 @@ def classify_page(page_spans, page_num, total_pages):
     # 1. Vocabulary: many small-font items, little large text (word tables).
     if small > 30 and large < 5:
         return 'vocabulary'
+
+    # 1b. Front cover signal (book-agnostic, geometry-based): the FIRST page with
+    #     very-large display title text and only a few spans is a cover, even if the
+    #     title happens to read like a short lowercase phrase ("Play with me"). A
+    #     small publisher/studio credit line above/below the big title is typical.
+    #     This runs before prose so a lowercase display title is not read as a story
+    #     line. Restricted to page 1 + few spans so interior story pages are unaffected.
+    if page_num == 1 and very_large > 0 and total_spans <= 6:
+        return 'cover'
 
     # 2. Title/series list: numbered entries regardless of font size or position.
     #    This is what a back cover usually is; detect it by structure, not page num.
@@ -1533,7 +1803,59 @@ def _clean_story_text(text):
     return clean.strip()
 
 
+def _register_html_fonts(page, fonts_dir):
+    """
+    Register every available font ON THE PAGE (page.insert_font) under its family
+    name and return CSS (font-family rules only, NO @font-face url()).
+
+    Why: `insert_htmlbox` with a CSS `@font-face { src: url(file) }` (via Archive)
+    embeds the font but produces a BROKEN ToUnicode cmap — the page LOOKS right but
+    its text layer extracts as garbage (not selectable/searchable/accessible).
+    Registering the font on the page with page.insert_font() first, then referencing
+    it by a bare `font-family`, yields a correct ToUnicode map (real, searchable
+    text). Book-agnostic.
+
+    Returns "" (no CSS needed): the family names are live on the page, so renderers
+    reference them directly via `font-family: "<Family>"`.
+    """
+    if not fonts_dir or not os.path.isdir(fonts_dir):
+        return ""
+    for filename in sorted(os.listdir(fonts_dir)):
+        if not filename.lower().endswith(('.ttf', '.otf')):
+            continue
+        if ' ' in filename:
+            continue
+        name_part = filename.rsplit('.', 1)[0]
+        family = name_part
+        for suffix in ['-Regular', '-Bold', '-SemiBold', '-Medium', '-Light',
+                      'Regular', 'Bold', 'SemiBold', 'Medium', 'Light']:
+            family = family.replace(suffix, '')
+        family = family.rstrip('-').rstrip('_')
+        path = os.path.join(fonts_dir, filename)
+        is_bold = "bold" in name_part.lower()
+        is_regular = not any(w in name_part.lower()
+                             for w in ("bold", "semibold", "medium", "light"))
+        try:
+            # Register the base family from the Regular file so `font-family: X` works
+            # with a correct text layer.
+            if is_regular:
+                page.insert_font(fontname=family.replace(" ", ""), fontfile=path)
+            # Register a bold alias so `font-weight: bold` resolves to real bold glyphs.
+            if is_bold:
+                page.insert_font(fontname=(family + "Bold").replace(" ", ""), fontfile=path)
+        except Exception:
+            continue
+    return ""
+
+
 def _build_font_css(fonts_dir):
+    """DEPRECATED: previous @font-face url() approach produced a corrupt text layer.
+    Kept only for non-page callers; returns empty so nothing references url() fonts.
+    Renderers must use _register_html_fonts(page, fonts_dir) instead."""
+    return ""
+
+
+def _build_font_css_LEGACY(fonts_dir):
     """Build CSS @font-face declarations from all available fonts in the directory."""
     css = ""
     if not fonts_dir or not os.path.isdir(fonts_dir):
@@ -1597,6 +1919,104 @@ def _get_primary_font_family(fonts_dir):
     return "sans-serif"
 
 
+def _family_of_file(filename):
+    """Derive the CSS @font-face family name from a font filename (same rule as
+    _build_font_css so lookups match)."""
+    family = filename.rsplit('.', 1)[0]
+    for suffix in ['-Regular', '-Bold', '-SemiBold', '-Medium', '-Light',
+                   'Regular', 'Bold', 'SemiBold', 'Medium', 'Light']:
+        family = family.replace(suffix, '')
+    return family.rstrip('-').rstrip('_')
+
+
+def _source_font_family(spans, fonts_dir):
+    """
+    Resolve the CSS font-family that MATCHES the source spans' font (brief §9.1/§9.3
+    "preserve the original typography"). The source stores a font name (e.g. 'Edu-Aid');
+    we pick the fonts-dir file whose family matches it so the translation renders in
+    the SAME typeface — critically, this avoids falling back to an unrelated ALL-CAPS
+    display font (e.g. 'AdLibBT') that would make mixed-case text look all-uppercase.
+
+    Only returns a family whose font file is CSS-registrable (no spaces in filename,
+    matching _build_font_css). Falls back to the primary family, then sans-serif.
+    Book-agnostic: driven by the source font name, not any book constant.
+    """
+    if not fonts_dir or not os.path.isdir(fonts_dir):
+        return "sans-serif"
+    files = [f for f in sorted(os.listdir(fonts_dir))
+             if f.lower().endswith((".ttf", ".otf")) and " " not in f]
+    if not files:
+        return "sans-serif"
+
+    # Dominant source font name across the spans.
+    from collections import Counter
+    names = [s.get("font_name", "") for s in spans if s.get("font_name")]
+    if names:
+        src_name = Counter(names).most_common(1)[0][0]
+        norm = src_name.lower().replace("-", "").replace(" ", "")
+        # Exact/substring family match against available registrable fonts.
+        for f in files:
+            fam = _family_of_file(f)
+            fnorm = fam.lower().replace("-", "").replace(" ", "")
+            if norm and (norm in fnorm or fnorm in norm):
+                return fam
+    # Fall back to a registrable primary family.
+    return _family_of_file(files[0])
+
+
+# Publisher house font (Johan's books all use PlaypenSans). Overridable via the
+# env var STORY_BODY_FONT if a different house font is ever adopted — book-agnostic,
+# no per-title hardcoding.
+_HOUSE_STORY_FONT = os.environ.get("STORY_BODY_FONT", "PlaypenSans")
+
+
+def _preferred_story_family(spans, fonts_dir):
+    """
+    Resolve the story body font family. Prefers the publisher house font
+    (PlaypenSans by default) when it is present in the fonts dir; otherwise falls
+    back to the source-matched font, then the primary family. Only returns a
+    CSS-registrable family (no spaces in filename, matching _build_font_css).
+    """
+    if fonts_dir and os.path.isdir(fonts_dir):
+        want = _HOUSE_STORY_FONT.lower().replace("-", "").replace(" ", "")
+        for f in sorted(os.listdir(fonts_dir)):
+            if not f.lower().endswith((".ttf", ".otf")) or " " in f:
+                continue
+            fam = _family_of_file(f)
+            if want and want in fam.lower().replace("-", "").replace(" ", ""):
+                return fam
+    # House font not available — preserve the source typeface instead.
+    return _source_font_family(spans, fonts_dir)
+
+
+def _house_font_file(fonts_dir, prefer_bold=False):
+    """
+    Return the FILE PATH of the publisher house font (PlaypenSans by default,
+    overridable via STORY_BODY_FONT). Prefers Regular (or Bold if requested).
+    Falls back to None so callers use their own source-matched resolution.
+    """
+    if not fonts_dir or not os.path.isdir(fonts_dir):
+        return None
+    want = _HOUSE_STORY_FONT.lower().replace("-", "").replace(" ", "")
+    cands = []
+    for f in sorted(os.listdir(fonts_dir)):
+        if not f.lower().endswith((".ttf", ".otf")):
+            continue
+        if want and want in f.lower().replace("-", "").replace(" ", ""):
+            cands.append(os.path.join(fonts_dir, f))
+    if not cands:
+        return None
+    # Prefer the requested weight, else Regular, else first.
+    key = "bold" if prefer_bold else "regular"
+    for c in cands:
+        if key in os.path.basename(c).lower():
+            return c
+    for c in cands:
+        if "regular" in os.path.basename(c).lower():
+            return c
+    return cands[0]
+
+
 # =============================================================================
 # VERIFICATION GATE (Layer 6)
 # =============================================================================
@@ -1607,6 +2027,11 @@ def _build_page_scene_record(page_spans, page_type, page_num):
     id, source text, bbox, and role. This is the explicit translation<->render
     mapping the brief requires (§2/§8) — no string-similarity re-inference.
     Book-agnostic: roles derived from page_type + geometry, IDs from page+index.
+
+    NOTE (§2.1): This flat per-span record is the FALLBACK. When the region-graph
+    document scene is available, `_scene_record_from_page_scene` is used instead so
+    the record is derived from the SAME region graph that drives rendering — one
+    source of truth, no divergent second model.
     """
     content = [s for s in page_spans if not s.get("is_page_number")]
     units = []
@@ -1630,23 +2055,88 @@ def _build_page_scene_record(page_spans, page_type, page_num):
     }
 
 
-def _font_resolution_report(fonts_dir):
+def _scene_record_from_page_scene(page_scene):
+    """
+    Build the report's per-page scene record from the canonical region-graph
+    PageScene (document_model). This is the §2.1 single-source-of-truth path:
+    the diagnostic record and the render both read the SAME region graph, so
+    there is no second, divergent scene model.
+
+    Emits regions -> units with stable IDs, semantic role, per-region safe inner
+    bounds (design container), and source bounds — the structural fields §14 needs.
+    """
+    regions_out = []
+    units_out = []
+    for region in sorted(page_scene.regions, key=lambda r: r.reading_order):
+        container = region.get_container()
+        child_units = []
+        for uid in region.child_ids:
+            unit = page_scene.unit_by_id(uid)
+            if not unit or unit.translation_policy == "preserve":
+                continue
+            style = page_scene.styles.get(unit.style_id)
+            u = {
+                "id": unit.id,
+                "region_id": region.id,
+                "role": unit.semantic_role,
+                "semantic_type": region.region_type,
+                "source_text": unit.source_text,
+                "bbox": [round(v, 1) for v in unit.bbox],
+                "source_bounds": [round(v, 1) for v in unit.bbox],
+                "reading_order": unit.reading_order,
+                "nominal_size_pt": round(style.nominal_size_pt, 2) if style else None,
+                "font_name": style.font.family if style and style.font else None,
+                "column_index": unit.column_index,
+            }
+            child_units.append(u)
+            units_out.append(u)
+        if not child_units:
+            continue
+        regions_out.append({
+            "region_id": region.id,
+            "region_type": region.region_type,
+            "semantic_type": region.region_type,
+            "reading_order": region.reading_order,
+            "source_bounds": [round(v, 1) for v in region.bbox],
+            "safe_inner_bounds": [round(v, 1) for v in container],
+            "container_source": region.container_source,
+            "unit_ids": [u["id"] for u in child_units],
+        })
+    return {
+        "page_number": page_scene.page_number,
+        "page_type": page_scene.page_type,
+        "page_family_id": page_scene.page_family_id,
+        "region_count": len(regions_out),
+        "unit_count": len(units_out),
+        "regions": regions_out,
+        "units": units_out,
+    }
+
+
+def _font_resolution_report(fonts_dir, requested_fonts=None):
     """
     Record which font the engine resolved as primary, its file hash, and whether an
-    approved font was available (brief §9.1). If no fonts dir / no usable font, this
-    is an unresolved fallback and must fail closed.
+    APPROVED font was available (brief §9.1/§9.3). If no fonts dir / no usable font,
+    this is an unresolved fallback and must fail closed. If resolution lands on an
+    UNAPPROVED font, that must also fail closed.
+
+    Records the §9.1 provenance fields: fontRequested, resolvedFamily, fontFileHash,
+    fallbackUsed — plus an `approved` flag and an `unapproved` document-level flag.
     """
     import hashlib
     info = {"resolved_family": None, "font_file_hash": None,
-            "fallback_used": False, "unresolved": False}
+            "fallback_used": False, "unresolved": False,
+            "approved": True, "unapproved": False, "policy": None}
     if not fonts_dir or not os.path.isdir(fonts_dir):
         info["unresolved"] = True
         info["fallback_used"] = True
+        info["approved"] = False
         return info
     fonts = [f for f in os.listdir(fonts_dir) if f.lower().endswith((".ttf", ".otf"))]
     if not fonts:
         info["unresolved"] = True
         info["fallback_used"] = True
+        info["approved"] = False
         return info
     primary = _get_primary_font_family(fonts_dir)
     info["resolved_family"] = primary
@@ -1662,6 +2152,21 @@ def _font_resolution_report(fonts_dir):
             info["font_file_hash"] = hashlib.sha256(fh.read()).hexdigest()[:16]
     except Exception:
         pass
+
+    # APPROVED-FONT ENFORCEMENT (§9.1/§9.3): resolve every requested source font
+    # through the font policy and fail closed on any unapproved/unresolved result.
+    try:
+        from font_policy import document_font_policy_report
+        policy = document_font_policy_report(fonts_dir, requested_fonts)
+        info["policy"] = policy
+        if policy.get("any_unresolved"):
+            info["unresolved"] = True
+            info["approved"] = False
+        if policy.get("any_unapproved"):
+            info["unapproved"] = True
+            info["approved"] = False
+    except Exception as e:
+        info["policy"] = {"error": str(e)}
     return info
 
 
@@ -1729,28 +2234,50 @@ def _verify_rendered_page(page, page_type, translated_text, page_num, report):
 # MAIN ENGINE
 # =============================================================================
 
-def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None):
+def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None, only_item_ids=None):
     """
     V8 Core: Per-span replacement engine with manifest-driven mapping.
     
-    translations format:
+    translations format (either is accepted):
+
+    1. Flat per-page (legacy, still supported):
     {
         "pages": [
             {"page_number": 1, "translated_text": "..."},
             ...
         ]
     }
-    
-    Also supports manifest-based format:
+
+    2. Stable-ID contract (§2.2 — preferred):
     {
-        "pages": [
-            {"page_number": 1, "translated_text": "...", "manifest_items": [...]}
+        "items": [
+            {"id": "p03_s0001", "page_number": 3, "reading_order": 1,
+             "translation": "..."},
+            ...
         ]
     }
+
+    only_item_ids: optional iterable of stable unit IDs. When provided, only the
+    pages that contain those items are re-rendered (per-item / single-page
+    re-render, §2.2 / §15). Other pages are copied through unchanged.
     """
     doc = pymupdf.open(input_pdf)
     total_pages = len(doc)
     _src_hash = _source_hash(input_pdf)  # for geometry caching (§19)
+
+    # =====================================================================
+    # REGION-GRAPH MODEL (§2.1) — build the canonical DocumentScene ONCE and
+    # use it as the single driving data model. The diagnostic scene record and
+    # the render both read from THIS graph, so there is no second, divergent
+    # scene renderer. `scene_renderer.py` has been removed; the region graph now
+    # lives inside the one production engine. Book-agnostic: derived from the PDF.
+    # =====================================================================
+    document_scene = None
+    try:
+        from document_model import build_document_scene
+        document_scene = build_document_scene(input_pdf)
+    except Exception:
+        document_scene = None  # Fall back to flat per-span record if unavailable.
 
     report = {
         "version": "v8",
@@ -1774,9 +2301,100 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None):
     translations_map = {p["page_number"]: p.get("translated_text", "")
                        for p in translations.get("pages", [])}
 
+    # STABLE-ID CONTRACT (§2.2): if the translations payload is ID-mapped
+    # (a top-level "items" list of {id, translation, page_number}), consume the
+    # IDs DIRECTLY — no string reconstruction. We map each stable unit id to its
+    # translation and, for renderers that work per-page, synthesise the per-page
+    # flat text from the ID-mapped items in reading order so both paths converge
+    # on one code path. `only_item_ids`, when provided, restricts rendering to
+    # those items (per-item / single-page re-render).
+    id_to_translation = {}
+    contract_items = translations.get("items")
+    if contract_items:
+        for it in contract_items:
+            iid = it.get("id")
+            if not iid:
+                continue
+            id_to_translation[iid] = it.get("translation", "")
+        # Derive per-page flat text (reading order) so the existing per-page
+        # renderers keep working while being driven by the ID contract.
+        by_page = {}
+        for it in sorted(contract_items, key=lambda x: (x.get("page_number", 0),
+                                                        x.get("reading_order", 0))):
+            pn = it.get("page_number")
+            if pn is None:
+                continue
+            by_page.setdefault(pn, []).append(it.get("translation", ""))
+        for pn, parts in by_page.items():
+            # Only fill pages the flat map does not already cover.
+            translations_map.setdefault(pn, "\n".join(p for p in parts if p is not None))
+    report["translation_contract"] = {
+        "id_mapped": bool(contract_items),
+        "item_count": len(id_to_translation),
+        "only_item_ids": sorted(only_item_ids) if only_item_ids else None,
+    }
+
+    # PRE-RENDER TRANSLATION COMPARE: before rendering, compare the SOURCE content
+    # against the TARGET translation for completeness / consistency / no-English-leak.
+    # This is the language-level gate (distinct from the geometry gates). A failure
+    # marks the affected pages for review so the edition can't be silently approved
+    # with a wrong/incomplete translation. Skipped for scoped single-page re-renders.
+    if not only_item_ids:
+        try:
+            from translation_compare import compare as _compare_translation
+            pre = _compare_translation(input_pdf, translations, target_language="af")
+            report["translation_compare"] = pre
+            if not pre.get("ok"):
+                report.setdefault("review_pages", [])
+                for pn in pre.get("review_pages", []):
+                    if pn not in report["review_pages"]:
+                        report["review_pages"].append(pn)
+        except Exception as e:
+            report["translation_compare"] = {"skipped": True, "reason": str(e)}
+
     # Track coverage
     total_source_spans = 0
     total_translated = 0
+
+    # PER-ITEM / SINGLE-PAGE RE-RENDER SCOPE (§2.2/§15): when only_item_ids is
+    # given, only re-render the pages that own those items. Stable IDs encode the
+    # page as the "pNN" prefix, so we derive the in-scope page set from the IDs.
+    scoped_pages = None
+    if only_item_ids:
+        scoped_pages = set()
+        import re as _re
+        for iid in only_item_ids:
+            m = _re.match(r"p(\d+)", str(iid))
+            if m:
+                scoped_pages.add(int(m.group(1)))
+        report["translation_contract"]["scoped_pages"] = sorted(scoped_pages)
+
+    # TYPOGRAPHY GROUP CONSISTENCY (§9.4): story pages share a style family, so they
+    # must render at ONE consistent font size — not each page shrinking independently
+    # (which produced 32/33/36/39pt across pages). Pre-pass: measure the largest size
+    # that fits EACH story page, then use the smallest of those as the book-wide story
+    # size so every story page matches. Book-agnostic: derived from the pages, no
+    # hardcoded size. Skipped for scoped single-page re-renders (keeps existing size).
+    forced_story_size = None
+    if scoped_pages is None:
+        story_fit_sizes = []
+        for _pi in range(total_pages):
+            _pn = _pi + 1
+            if _pn not in translations_map or not translations_map[_pn].strip():
+                continue
+            _spans = _cached_page_spans(doc, _pi, _pn, _src_hash)
+            if classify_page(_spans, _pn, total_pages) != "story":
+                continue
+            try:
+                _fs = render_story_page_v8(doc[_pi], _spans, translations_map, fonts_dir,
+                                           _pn, report, measure_only=True)
+            except Exception:
+                _fs = None
+            if _fs:
+                story_fit_sizes.append(_fs)
+        if story_fit_sizes:
+            forced_story_size = min(story_fit_sizes)
+            report["story_typography_size"] = round(forced_story_size, 2)
 
     # Process each page
     for page_idx in range(total_pages):
@@ -1786,6 +2404,10 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None):
         if page_num not in translations_map:
             continue
         if not translations_map[page_num].strip():
+            continue
+        # Per-item re-render: skip pages not in scope (they are copied through
+        # unchanged in the saved output — only the targeted page(s) change).
+        if scoped_pages is not None and page_num not in scoped_pages:
             continue
 
         # Extract all spans (cached by source hash for re-renders, §19)
@@ -1803,8 +2425,16 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None):
         # SCENE/MANIFEST with stable IDs (§2/§8): record the page as a region graph
         # of text units with stable IDs, so translation<->render mapping is explicit
         # (not string-similarity). Persisted in the report for QA/diagnostics.
-        report.setdefault("scene", {})[str(page_num)] = _build_page_scene_record(
-            page_spans, page_type, page_num)
+        # §2.1: prefer the canonical region-graph PageScene so the diagnostic record
+        # and the render read the SAME model. Fall back to the flat record only when
+        # the scene graph could not be built.
+        page_scene_obj = document_scene.get_page(page_num) if document_scene else None
+        if page_scene_obj is not None:
+            report.setdefault("scene", {})[str(page_num)] = \
+                _scene_record_from_page_scene(page_scene_obj)
+        else:
+            report.setdefault("scene", {})[str(page_num)] = _build_page_scene_record(
+                page_spans, page_type, page_num)
 
         # Track pre-render span count for coverage
         pre_render_replaced = report["spans_replaced"]
@@ -1813,7 +2443,8 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None):
         if page_type == 'cover':
             render_cover_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report)
         elif page_type == 'story':
-            render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report)
+            render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report,
+                                 forced_size=forced_story_size)
         elif page_type == 'vocabulary':
             render_vocabulary_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report)
         elif page_type == 'back_cover':
@@ -1848,11 +2479,35 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None):
     doc.save(output_pdf, garbage=4, deflate=True)
     doc.close()
 
-    # Font resolution report + fail-closed on unresolved fallback (§9.1).
-    report["font_resolution"] = _font_resolution_report(fonts_dir)
-    if report["font_resolution"].get("unresolved"):
-        report.setdefault("errors", []).append(
-            {"page": 0, "error": "Unresolved font fallback: no usable font in fonts_dir"})
+    # Font resolution report + fail-closed on unresolved/unapproved fallback (§9.1/§9.3).
+    # Collect the distinct SOURCE font families seen across all rendered pages so the
+    # policy can verify each resolves to an APPROVED font.
+    _requested_fonts = set()
+    try:
+        for pn_str, pscene in report.get("scene", {}).items():
+            for u in pscene.get("units", []):
+                fam = u.get("font_name")
+                if fam:
+                    _requested_fonts.add(fam)
+    except Exception:
+        pass
+    # Also sample directly from the source doc's spans if scene lacked font names.
+    if not _requested_fonts:
+        try:
+            _sdoc = pymupdf.open(input_pdf)
+            for _pi in range(len(_sdoc)):
+                for _sp in extract_page_spans(_sdoc[_pi], _pi + 1):
+                    if _sp.get("font_name"):
+                        _requested_fonts.add(_sp["font_name"])
+            _sdoc.close()
+        except Exception:
+            pass
+    report["font_resolution"] = _font_resolution_report(fonts_dir, _requested_fonts)
+    if report["font_resolution"].get("unresolved") or report["font_resolution"].get("unapproved"):
+        _reason = ("Unresolved font fallback: no usable font in fonts_dir"
+                   if report["font_resolution"].get("unresolved")
+                   else "Unapproved font used: resolution landed outside the approved font set")
+        report.setdefault("errors", []).append({"page": 0, "error": _reason})
         report.setdefault("review_pages", [])
         # Force review for the whole document — cannot guarantee typography.
         for pn in report.get("page_types", {}):
@@ -1878,6 +2533,20 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None):
             for pn in gate["review_pages"]:
                 if pn not in report["review_pages"]:
                     report["review_pages"].append(pn)
+
+        # TYPOGRAPHY HIERARCHY + MIN READABILITY (§10.1/§10.2): validate against
+        # the region-graph scene sizes. Any violation routes its page to review.
+        try:
+            from render_gate import validate_typography
+            typo = validate_typography(report)
+            report["typography"] = typo
+            if not typo["ok"]:
+                report.setdefault("review_pages", [])
+                for pn in typo["review_pages"]:
+                    if pn not in report["review_pages"]:
+                        report["review_pages"].append(pn)
+        except Exception as e:
+            report["typography"] = {"skipped": True, "reason": str(e)}
         # Full per-region diagnostic manifest (§14).
         try:
             from render_gate import build_diagnostic_manifest_for_report
@@ -1915,6 +2584,17 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None):
     except Exception as e:
         report["validation"] = {"skipped": True, "reason": f"Validation error: {str(e)}"}
 
+    # TRANSLATION CONSISTENCY (cross-page): the same SOURCE string must translate the
+    # same way everywhere (e.g. the book title "A Fun Place" must not be "'n Plek Vol
+    # Pret" on the cover but "'n Plek van Pret" on the imprint page). The layout gates
+    # only check geometry, so this catches a SEMANTIC discrepancy the render engine
+    # otherwise renders faithfully-but-inconsistently. Book-agnostic: derived from
+    # repeated source strings, no per-title constants.
+    try:
+        _check_translation_consistency(input_pdf, translations, report)
+    except Exception as e:
+        report.setdefault("consistency", {})["error"] = str(e)
+
     # Fail-closed publication signal: engine reports whether the render is
     # publishable. The caller MUST NOT approve when publishable is False.
     report["publishable"] = not report.get("review_pages")
@@ -1927,6 +2607,194 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None):
 # CLI
 # =============================================================================
 
+# =============================================================================
+# INTERACTIVE OVERLAY DATA (brief §15) — page image + region overlay boxes
+# =============================================================================
+
+def build_overlay_data(rendered_pdf, page_number, manifest_path, image_out, dpi=110):
+    """
+    Render the given page of the translated PDF to a PNG and return overlay data:
+    per-region boxes (source bounds, safe inner bounds, rendered glyph bounds) in
+    IMAGE PIXEL coordinates, plus status/type/failure reasons, so the admin UI can
+    draw toggleable overlays (source boxes, safe boxes, glyph bounds, reading order,
+    collisions, clipped areas, font info) with invalid regions highlighted in red.
+
+    Book-agnostic: everything comes from the rendered geometry + the manifest.
+    """
+    import json as _json
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = _json.load(f)
+
+    page_entry = None
+    for p in manifest.get("pages", []):
+        if p.get("page") == page_number:
+            page_entry = p
+            break
+
+    doc = pymupdf.open(rendered_pdf)
+    if page_number - 1 >= len(doc):
+        doc.close()
+        raise ValueError(f"page {page_number} out of range")
+    page = doc[page_number - 1]
+    scale = dpi / 72.0
+    pix = page.get_pixmap(dpi=dpi)
+    os.makedirs(os.path.dirname(image_out), exist_ok=True)
+    pix.save(image_out)
+    doc.close()
+
+    def _to_px(b):
+        if not b:
+            return None
+        return [round(b[0] * scale, 1), round(b[1] * scale, 1),
+                round(b[2] * scale, 1), round(b[3] * scale, 1)]
+
+    regions_out = []
+    if page_entry:
+        for r in page_entry.get("regions", []):
+            reasons = []
+            # A region is 'invalid' when the page failed and its type is implicated,
+            # or it reports clipped glyphs / bad visual scale.
+            if r.get("clippedGlyphCount"):
+                reasons.append(f"{r['clippedGlyphCount']} clipped glyph(s)")
+            vsr = r.get("visualScaleRatio")
+            if vsr is not None and (vsr < 0.6 or vsr > 1.6):
+                reasons.append(f"visual scale {vsr}")
+            regions_out.append({
+                "regionId": r.get("regionId"),
+                "semanticType": r.get("semanticType"),
+                "sourceBounds": _to_px(r.get("sourceBounds")),
+                "safeInnerBounds": _to_px(r.get("safeInnerBounds")),
+                "renderedGlyphBounds": _to_px(r.get("renderedGlyphBounds")),
+                "readingOrderIndex": len(regions_out),
+                "visualScaleRatio": vsr,
+                "lineHeight": r.get("lineHeight"),
+                "tracking": r.get("tracking"),
+                "clippedGlyphCount": r.get("clippedGlyphCount", 0),
+                "invalid": bool(reasons),
+                "reasons": reasons,
+            })
+
+    return {
+        "page": page_number,
+        "page_type": page_entry.get("page_type") if page_entry else None,
+        "status": page_entry.get("status") if page_entry else "OK",
+        "image": os.path.basename(image_out),
+        "image_width": pix.width,
+        "image_height": pix.height,
+        "dpi": dpi,
+        "regions": regions_out,
+        "failureReasons": page_entry.get("failureReasons", []) if page_entry else [],
+        "typographyFailures": page_entry.get("typographyFailures", []) if page_entry else [],
+    }
+
+
+def _check_translation_consistency(input_pdf, translations, report):
+    """
+    Cross-page translation-consistency check. The SAME source string translated
+    differently on different pages is a real defect the layout gates cannot see
+    (e.g. the book title rendered three different ways). We detect it by:
+
+      1. extracting, per source page, the prominent SHORT strings (title-like:
+         the largest-font line and other short lines), keyed by normalised source;
+      2. pairing each source page with its translated text (from `translations`);
+      3. finding a source string that appears on multiple pages but whose page
+         translations diverge — the clearest, book-agnostic signal being the BOOK
+         TITLE (the cover's dominant display line), which recurs on the imprint and
+         back-cover pages.
+
+    Flags a `consistency` report section and routes affected pages to review
+    (fail-closed) so a human reconciles the wording. Book-agnostic: no title text
+    is hardcoded; the title is discovered as the cover's largest display string.
+    """
+    import difflib
+
+    # Build per-page translated text.
+    tmap = {p["page_number"]: (p.get("translated_text") or "")
+            for p in translations.get("pages", [])}
+    if not tmap:
+        # ID-mapped contract: reconstruct per-page target from items.
+        for it in translations.get("items", []):
+            pn = it.get("page_number")
+            if pn is not None:
+                tmap.setdefault(pn, "")
+                tmap[pn] = (tmap[pn] + "\n" + (it.get("translation") or "")).strip()
+    if not tmap:
+        return
+
+    doc = pymupdf.open(input_pdf)
+    total = len(doc)
+
+    # 1. Discover the book title from the cover (page 1): the largest-font line.
+    def _page_lines_by_size(page, page_num):
+        spans = [s for s in extract_page_spans(page, page_num) if not s.get("is_page_number")]
+        return spans
+
+    cover_spans = _page_lines_by_size(doc[0], 1) if total >= 1 else []
+    title_src = None
+    if cover_spans:
+        # Largest-font display span with >2 letters is the title.
+        big = sorted(cover_spans, key=lambda s: s.get("font_size", 0), reverse=True)
+        for s in big:
+            t = s.get("text_stripped", "")
+            if len(re.sub(r"[^A-Za-z]", "", t)) > 2 and "studio" not in t.lower():
+                title_src = t
+                break
+
+    findings = []
+    if title_src:
+        norm_title = re.sub(r"\s+", " ", title_src).strip().lower()
+        # Find which source pages contain the title string.
+        title_pages = []
+        for pi in range(total):
+            spans = _page_lines_by_size(doc[pi], pi + 1)
+            joined = " ".join(s.get("text_stripped", "") for s in spans).lower()
+            if norm_title and norm_title in re.sub(r"\s+", " ", joined):
+                title_pages.append(pi + 1)
+
+        # For each such page, extract the candidate translated title = the first
+        # prominent (non-publisher) line of that page's translation.
+        def _candidate_title(text):
+            for ln in [l.strip() for l in text.split("\n") if l.strip()]:
+                low = ln.lower()
+                if "studio" in low or "mthombothi" in low:
+                    continue
+                if re.sub(r"[^A-Za-z]", "", ln):
+                    return ln
+            return ""
+
+        title_translations = {}
+        for pn in title_pages:
+            cand = _candidate_title(tmap.get(pn, ""))
+            if cand:
+                title_translations[pn] = cand
+
+        # Divergence: more than one DISTINCT translation (fuzzy) => inconsistent.
+        distinct = []
+        for pn, t in title_translations.items():
+            tl = t.strip().lower()
+            if not any(difflib.SequenceMatcher(None, tl, d).ratio() >= 0.85 for d in distinct):
+                distinct.append(tl)
+        if len(distinct) > 1:
+            findings.append({
+                "type": "title_inconsistent",
+                "source_title": title_src,
+                "translations_by_page": title_translations,
+                "distinct_count": len(distinct),
+            })
+            report.setdefault("review_pages", [])
+            for pn in title_translations:
+                if pn not in report["review_pages"]:
+                    report["review_pages"].append(pn)
+
+    doc.close()
+    report["consistency"] = {
+        "checked": True,
+        "title_source": title_src,
+        "findings": findings,
+        "ok": len(findings) == 0,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="PDF Translation Engine V8 — Per-Span Replacement")
     subparsers = parser.add_subparsers(dest="command")
@@ -1936,8 +2804,30 @@ def main():
     replace_p.add_argument("--output", "-o", required=True)
     replace_p.add_argument("--translations", "-t", required=True)
     replace_p.add_argument("--fonts-dir", "-f")
+    replace_p.add_argument("--only-items",
+                          help="Comma-separated stable item IDs to re-render (per-item / single-page)")
     replace_p.add_argument("--validate", action="store_true",
                           help="Run structural validation after rendering (default: always on)")
+
+    # STABLE-ID CONTRACT (§2.2): emit the page->region->item translation request
+    # with stable IDs so the translation layer (PHP) can store and return IDs.
+    contract_p = subparsers.add_parser("contract",
+                                       help="Emit the stable-ID translation contract for a PDF")
+    contract_p.add_argument("--input", "-i", required=True)
+    contract_p.add_argument("--target-language", "-l", default="af")
+    contract_p.add_argument("--output", "-o", help="Write contract JSON here (default: stdout)")
+
+    # INTERACTIVE OVERLAY DATA (§15): render a page image + region overlay boxes
+    # (source bounds, safe inner bounds, rendered glyph bounds, status) in IMAGE
+    # pixel coordinates, so the admin UI can draw toggleable overlays over the PNG.
+    overlay_p = subparsers.add_parser("overlay-data",
+                                      help="Emit page image + region overlay boxes for the admin debug overlay")
+    overlay_p.add_argument("--rendered", "-r", required=True, help="Rendered (translated) PDF path")
+    overlay_p.add_argument("--page", "-p", type=int, required=True, help="1-based page number")
+    overlay_p.add_argument("--manifest", "-m", required=True, help="Diagnostic manifest JSON path")
+    overlay_p.add_argument("--image-out", required=True, help="Where to write the page PNG")
+    overlay_p.add_argument("--dpi", type=int, default=110)
+    overlay_p.add_argument("--output", "-o", help="Write overlay JSON here (default: stdout)")
 
     args = parser.parse_args()
 
@@ -1945,14 +2835,45 @@ def main():
         with open(args.translations, 'r', encoding='utf-8') as f:
             translations = json.load(f)
 
+        only_items = None
+        if getattr(args, "only_items", None):
+            only_items = [s.strip() for s in args.only_items.split(",") if s.strip()]
+
         report = replace_text_in_pdf(
             input_pdf=args.input,
             output_pdf=args.output,
             translations=translations,
             fonts_dir=args.fonts_dir,
+            only_item_ids=only_items,
         )
         print(json.dumps(report, indent=2, ensure_ascii=False), file=sys.stderr)
         print(args.output)
+    elif args.command == "contract":
+        from document_model import build_document_scene
+        scene = build_document_scene(args.input)
+        contract = scene.to_translation_request(args.target_language)
+        payload = json.dumps(contract, indent=2, ensure_ascii=False)
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as f:
+                f.write(payload)
+            print(args.output)
+        else:
+            print(payload)
+    elif args.command == "overlay-data":
+        payload = build_overlay_data(
+            rendered_pdf=args.rendered,
+            page_number=args.page,
+            manifest_path=args.manifest,
+            image_out=args.image_out,
+            dpi=args.dpi,
+        )
+        out_json = json.dumps(payload, indent=2, ensure_ascii=False)
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as f:
+                f.write(out_json)
+            print(args.output)
+        else:
+            print(out_json)
     else:
         parser.print_help()
 

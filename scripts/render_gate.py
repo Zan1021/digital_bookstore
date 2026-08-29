@@ -124,40 +124,138 @@ def validate_raster(source_pdf, translated_pdf, page_index, text_bboxes=None, dp
     return {"ok": ratio <= 0.02, "diff_ratio": round(ratio, 4)}
 
 
+def _rendered_region_geometry(pdf_path, page_number, region_bbox):
+    """
+    Measure rendered geometry inside a region's bounds on the output PDF:
+    returns (rendered_line_count, rendered_glyph_bounds, clipped_glyph_count).
+    A glyph is 'clipped' when its rendered bounds fall outside the region bounds.
+    Book-agnostic; derived from the actual rendered page.
+    """
+    try:
+        doc = pymupdf.open(pdf_path)
+        if page_number - 1 >= len(doc):
+            doc.close()
+            return 0, None, 0
+        page = doc[page_number - 1]
+        words = page.get_text("words")
+        doc.close()
+    except Exception:
+        return 0, None, 0
+
+    if not region_bbox:
+        return 0, None, 0
+    rx0, ry0, rx1, ry1 = region_bbox
+    inside = []
+    lines = set()
+    clipped = 0
+    for w in words:
+        wx0, wy0, wx1, wy1 = w[0], w[1], w[2], w[3]
+        cx, cy = (wx0 + wx1) / 2, (wy0 + wy1) / 2
+        # Word belongs to this region if its center is within the region bounds.
+        if rx0 - 2 <= cx <= rx1 + 2 and ry0 - 2 <= cy <= ry1 + 2:
+            inside.append(w)
+            lines.add(round(w[1], 0))
+            # Clipped if any edge exceeds the region bounds beyond a small margin.
+            if wx0 < rx0 - 1 or wx1 > rx1 + 1 or wy0 < ry0 - 1 or wy1 > ry1 + 1:
+                clipped += 1
+    if not inside:
+        return 0, None, 0
+    gb = [min(w[0] for w in inside), min(w[1] for w in inside),
+          max(w[2] for w in inside), max(w[3] for w in inside)]
+    return len(lines), [round(v, 1) for v in gb], clipped
+
+
 def build_diagnostic_manifest(pdf_path, report):
     """
     Build the per-region diagnostic manifest (brief §14) from the render report's
-    scene record + the gate results. Persisted with the edition for admin review.
-    Book-agnostic: every field derived from the render + gate outputs.
+    region-graph scene record + the gate results. Persisted with the edition for
+    admin review. Book-agnostic: every field derived from the render + gate outputs.
+
+    Emits, per region, the full §14 field set:
+      regionId, semanticType, sourceBounds, safeInnerBounds, visualScaleRatio,
+      lineHeight, tracking, sourceLineCount, semanticItemCount, renderedLineCount,
+      renderedGlyphBounds, clippedGlyphCount, plus status/failureReasons.
     """
     scene = report.get("scene", {})
     gate = report.get("render_gate", {}).get("pages", {})
+    typo = report.get("typography", {}).get("pages", {}) if isinstance(report.get("typography"), dict) else {}
     font_res = report.get("font_resolution", {})
     manifest = {
         "render_engine_version": report.get("version", "v8"),
         "font_resolved": font_res.get("resolved_family"),
         "font_file_hash": font_res.get("font_file_hash"),
         "font_fallback_used": font_res.get("fallback_used", False),
+        "font_approved": font_res.get("approved", True),
+        "font_unapproved": font_res.get("unapproved", False),
+        "font_unresolved": font_res.get("unresolved", False),
+        "font_policy": font_res.get("policy"),
         "pages": [],
     }
     for pn_str, page_scene in scene.items():
-        pn = int(pn_str)
+        try:
+            pn = int(pn_str)
+        except (TypeError, ValueError):
+            continue
         page_gate = gate.get(pn) or gate.get(pn_str) or {"ok": True, "failures": []}
         failures = page_gate.get("failures", [])
         constraints = {f.get("constraint") for f in failures}
+        typo_page = typo.get(pn) or typo.get(pn_str) or {"ok": True, "failures": []}
+
+        # Build per-region diagnostics (§14). Fall back to a single synthetic region
+        # when only the flat unit record is present (no region-graph).
+        regions = page_scene.get("regions")
+        units = page_scene.get("units", [])
+        units_by_region = {}
+        for u in units:
+            units_by_region.setdefault(u.get("region_id"), []).append(u)
+
+        region_entries = []
+        if regions:
+            for r in regions:
+                r_units = units_by_region.get(r.get("region_id"), [])
+                src_bounds = r.get("source_bounds")
+                safe_bounds = r.get("safe_inner_bounds")
+                # visual scale ratio: rendered vs source height (approx via bounds).
+                rline, rglyph, clipped = _rendered_region_geometry(pdf_path, pn, safe_bounds or src_bounds)
+                sizes = [u.get("nominal_size_pt") for u in r_units if u.get("nominal_size_pt")]
+                nominal = (sum(sizes) / len(sizes)) if sizes else None
+                visual_scale = None
+                if src_bounds and rglyph:
+                    src_h = src_bounds[3] - src_bounds[1]
+                    ren_h = rglyph[3] - rglyph[1]
+                    if src_h > 0:
+                        visual_scale = round(ren_h / src_h, 3)
+                region_entries.append({
+                    "regionId": r.get("region_id"),
+                    "semanticType": r.get("semantic_type") or r.get("region_type"),
+                    "sourceBounds": src_bounds,
+                    "safeInnerBounds": safe_bounds,
+                    "containerSource": r.get("container_source"),
+                    "visualScaleRatio": visual_scale,
+                    "lineHeight": round(nominal * 1.15, 2) if nominal else None,
+                    "tracking": 0.0,
+                    "sourceLineCount": len({round(u["bbox"][1], 0) for u in r_units if u.get("bbox")}) or len(r_units),
+                    "semanticItemCount": len(r_units),
+                    "renderedLineCount": rline,
+                    "renderedGlyphBounds": rglyph,
+                    "clippedGlyphCount": clipped,
+                })
+
         manifest["pages"].append({
             "page": pn,
             "page_type": page_scene.get("page_type"),
-            "status": "NEEDS_LAYOUT_REVIEW" if not page_gate.get("ok", True) else "OK",
-            "region_count": page_scene.get("region_count", 0),
-            "unit_count": page_scene.get("unit_count", 0),
-            "units": page_scene.get("units", []),
+            "status": "NEEDS_LAYOUT_REVIEW" if (not page_gate.get("ok", True) or not typo_page.get("ok", True)) else "OK",
+            "region_count": page_scene.get("region_count", len(region_entries)),
+            "unit_count": page_scene.get("unit_count", len(units)),
+            "units": units,
+            "regions": region_entries,
             "overflowX": 0 if "pageBoundaryIntersections" not in constraints else 1,
             "overflowY": 0,
             "tableBorderIntersections": [f["detail"] for f in failures
                                          if f.get("constraint") == "tableBorderIntersections"],
             "neighbourCollisions": [f["detail"] for f in failures
                                     if f.get("constraint") == "neighbourTextIntersections"],
+            "typographyFailures": [f.get("detail") for f in typo_page.get("failures", [])],
             "fitStatus": "FAILED" if not page_gate.get("ok", True) else "OK",
             "failureReasons": [f.get("detail") for f in failures],
         })
@@ -277,6 +375,112 @@ def validate_page(page, page_type, expected_text=""):
         })
 
     return {"ok": len(failures) == 0, "failures": failures}
+
+
+def validate_typography(report, document_type=None, market=None, output_format="print"):
+    """
+    Typography hierarchy + minimum-readability validation (brief §10.1/§10.2).
+
+    Reads the report's region-graph scene record (regions carry semantic_type;
+    units carry nominal_size_pt) and checks, per page:
+      - min readable size: any body/heading region rendered below the configured
+        minimum readable size fails (region routed to review);
+      - hierarchy: heading visual size must exceed body visual size on the page;
+      - table: table_header size must be >= table_cell/body size;
+      - peer variance: regions of the SAME role on a page must not vary in size
+        beyond the tolerance.
+
+    Returns {"ok": bool, "pages": {n: {ok, failures}}, "review_pages": [...]}.
+    Book-agnostic: thresholds come from readability_policy, sizes from the scene.
+    """
+    from readability_policy import (min_readable_size, HEADING_ROLES, BODY_ROLES,
+                                     PEER_VARIANCE_TOLERANCE)
+    min_size = min_readable_size(document_type, market, output_format)
+    result = {"ok": True, "pages": {}, "review_pages": [], "min_readable_size": min_size}
+
+    scene = report.get("scene", {})
+    for pn_str, pscene in scene.items():
+        try:
+            pn = int(pn_str)
+        except (TypeError, ValueError):
+            continue
+        failures = []
+
+        # Gather per-region representative sizes by role.
+        regions = pscene.get("regions") or []
+        units = pscene.get("units") or []
+        # Map region_id -> role and collect sizes from its units.
+        role_sizes = {}          # role -> [sizes]
+        region_role = {}
+        for r in regions:
+            region_role[r.get("region_id")] = r.get("semantic_type") or r.get("region_type")
+        for u in units:
+            size = u.get("nominal_size_pt")
+            if not size:
+                continue
+            role = region_role.get(u.get("region_id")) or u.get("role") or u.get("semantic_type")
+            role_sizes.setdefault(role, []).append(size)
+
+        # 1. Minimum readable size (any rendered text below the floor fails).
+        for role, sizes in role_sizes.items():
+            below = [s for s in sizes if s + 0.05 < min_size]
+            if below:
+                failures.append({
+                    "constraint": "minReadableSize",
+                    "detail": f"role '{role}' has text at {min(below):.1f}pt < min {min_size:.1f}pt",
+                })
+
+        def _avg(xs):
+            return sum(xs) / len(xs) if xs else 0.0
+
+        heading_sizes = [s for role, ss in role_sizes.items() if role in HEADING_ROLES for s in ss]
+        body_sizes = [s for role, ss in role_sizes.items() if role in BODY_ROLES for s in ss]
+
+        # 2. Hierarchy: heading visual size must exceed body visual size.
+        if heading_sizes and body_sizes:
+            if _avg(heading_sizes) <= _avg(body_sizes):
+                failures.append({
+                    "constraint": "typographyHierarchy",
+                    "detail": (f"heading avg {_avg(heading_sizes):.1f}pt not greater than "
+                               f"body avg {_avg(body_sizes):.1f}pt"),
+                })
+
+        # 3. Table: header size >= body/cell size.
+        header_sizes = role_sizes.get("table_header", [])
+        cell_sizes = role_sizes.get("table_cell", []) or role_sizes.get("word_item", []) \
+            or role_sizes.get("word_list_item", [])
+        if header_sizes and cell_sizes:
+            if _avg(header_sizes) + 0.05 < _avg(cell_sizes):
+                failures.append({
+                    "constraint": "tableHeaderHierarchy",
+                    "detail": (f"table header avg {_avg(header_sizes):.1f}pt < "
+                               f"table body avg {_avg(cell_sizes):.1f}pt"),
+                })
+
+        # 4. Peer variance: same role must not vary beyond tolerance. Only applies
+        #    to roles expected to be visually UNIFORM (table columns, word/list
+        #    items). Prose/paragraph/display text legitimately varies in the source
+        #    design, so it is excluded to avoid false positives.
+        _UNIFORM_PEER_ROLES = {"table_cell", "table_header", "word_item",
+                               "word_list_item", "list_item"}
+        for role, sizes in role_sizes.items():
+            if role not in _UNIFORM_PEER_ROLES or len(sizes) < 2:
+                continue
+            lo, hi = min(sizes), max(sizes)
+            if lo > 0 and (hi - lo) / lo > PEER_VARIANCE_TOLERANCE:
+                failures.append({
+                    "constraint": "peerRegionVariance",
+                    "detail": (f"role '{role}' sizes vary {lo:.1f}..{hi:.1f}pt "
+                               f"(> {PEER_VARIANCE_TOLERANCE:.0%})"),
+                })
+
+        page_ok = len(failures) == 0
+        result["pages"][pn] = {"ok": page_ok, "failures": failures}
+        if not page_ok:
+            result["ok"] = False
+            result["review_pages"].append(pn)
+
+    return result
 
 
 def validate_document(pdf_path, page_types=None, expected_by_page=None):
