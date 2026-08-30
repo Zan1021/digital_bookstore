@@ -21,6 +21,7 @@ class Translation extends Model
         'qa_report',
         'layout_overrides',
         'translation_contract',
+        'item_translations',
         // Edition-level classification/discovery fields
         'reading_level_id',
         'education_phase',
@@ -33,6 +34,7 @@ class Translation extends Model
         'qa_report' => 'array',
         'layout_overrides' => 'array',
         'translation_contract' => 'array',
+        'item_translations' => 'array',
     ];
 
     /**

@@ -21,6 +21,17 @@ class PdfTranslationService
      */
     private ?Book $currentBook = null;
 
+    /**
+     * Stable IDs of contract spans that could NOT be resolved to a translation on a
+     * page that DOES have translated text (fix C — English-leak guard). Such spans
+     * are rendered BLANK rather than falling back to the English source_text, and
+     * their presence forces the edition to NEEDS_LAYOUT_REVIEW so English never ships
+     * silently. Populated by resolveItemTranslations(), read by createTranslatedPdf().
+     *
+     * @var string[]
+     */
+    private array $unresolvedSpanIds = [];
+
     public function __construct()
     {
         $this->fontsDir = storage_path('app/fonts');
@@ -102,6 +113,7 @@ class PdfTranslationService
         // CONTRACT PATH (default): build+persist the per-element contract and render
         // from it. Fall back to the flat path only if no contract items are available.
         $usedContract = false;
+        $hadUnresolvedSpans = false;
         try {
             $contractItems = $this->buildEditionContract($book, $translation);
         } catch (\Throwable $e) {
@@ -112,6 +124,8 @@ class PdfTranslationService
 
         if (!empty($contractItems)) {
             $itemTranslations = $this->resolveItemTranslations($contractItems, $translation);
+            // FIX C: any span left blank on a translated page must block publication.
+            $hadUnresolvedSpans = !empty($this->getUnresolvedSpanIds());
             $translationsData = $this->buildIdMappedTranslationsJson($contractItems, $itemTranslations);
             $usedContract = !empty($translationsData['items']);
         }
@@ -197,6 +211,29 @@ class PdfTranslationService
         // becomes NEEDS_LAYOUT_REVIEW so it CANNOT be silently approved/published.
         $publishable = $report['publishable'] ?? true;
         $renderStatus = $report['render_status'] ?? ($publishable ? 'READY_FOR_REVIEW' : 'NEEDS_LAYOUT_REVIEW');
+
+        // FIX C: even if the engine's own gate passed, unresolved spans (rendered
+        // blank to avoid an English leak) mean the edition is incomplete and must be
+        // reviewed before it can be published. Fail closed.
+        if ($hadUnresolvedSpans) {
+            $publishable = false;
+            $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+            $unresolvedIds = $this->getUnresolvedSpanIds();
+            Log::warning("Edition has unresolved translation spans rendered blank "
+                . "(fix C, English-leak guard) — routing to review", [
+                    'book' => $book->id,
+                    'language' => $translation->language_code,
+                    'unresolved_span_ids' => $unresolvedIds,
+                    'count' => count($unresolvedIds),
+                ]);
+            if (is_array($report)) {
+                $report['publishable'] = false;
+                $report['render_status'] = 'NEEDS_LAYOUT_REVIEW';
+                $report['unresolved_span_ids'] = $unresolvedIds;
+                $report['flags']['UNRESOLVED_TRANSLATION_SPANS'] = $unresolvedIds;
+            }
+        }
+
         $translation->forceFill([
             'render_status' => $renderStatus,
             'qa_report' => $report ? json_encode($report, JSON_UNESCAPED_UNICODE) : null,
@@ -374,9 +411,20 @@ class PdfTranslationService
      *
      * Priority per item (highest first):
      *   1. a per-region override edited in the admin overlay (layout_overrides[id]);
-     *   2. the current per-page translated_text (what the admin edits in the editor);
-     *   3. the item's source_text (so an untranslated element still renders in place
-     *      rather than vanishing).
+     *   2. FIX B: the machine per-element translation for this id (item_translations[id]);
+     *   3. this span's segment of the current per-page translated_text (reading order);
+     *   4. single-span page: the whole per-page translated_text;
+     *   5. FIX C: blank + route-to-review when the page has text but this span has none
+     *      (never leak the English source_text);
+     *   6. the item's source_text ONLY when the page is genuinely untranslated.
+     *
+     * FIX C (English-leak guard, 2026-08-30): step 4 no longer falls back to the
+     * English source_text when the page HAS translated text but this span ran out of
+     * segments. Doing so silently shipped English titles/words on multi-span pages
+     * (back cover p16, WOORDE p15). Instead such a span renders BLANK and its id is
+     * recorded on $unresolvedSpanIds so the edition is routed to NEEDS_LAYOUT_REVIEW.
+     * The source_text fallback is retained ONLY for genuinely untranslated pages
+     * (no translated_text at all), where showing the source in place is legitimate.
      *
      * @param array       $contractItems the persisted contract item list
      * @param Translation $translation
@@ -384,7 +432,14 @@ class PdfTranslationService
      */
     public function resolveItemTranslations(array $contractItems, Translation $translation): array
     {
+        // Reset per-resolve so a re-run doesn't carry stale unresolved ids.
+        $this->unresolvedSpanIds = [];
+
         $overrides = $translation->layout_overrides ?? [];
+        // FIX B: machine per-element translations keyed by stable id. These carry each
+        // span's OWN translation so we place it directly instead of splitting a flat
+        // per-page blob (the lossy path that leaked English). Human overrides still win.
+        $itemTranslations = $translation->item_translations ?? [];
         $pageText = $translation->translatedPages()
             ->pluck('translated_text', 'page_number')
             ->toArray();
@@ -413,6 +468,7 @@ class PdfTranslationService
             usort($entries, fn ($a, $b) => $a['order'] <=> $b['order']);
 
             $full = ($page !== null && isset($pageText[$page])) ? (string) $pageText[$page] : null;
+            $pageHasText = $full !== null && trim($full) !== '';
             $segments = $this->splitPageTextIntoSegments($full, count($entries));
 
             $i = 0;
@@ -427,7 +483,16 @@ class PdfTranslationService
                     continue;
                 }
 
-                // 2) this span's OWN segment of the page text (1:1 by reading order).
+                // 2) FIX B: machine per-element translation for this exact id. Placing
+                // the span's OWN translation avoids the flat-blob re-split entirely, so
+                // multi-span pages (back cover, WOORDE) get real text — not blank/leak.
+                if (isset($itemTranslations[$id]) && trim((string) $itemTranslations[$id]) !== '') {
+                    $map[$id] = (string) $itemTranslations[$id];
+                    $i++;
+                    continue;
+                }
+
+                // 3) this span's OWN segment of the page text (1:1 by reading order).
                 if ($segments !== null && array_key_exists($i, $segments)) {
                     $seg = trim($segments[$i]);
                     if ($seg !== '') {
@@ -437,20 +502,43 @@ class PdfTranslationService
                     }
                 }
 
-                // 3) single-span page: give it the whole page text (already-correct case).
-                if (count($entries) === 1 && $full !== null && trim($full) !== '') {
+                // 4) single-span page: give it the whole page text (already-correct case).
+                if (count($entries) === 1 && $pageHasText) {
                     $map[$id] = $full;
                     $i++;
                     continue;
                 }
 
-                // 4) fallback: render the source in place rather than duplicating the blob.
+                // 5) FIX C: the page HAS translated text but this span has no segment.
+                // Do NOT leak English by falling back to source_text — render BLANK and
+                // flag the edition for review so English never ships silently.
+                if ($pageHasText) {
+                    $map[$id] = '';
+                    $this->unresolvedSpanIds[] = $id;
+                    $i++;
+                    continue;
+                }
+
+                // 6) genuinely untranslated page (no translated_text at all): render the
+                // source in place rather than vanishing. This is legitimate, not a leak.
                 $map[$id] = (string) ($item['source_text'] ?? '');
                 $i++;
             }
         }
 
         return $map;
+    }
+
+    /**
+     * Stable IDs left unresolved by the most recent resolveItemTranslations() call:
+     * spans on a translated page that had no matching segment and were rendered blank
+     * (fix C). A non-empty list means the edition must NOT be silently published.
+     *
+     * @return string[]
+     */
+    public function getUnresolvedSpanIds(): array
+    {
+        return $this->unresolvedSpanIds;
     }
 
     /**

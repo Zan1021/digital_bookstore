@@ -706,6 +706,7 @@ PROMPT;
         $this->persistGlossaryToMemory($book, $languageCode);
 
         // Process each page using its manifest
+        $itemTranslations = []; // stable id => translated string (fix B: per-id store)
         foreach ($manifest['pages'] as $pageManifest) {
             $pageNum = $pageManifest['page_number'];
             $pageType = $pageManifest['page_type'] ?? 'unknown';
@@ -734,6 +735,17 @@ PROMPT;
                 $translatableItems, $pageType, $languageCode, $languageName, $pageNum
             );
 
+            // FIX B (durable): keep the per-ID translations so the render resolver can
+            // place each element from its OWN translation instead of re-splitting a flat
+            // blob. This is what stops the English leak at the source rather than masking
+            // it with blank-and-review at render time.
+            foreach ($translatedItems as $ti) {
+                $tid = $ti['id'] ?? null;
+                if ($tid !== null && isset($ti['translation']) && trim((string) $ti['translation']) !== '') {
+                    $itemTranslations[$tid] = (string) $ti['translation'];
+                }
+            }
+
             // Store as legacy format for backward compatibility with both renderers
             // The V8 renderer can also access the manifest items directly
             $translatedText = $this->manifestItemsToLegacyText($translatedItems, $pageType);
@@ -753,6 +765,12 @@ PROMPT;
                 ]
             );
         }
+
+        // FIX B: persist the per-ID translations on the edition so the render resolver
+        // consumes them directly (priority over the flat per-page text split).
+        $translation->forceFill([
+            'item_translations' => $itemTranslations,
+        ])->save();
 
         $translation->update(['status' => 'draft']);
         return $translation->fresh();
