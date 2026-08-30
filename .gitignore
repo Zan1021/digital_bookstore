@@ -31,3 +31,7 @@ Thumbs.db
 /database/database.sqlite
 /scripts/_diag_*.py
 /scripts/_verify_*.png
+
+# Python bytecode / caches (regenerated on run; must not be tracked)
+__pycache__/
+*.pyc
