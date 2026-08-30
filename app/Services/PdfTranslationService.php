@@ -389,19 +389,129 @@ class PdfTranslationService
             ->pluck('translated_text', 'page_number')
             ->toArray();
 
-        $map = [];
-        foreach ($contractItems as $item) {
+        // Group items by page, preserving reading order. The previous implementation
+        // assigned the ENTIRE page's translated_text to EVERY span on the page, so a
+        // page with N spans rendered the same blob N times (overlapping / smeared).
+        // Instead we split the page's translated text into segments and hand each
+        // page span its OWN segment in reading order (1:1). Single-span pages keep the
+        // whole-page text (the already-correct case). Mismatched counts fall back to
+        // the span's source_text so an element still renders IN PLACE rather than
+        // duplicating the blob — the render gate then flags any residual for review.
+        $byPage = [];
+        foreach ($contractItems as $order => $item) {
             $id = $item['id'] ?? null;
             if ($id === null) {
                 continue;
             }
             $page = $item['page_number'] ?? null;
-            $map[$id] = $overrides[$id]['translation']
-                ?? ($page !== null ? ($pageText[$page] ?? null) : null)
-                ?? ($item['source_text'] ?? '');
+            $byPage[$page][] = ['order' => $item['reading_order'] ?? $order, 'item' => $item];
+        }
+
+        $map = [];
+        foreach ($byPage as $page => $entries) {
+            // Reading order within the page so segment[i] lands on span[i].
+            usort($entries, fn ($a, $b) => $a['order'] <=> $b['order']);
+
+            $full = ($page !== null && isset($pageText[$page])) ? (string) $pageText[$page] : null;
+            $segments = $this->splitPageTextIntoSegments($full, count($entries));
+
+            $i = 0;
+            foreach ($entries as $entry) {
+                $item = $entry['item'];
+                $id = $item['id'];
+
+                // 1) explicit per-region override always wins.
+                if (isset($overrides[$id]['translation'])) {
+                    $map[$id] = (string) $overrides[$id]['translation'];
+                    $i++;
+                    continue;
+                }
+
+                // 2) this span's OWN segment of the page text (1:1 by reading order).
+                if ($segments !== null && array_key_exists($i, $segments)) {
+                    $seg = trim($segments[$i]);
+                    if ($seg !== '') {
+                        $map[$id] = $seg;
+                        $i++;
+                        continue;
+                    }
+                }
+
+                // 3) single-span page: give it the whole page text (already-correct case).
+                if (count($entries) === 1 && $full !== null && trim($full) !== '') {
+                    $map[$id] = $full;
+                    $i++;
+                    continue;
+                }
+
+                // 4) fallback: render the source in place rather than duplicating the blob.
+                $map[$id] = (string) ($item['source_text'] ?? '');
+                $i++;
+            }
         }
 
         return $map;
+    }
+
+    /**
+     * Split a page's flat translated_text into one segment per content span, in
+     * reading order. The translator emits page text with each logical unit on its
+     * own line (WOORDE lists, multi-caption pages, back-cover title lists), so a
+     * newline split is the natural per-span boundary.
+     *
+     * Returns a 0-indexed array of exactly $spanCount segments when the line count
+     * matches (clean 1:1), or when it can be coalesced/padded to fit; returns null
+     * when there is nothing to split (caller then uses its fallbacks). Never returns
+     * the whole blob duplicated across slots.
+     *
+     * @return array<int,string>|null
+     */
+    private function splitPageTextIntoSegments(?string $text, int $spanCount): ?array
+    {
+        if ($text === null || $spanCount < 1) {
+            return null;
+        }
+        $normalized = str_replace(["\r\n", "\r"], "\n", $text);
+        $lines = array_values(array_filter(
+            array_map('trim', explode("\n", $normalized)),
+            fn ($l) => $l !== ''
+        ));
+
+        if (empty($lines)) {
+            return null;
+        }
+
+        // Exact match: one line per span.
+        if (count($lines) === $spanCount) {
+            return $lines;
+        }
+
+        // Single span: caller handles the whole-page case; nothing to split.
+        if ($spanCount === 1) {
+            return null;
+        }
+
+        // More lines than spans: distribute lines across spans as evenly as possible
+        // (contiguous groups, preserving reading order) so no span gets the whole blob
+        // and none is left empty.
+        if (count($lines) > $spanCount) {
+            $segments = array_fill(0, $spanCount, []);
+            $per = (int) ceil(count($lines) / $spanCount);
+            foreach ($lines as $idx => $line) {
+                $slot = min((int) floor($idx / $per), $spanCount - 1);
+                $segments[$slot][] = $line;
+            }
+            return array_map(fn ($group) => implode("\n", $group), $segments);
+        }
+
+        // Fewer lines than spans: assign the available lines to the first spans in
+        // reading order; remaining spans get '' so the caller falls back to source_text
+        // (never a duplicated blob).
+        $segments = array_fill(0, $spanCount, '');
+        foreach ($lines as $idx => $line) {
+            $segments[$idx] = $line;
+        }
+        return $segments;
     }
 
     /**

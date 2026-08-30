@@ -266,25 +266,43 @@ def validate_raster(source_pdf, translated_pdf, page_index, text_bboxes=None, dp
     return {"ok": ratio <= 0.02, "diff_ratio": round(ratio, 4)}
 
 
-def _rendered_region_geometry(pdf_path, page_number, region_bbox):
+def _extract_words_by_page(pdf_path):
+    """
+    Open the rendered PDF ONCE and return {page_number(1-based): words_list}.
+    Previously each region measurement re-opened and re-parsed the whole PDF
+    (O(regions x doc_size)); caching the per-page words here makes the diagnostic
+    manifest O(doc_size). Book-agnostic. Returns {} on failure (callers degrade
+    gracefully to empty geometry).
+    """
+    words_by_page = {}
+    try:
+        doc = pymupdf.open(pdf_path)
+        try:
+            for idx in range(len(doc)):
+                try:
+                    words_by_page[idx + 1] = doc[idx].get_text("words")
+                except Exception:
+                    words_by_page[idx + 1] = []
+        finally:
+            doc.close()
+    except Exception:
+        return {}
+    return words_by_page
+
+
+def _rendered_region_geometry(page_words, region_bbox):
     """
     Measure rendered geometry inside a region's bounds on the output PDF:
     returns (rendered_line_count, rendered_glyph_bounds, clipped_glyph_count).
     A glyph is 'clipped' when its rendered bounds fall outside the region bounds.
     Book-agnostic; derived from the actual rendered page.
-    """
-    try:
-        doc = pymupdf.open(pdf_path)
-        if page_number - 1 >= len(doc):
-            doc.close()
-            return 0, None, 0
-        page = doc[page_number - 1]
-        words = page.get_text("words")
-        doc.close()
-    except Exception:
-        return 0, None, 0
 
-    if not region_bbox:
+    `page_words` is the pre-extracted word list for this page (from
+    _extract_words_by_page) so the PDF is opened once per document, not once per
+    region.
+    """
+    words = page_words or []
+    if not region_bbox or not words:
         return 0, None, 0
     rx0, ry0, rx1, ry1 = region_bbox
     inside = []
@@ -323,6 +341,9 @@ def build_diagnostic_manifest(pdf_path, report):
     struct_gate = report.get("structure_gate", {}).get("pages", {})
     typo = report.get("typography", {}).get("pages", {}) if isinstance(report.get("typography"), dict) else {}
     font_res = report.get("font_resolution", {})
+    # Open the rendered PDF ONCE and cache per-page words. This replaces the previous
+    # per-region re-open of the whole PDF (the dominant cost in full-edition renders).
+    words_by_page = _extract_words_by_page(pdf_path)
     manifest = {
         "render_engine_version": report.get("version", "v8"),
         "font_resolved": font_res.get("resolved_family"),
@@ -373,7 +394,7 @@ def build_diagnostic_manifest(pdf_path, report):
                 src_bounds = r.get("source_bounds")
                 safe_bounds = r.get("safe_inner_bounds")
                 # visual scale ratio: rendered vs source height (approx via bounds).
-                rline, rglyph, clipped = _rendered_region_geometry(pdf_path, pn, safe_bounds or src_bounds)
+                rline, rglyph, clipped = _rendered_region_geometry(words_by_page.get(pn, []), safe_bounds or src_bounds)
                 sizes = [u.get("nominal_size_pt") for u in r_units if u.get("nominal_size_pt")]
                 nominal = (sum(sizes) / len(sizes)) if sizes else None
                 visual_scale = None
