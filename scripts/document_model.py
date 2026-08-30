@@ -158,6 +158,15 @@ class TextUnit:
     # Geometry
     rotation_deg: float = 0.0
     text_matrix: Optional[list] = None
+    # Structure-aware placement (spec: v8-structure-aware-engine, Req 1/3). All
+    # optional so existing construction is unaffected; populated during scene build
+    # for table/vocab pages and any element with a resolvable cell.
+    cell_box: Optional[tuple] = None      # true render box (spans merged columns)
+    align_h: Optional[str] = None         # "left" | "center" | "right" (from source)
+    align_v: Optional[str] = None         # "top" | "middle" | "bottom" (from source)
+    peer_group_id: Optional[str] = None   # elements that must share a size
+    column_span: int = 1                  # >1 for merged/spanning header cells
+    is_merged: bool = False               # True for a merged (spanning) header cell
     # Quality
     confidence: float = 1.0
     extraction_source: str = "native"  # "native", "ocr", "inferred"
@@ -323,7 +332,7 @@ class DocumentScene:
         for page in self.pages:
             for unit in page.get_translatable_units():
                 region = page.region_by_id(unit.parent_region_id)
-                items.append({
+                item = {
                     "id": unit.id,
                     "source_text": unit.source_text,
                     "semantic_role": unit.semantic_role,
@@ -336,8 +345,23 @@ class DocumentScene:
                         "max_width_pt": unit.width if unit.width > 0 else None,
                         "style_family": unit.style_id,
                     },
-                })
-        
+                }
+                # Structure-aware placement fields (spec Req 2.1/3): only emitted when
+                # populated (table/vocab pages), so non-structured items stay compact.
+                if getattr(unit, "cell_box", None) is not None:
+                    item["cell_box"] = list(unit.cell_box)
+                if getattr(unit, "align_h", None):
+                    item["align_h"] = unit.align_h
+                if getattr(unit, "align_v", None):
+                    item["align_v"] = unit.align_v
+                if getattr(unit, "peer_group_id", None):
+                    item["peer_group_id"] = unit.peer_group_id
+                if getattr(unit, "column_span", 1) and unit.column_span != 1:
+                    item["column_span"] = unit.column_span
+                if getattr(unit, "is_merged", False):
+                    item["is_merged"] = True
+                items.append(item)
+
         return {
             "document_id": self.document_id,
             "source_language": self.source_language,
@@ -458,6 +482,221 @@ def build_document_scene(pdf_path: str, document_id: str = None) -> DocumentScen
     return scene
 
 
+def _merge_continuation_spans(spans, page_type):
+    """
+    Merge consecutive CONTINUATION lines into one logical span so a multi-line entry
+    (phonics rule, wrapped sentence) becomes ONE unit — not one-per-line. Book-agnostic.
+
+    A span B is a continuation of the preceding span A (in reading order) when ALL of:
+      - both are body text (not page numbers, not ALL-CAPS headings/display),
+      - same column: A and B left edges align within a tolerance derived from A's height,
+      - vertically consecutive downward: 0 < top(B) - bottom(A) <= ~0.9 * lineHeight
+        (tight leading = same block; a big blank gap = new entry),
+      - A does NOT already look "terminated": A does not end a self-contained short
+        list word. We treat A as continuing when A ends without sentence-final
+        punctuation AND (A has >1 word OR ends with ':' or '-' or a comma), which is
+        the shape of a wrapped rule/sentence rather than a single vocabulary word.
+
+    Single-word vocabulary columns (one token per line, each its own entry) are left
+    untouched because a lone word is self-contained (fails the ">1 word / open
+    punctuation" test), so we never over-merge them.
+    """
+    import re as _re
+    if not spans:
+        return spans
+
+    def _is_body(s):
+        if s.get("is_page_number"):
+            return False
+        t = s.get("text_stripped", "")
+        letters = [c for c in t if c.isalpha()]
+        if letters and all(c.isupper() for c in letters) and len(t) < 30:
+            return False  # ALL-CAPS heading/display line
+        return bool(t)
+
+    def _continues_into(a_text, b_text):
+        """Conservative, book-agnostic continuation test. B continues A only when the
+        join is UNAMBIGUOUS prose wrap, not two stacked short entries:
+          - A does not end with terminal/entry punctuation (. ! ? , : ; -) — a comma
+            or colon ends a list entry, so it is NOT a continuation; and
+          - A is multi-word AND B is multi-word — a wrapped clause has running words on
+            BOTH lines. Two single words stacked (a vocabulary column) are NOT merged; and
+          - B starts lowercase (a wrapped clause continues in lower case).
+        Merges true wraps ("3 letter consonant blends at the" + "beginning of words:")
+        while keeping single-word columns and distinct rule lines separate."""
+        a = (a_text or "").strip()
+        b = (b_text or "").strip()
+        if not a or not b:
+            return False
+        if a[-1] in ".!?,:;-–—":
+            return False
+        if len(a.split()) < 2 or len(b.split()) < 2:
+            return False
+        # A line that itself contains an internal " - "/" – " delimiter is a
+        # self-contained "<pattern> - <examples>" entry (e.g. "ai - plain, rain"),
+        # NOT a continuation. Neither A nor B may be such an entry to merge.
+        import re as _re2
+        delim = _re2.compile(r"\s[-–—]\s")
+        if delim.search(a) or delim.search(b):
+            return False
+        return b.lstrip()[:1].islower()
+
+    # Process column-by-column: cluster body spans by left-x so a continuation line
+    # is compared against the line directly ABOVE IT IN THE SAME COLUMN (not against
+    # an interleaved neighbour column at a similar y). Non-body spans pass through.
+    body = [s for s in spans if _is_body(s)]
+    non_body = [s for s in spans if not _is_body(s)]
+
+    # Cluster by left edge (column). Tolerance scales with typical text height.
+    cols = []
+    for s in sorted(body, key=lambda z: z["bbox"][0]):
+        placed = False
+        for c in cols:
+            if abs(s["bbox"][0] - c["x"]) <= max(6.0, (s["bbox"][3] - s["bbox"][1]) * 0.9):
+                c["spans"].append(s)
+                c["x"] = (c["x"] * (len(c["spans"]) - 1) + s["bbox"][0]) / len(c["spans"])
+                placed = True
+                break
+        if not placed:
+            cols.append({"x": s["bbox"][0], "spans": [s]})
+
+    merged_body = []
+    for c in cols:
+        col_spans = sorted(c["spans"], key=lambda z: z["bbox"][1])  # top -> bottom
+        acc = None
+        for s in col_spans:
+            if acc is not None:
+                a_h = max(1.0, acc["bbox"][3] - acc["bbox"][1])
+                vgap = s["bbox"][1] - acc["bbox"][3]
+                line_h = max(a_h, s["bbox"][3] - s["bbox"][1])
+                consecutive = -0.3 * line_h <= vgap <= 0.9 * line_h
+                if consecutive and _continues_into(acc["text_stripped"], s["text_stripped"]):
+                    acc["text_stripped"] = (acc["text_stripped"].rstrip() + " " +
+                                            s["text_stripped"].lstrip()).strip()
+                    acc["text"] = acc["text_stripped"]
+                    acc["bbox"] = [min(acc["bbox"][0], s["bbox"][0]),
+                                   min(acc["bbox"][1], s["bbox"][1]),
+                                   max(acc["bbox"][2], s["bbox"][2]),
+                                   max(acc["bbox"][3], s["bbox"][3])]
+                    # Keep the FIRST line's origin (the merged unit's anchor).
+                    continue
+                merged_body.append(acc)
+            acc = s
+        if acc is not None:
+            merged_body.append(acc)
+
+    # Restore reading order by (y, x) so downstream reading_order is sensible.
+    out = sorted(non_body + merged_body, key=lambda z: (round(z["bbox"][1] / 2), z["bbox"][0]))
+    return out
+
+
+def _infer_align_h(source_box, cell_box, tol_frac=0.12):
+    """Infer horizontal alignment of source text within its cell from glyph geometry
+    (spec Req 3.2: mirror the source, don't impose). Book-agnostic."""
+    if not source_box or not cell_box:
+        return "left"
+    left_gap = max(0.0, source_box[0] - cell_box[0])
+    right_gap = max(0.0, cell_box[2] - source_box[2])
+    total = left_gap + right_gap
+    if total <= 1.0:
+        return "center"
+    diff = abs(left_gap - right_gap) / max(1.0, cell_box[2] - cell_box[0])
+    if diff < tol_frac:
+        return "center"
+    return "left" if left_gap < right_gap else "right"
+
+
+def _infer_align_v(source_box, cell_box, tol_frac=0.15):
+    """Infer vertical alignment of source text within its cell from glyph geometry.
+    Book-agnostic: compares the top gap vs bottom gap inside the cell box."""
+    if not source_box or not cell_box:
+        return "top"
+    top_gap = max(0.0, source_box[1] - cell_box[1])
+    bot_gap = max(0.0, cell_box[3] - source_box[3])
+    total = top_gap + bot_gap
+    if total <= 1.0:
+        return "middle"
+    diff = abs(top_gap - bot_gap) / max(1.0, cell_box[3] - cell_box[1])
+    if diff < tol_frac:
+        return "middle"
+    return "top" if top_gap < bot_gap else "bottom"
+
+
+def _attach_table_structure(page, page_num, spans, text_units):
+    """
+    Populate cell_box / align_h / align_v / column_span / is_merged / peer_group_id on
+    the TextUnits of a table/vocabulary page, using the detected grid + merged header
+    cells (spec Req 1/3). Book-agnostic: everything derived from grid geometry + source
+    glyph positions. Silently no-ops if no grid is present.
+    """
+    try:
+        from universal_containers import detect_table_grid, detect_header_cells
+    except Exception:
+        return
+    grid = detect_table_grid(page)
+    if grid is None or not getattr(grid, "columns", None):
+        return
+
+    # Header cells (incl. merged) mapped from the header source spans.
+    header_spans = [s for s in spans
+                    if s.get("text_stripped", "") and _classify_span_role(s, "vocabulary") in
+                    ("heading", "table_header")]
+    hdr = detect_header_cells(grid, header_spans)
+    header_cells = hdr.get("cells", [])
+    header_row_box = hdr.get("header_row_box")
+
+    def _unit_center(u):
+        b = u.bbox
+        return ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+
+    for u in text_units:
+        cx, cy = _unit_center(u)
+        role = u.semantic_role or ""
+        is_header_like = role in ("heading", "table_header") or (
+            header_row_box and header_row_box[1] - 2 <= cy <= header_row_box[3] + 2)
+
+        if is_header_like and header_cells:
+            # Assign to the header cell whose box contains this unit's center-x.
+            cell = None
+            for c in header_cells:
+                cb = c["cell_box"]
+                if cb[0] - 2 <= cx <= cb[2] + 2:
+                    cell = c
+                    break
+            if cell:
+                u.cell_box = tuple(cell["cell_box"])
+                u.column_span = cell["column_span"]
+                u.is_merged = cell["column_span"] > 1
+                u.align_h = "center"   # table headers are centered in their cell
+                u.align_v = "middle"
+                u.peer_group_id = f"p{page_num}-headers"
+                continue
+
+        # Content word cell: bound by the column that contains the unit center-x.
+        col = None
+        for i, (cs, ce) in enumerate(grid.columns):
+            if cs - 2 <= cx <= ce + 2:
+                col = (i, cs, ce)
+                break
+        if col is not None:
+            i, cs, ce = col
+            # Vertical extent: the row band containing the unit (fallback: unit height).
+            cy0, cy1 = u.bbox[1], u.bbox[3]
+            for (rs, re) in grid.rows:
+                if rs - 2 <= cy <= re + 2:
+                    cy0, cy1 = rs, re
+                    break
+            u.cell_box = (cs, cy0, ce, cy1)
+            u.column_span = 1
+            u.align_h = _infer_align_h(u.bbox, u.cell_box)
+            u.align_v = _infer_align_v(u.bbox, u.cell_box) if (cy1 - cy0) > u.bbox[3] - u.bbox[1] + 2 else "top"
+            u.peer_group_id = f"p{page_num}-col{i}"
+
+
+def _infer_align_h_public(source_box, cell_box):
+    return _infer_align_h(source_box, cell_box)
+
+
 def _build_page_scene(page, page_num: int, total_pages: int) -> PageScene:
     """Build a PageScene from a pymupdf page."""
     import pymupdf
@@ -470,9 +709,23 @@ def _build_page_scene(page, page_num: int, total_pages: int) -> PageScene:
     
     # Extract spans
     spans = extract_page_spans(page, page_num)
-    
-    # Classify page type
+
+    # Classify page type (needed before the logical-unit merge decision).
     page_type = classify_page(spans, page_num, total_pages)
+
+    # LOGICAL-UNIT MERGE (§8): the PDF stores each physical LINE as its own span, so a
+    # multi-line logical entry (e.g. a phonics rule "3 letter consonant blends at the
+    # beginning of words: str - str-eam", or a sentence that wraps) arrives as several
+    # spans and would become several units — splitting one entry into many and mis-
+    # grouping neighbours. Merge consecutive CONTINUATION spans within a column into a
+    # single logical span so a unit reflects the logical entry, not the line break.
+    # Book-agnostic: pure geometry + content-shape heuristics, no per-title constants.
+    spans = _merge_continuation_spans(spans, page_type)
+    page_type = classify_page(spans, page_num, total_pages)
+
+    # Flag a document end-marker (e.g. "The End"/"Die Einde") as its own element so it
+    # is not glued to the last sentence (spec Req 1.5). Book-agnostic.
+    spans = _mark_end_markers(spans, page_type)
     
     # Page geometry
     page_scene = PageScene(
@@ -583,7 +836,15 @@ def _build_page_scene(page, page_num: int, total_pages: int) -> PageScene:
     
     # Detect containers and assign design_container_bbox to regions
     _assign_containers(page, page_scene)
-    
+
+    # Structure-aware placement fields (spec Req 1/3): attach cell_box / alignment /
+    # peer groups / merged-cell info to units on table/vocabulary pages.
+    if page_type == "vocabulary":
+        try:
+            _attach_table_structure(page, page_num, spans, page_scene.text_units)
+        except Exception:
+            pass
+
     return page_scene
 
 
@@ -687,11 +948,60 @@ def _get_style_size(unit, page_scene) -> float:
     return style.nominal_size_pt if style else 12.0
 
 
+def _mark_end_markers(spans, page_type):
+    """
+    Flag a document/story END-MARKER (e.g. "The End" / "Die Einde") so it becomes its
+    OWN element instead of being glued to the final sentence. Book-agnostic and
+    language-agnostic: detected purely by structure —
+      - only on story/prose-type pages,
+      - the LAST content line (by y) on the page,
+      - SHORT (<= 4 words) and not ending with sentence-continuation punctuation,
+      - SEPARATED from the preceding text by a vertical gap noticeably larger than the
+        page's typical line spacing (an isolated closing line).
+    Sets span['is_end_marker'] = True on the matching span. No hardcoded phrases.
+    """
+    if page_type not in ("story",):
+        return spans
+    body = [s for s in spans if not s.get("is_page_number")
+            and s.get("text_stripped", "").strip()]
+    if len(body) < 2:
+        return spans
+    body_sorted = sorted(body, key=lambda s: s["bbox"][1])
+    last = body_sorted[-1]
+    prev = body_sorted[-2]
+
+    words = last["text_stripped"].split()
+    if len(words) > 4:
+        return spans
+    prev_text = prev["text_stripped"].rstrip()
+    # Primary signal (robust, book-agnostic): the previous line ENDS a sentence
+    # (terminal punctuation) and this trailing line is a short, fresh phrase — the
+    # shape of a closing marker ("...morning." / "The End").
+    prev_ends_sentence = bool(prev_text) and prev_text[-1] in ".!?"
+    # Secondary signal: this line is visually separated from the text above.
+    gaps = []
+    for a, b in zip(body_sorted, body_sorted[1:]):
+        gaps.append(b["bbox"][1] - a["bbox"][3])
+    gaps_sorted = sorted(g for g in gaps if g > -50)
+    typical = gaps_sorted[len(gaps_sorted) // 2] if gaps_sorted else 0.0
+    last_gap = last["bbox"][1] - prev["bbox"][3]
+    separated = last_gap > typical + 3.0
+    # A short trailing line after a completed sentence is an end-marker; separation
+    # reinforces but is not required (large-leading books have tiny inter-line gaps).
+    if prev_ends_sentence and (separated or len(words) <= 3):
+        last["is_end_marker"] = True
+    return spans
+
+
 def _classify_span_role(span: dict, page_type: str) -> str:
     """Classify the semantic role of a span based on its characteristics."""
     if span.get("is_page_number"):
         return "page_number"
-    
+    # End-marker (e.g. "The End" / "Die Einde") is flagged by a page-level pass
+    # (_mark_end_markers) because it needs page context (last, short, isolated).
+    if span.get("is_end_marker"):
+        return "end_marker"
+
     font_size = span.get("font_size", 12)
     text = span.get("text_stripped", "")
     

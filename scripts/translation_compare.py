@@ -228,6 +228,140 @@ def _looks_like_proper_noun(s):
     return len(toks) == 1 and toks[0][:1].isupper()
 
 
+def _pick_canonical(translations_by_page):
+    """
+    Choose ONE canonical translation from a {page_number: translation} map of the
+    SAME source string translated on multiple pages. Book-agnostic, no config:
+
+      1. Majority vote — the variant appearing on the most pages wins (greatest
+         agreement across the book is the most trustworthy signal).
+      2. Tie-break — prefer the variant on the EARLIEST page (the cover/front
+         matter carries the authoritative title).
+
+    Near-duplicates are grouped by fuzzy similarity so trivial spacing/case
+    differences don't split the vote. Returns the chosen display string.
+    """
+    if not translations_by_page:
+        return None
+    # Group pages by fuzzy-equal translation.
+    groups = []  # list of {"key": norm, "display": str, "pages": [..]}
+    for pn in sorted(translations_by_page):
+        disp = translations_by_page[pn]
+        key = _norm_key(disp)
+        placed = False
+        for g in groups:
+            if difflib.SequenceMatcher(None, key, g["key"]).ratio() >= 0.92:
+                g["pages"].append(pn)
+                placed = True
+                break
+        if not placed:
+            groups.append({"key": key, "display": disp, "pages": [pn]})
+    # Majority vote; tie-break by earliest page.
+    groups.sort(key=lambda g: (-len(g["pages"]), min(g["pages"])))
+    return groups[0]["display"]
+
+
+def reconcile_repeated_translations(input_pdf, translations, source_language="en",
+                                    target_language="af"):
+    """
+    BOOK-AGNOSTIC auto-fix for the "same source string translated N different ways"
+    defect (e.g. a title rendered 'n Plek Vol Pret / 'n Plek van Pret / 'n Pretplek
+    across cover, imprint and back-cover). Instead of asking a human to pick, we:
+
+      - discover the title the same way the consistency check does (largest cover
+        display line — no hardcoding),
+      - find every page whose translation contains a divergent variant,
+      - pick ONE canonical variant by majority vote (tie-break: earliest page),
+      - rewrite the other pages' translated text so the variant is replaced by the
+        canonical one.
+
+    Works for ANY book: nothing here references a specific title, page or language.
+    Returns (updated_page_text: {page_number: new_text}, changes: [...]). The caller
+    persists updated_page_text back to translated_pages, then re-renders.
+    """
+    rep = compare(input_pdf, translations, source_language, target_language)
+    tmap = _target_by_page(translations)
+    updated = {}
+    changes = []
+
+    consistency = rep.get("checks", {}).get("consistency", {})
+    tt = consistency.get("translations_by_page", {})
+    # tt keys may be ints or strings depending on JSON round-tripping.
+    tt = {int(k): v for k, v in tt.items()}
+    if len(tt) < 2:
+        return updated, changes  # nothing repeated to reconcile
+
+    canonical = _pick_canonical(tt)
+    if not canonical:
+        return updated, changes
+
+    canon_key = _norm_key(canonical)
+    # The set of variant strings we treat as "the title translated differently".
+    # Only SHORT, title-like variants qualify — a page where the title is merely one
+    # entry inside a longer list (e.g. a back-cover series index) must NOT have its
+    # whole text rewritten. We detect that by length: a genuine title variant is a
+    # short line, not a multi-entry paragraph.
+    def _is_title_like(v):
+        # A title line is short (few words) and not a multi-item list.
+        words = _norm(v).split()
+        has_list = bool(re.search(r"\d+\s*[-–]\s*\S", v))  # "1 - X 2 - Y"
+        return len(words) <= 6 and not has_list
+
+    for pn, variant in tt.items():
+        if _norm_key(variant) == canon_key:
+            continue  # already canonical
+        if not _is_title_like(variant):
+            # Title appears only as a sub-string of a longer structure (series list).
+            # Do a SURGICAL swap of the specific divergent title phrase, if we can
+            # find one; never rewrite the whole page.
+            page_text = tmap.get(pn, "")
+            swapped, applied = _swap_title_phrase(page_text, canonical, tt, canon_key)
+            if applied:
+                updated[pn] = swapped
+                changes.append({"page": pn, "from": applied, "to": canonical,
+                                "context": "in-list"})
+            continue
+        page_text = tmap.get(pn, "")
+        if page_text and variant in page_text:
+            new_text = page_text.replace(variant, canonical)
+        else:
+            pattern = re.compile(re.escape(_norm(variant)), re.IGNORECASE)
+            new_text, n = pattern.subn(canonical, _norm(page_text))
+            if n == 0:
+                continue
+        updated[pn] = new_text
+        changes.append({"page": pn, "from": variant, "to": canonical})
+
+    return updated, changes
+
+
+def _swap_title_phrase(page_text, canonical, translations_by_page, canon_key):
+    """
+    Replace a divergent title phrase that appears INSIDE a longer text (e.g. a
+    back-cover series list) with the canonical title, WITHOUT touching the rest of
+    the text. We look for any known short title-variant substring in the page and
+    swap just that span. Returns (new_text, matched_variant_or_None).
+    Book-agnostic: candidates come from the discovered per-page title variants.
+    """
+    if not page_text:
+        return page_text, None
+    # Build the set of short title variants seen anywhere (excluding canonical).
+    variants = set()
+    for v in translations_by_page.values():
+        vv = _norm(v)
+        if _norm_key(vv) == canon_key:
+            continue
+        if len(vv.split()) <= 6 and not re.search(r"\d+\s*[-–]\s*\S", vv):
+            variants.add(vv)
+    # Try the longest variants first so we match the fullest phrase.
+    for v in sorted(variants, key=len, reverse=True):
+        pattern = re.compile(re.escape(v), re.IGNORECASE)
+        new_text, n = pattern.subn(canonical, page_text)
+        if n > 0:
+            return new_text, v
+    return page_text, None
+
+
 def main():
     import argparse, json, os, sys
     p = argparse.ArgumentParser(description="Pre-render translation compare (source vs target)")
@@ -235,9 +369,18 @@ def main():
     p.add_argument("--translations", "-t", required=True, help="Translations JSON (flat or ID-mapped)")
     p.add_argument("--source-language", default="en")
     p.add_argument("--target-language", "-l", default="af")
+    p.add_argument("--reconcile", action="store_true",
+                   help="Auto-fix repeated-string inconsistencies (e.g. title). Emits "
+                        "{updated_pages, changes} JSON instead of the compare report.")
     a = p.parse_args()
     with open(a.translations, encoding="utf-8") as f:
         translations = json.load(f)
+    if a.reconcile:
+        updated, changes = reconcile_repeated_translations(
+            a.input, translations, a.source_language, a.target_language)
+        print(json.dumps({"updated_pages": updated, "changes": changes},
+                         indent=2, ensure_ascii=False))
+        sys.exit(0)
     rep = compare(a.input, translations, a.source_language, a.target_language)
     print(json.dumps(rep, indent=2, ensure_ascii=False))
     sys.exit(0 if rep["ok"] else 2)

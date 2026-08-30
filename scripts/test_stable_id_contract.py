@@ -97,11 +97,46 @@ def main():
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_continuation_merge():
+    """_merge_continuation_spans must merge a wrapped multi-line phrase into ONE
+    logical unit, while keeping single-word list items and self-contained
+    "<pattern> - <examples>" rule lines separate. Book-agnostic."""
+    from document_model import _merge_continuation_spans
+
+    def span(sid, text, x0, y0, x1, y1):
+        return {"id": sid, "text": text, "text_stripped": text,
+                "origin": [x0, y1], "bbox": [x0, y0, x1, y1],
+                "font_size": 10, "font_name": "F", "color": "#000000",
+                "is_bold": False, "is_italic": False, "is_page_number": False}
+
+    wrap = [
+        span("p1_s1", "3 letter consonant blends at the", 100, 100, 200, 112),
+        span("p1_s2", "beginning of words:", 100, 113, 190, 125),
+    ]
+    merged = _merge_continuation_spans(wrap, "vocabulary")
+    check("wrapped phrase merges to one unit", len(merged) == 1)
+    check("merged text is the full phrase",
+          bool(merged) and "3 letter consonant blends at the beginning of words:" == merged[0]["text_stripped"])
+
+    words = [
+        span("p1_s3", "house", 100, 200, 140, 212),
+        span("p1_s4", "bigger", 100, 213, 145, 225),
+    ]
+    check("single-word column is not merged", len(_merge_continuation_spans(words, "vocabulary")) == 2)
+
+    rules = [
+        span("p1_s5", "ai   -  plain, rain", 100, 300, 200, 312),
+        span("p1_s6", "ay  -  say, play", 100, 313, 195, 325),
+    ]
+    check("pattern-rule lines stay separate", len(_merge_continuation_spans(rules, "vocabulary")) == 2)
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("STABLE-ID CONTRACT TESTS (brief §2.2 / §7 / §8)")
     print("=" * 60)
     main()
+    test_continuation_merge()
     print("=" * 60)
     print(f"RESULTS: {_passed} passed, {_failed} failed")
     print("=" * 60)

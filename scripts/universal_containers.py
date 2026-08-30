@@ -184,6 +184,137 @@ def detect_table_grid(page, tolerance: float = 5.0) -> Optional[TableGrid]:
     )
 
 
+def _cluster_header_spans(header_spans, y_tol=6.0):
+    """
+    Cluster raw header source spans into logical header LABELS. Header text like a
+    two-line "HIGH FREQUENCY / WORDS" arrives as separate spans; we group spans whose
+    horizontal extents overlap (same column region) and that are vertically close into
+    one label. Book-agnostic: pure geometry.
+
+    Returns a list of {"text", "x0", "y0", "x1", "y1"} sorted left->right.
+    """
+    spans = [s for s in header_spans if s.get("text_stripped", s.get("text", "")).strip()]
+    if not spans:
+        return []
+    # Group by horizontal overlap (spans stacked over the same column region).
+    groups = []
+    for s in sorted(spans, key=lambda z: (z["bbox"][0], z["bbox"][1])):
+        b = s["bbox"]
+        cx = (b[0] + b[2]) / 2
+        placed = False
+        for g in groups:
+            # Overlap if this span's center lies within the group's x-extent (padded)
+            # or the group's center lies within this span — i.e. they stack vertically.
+            if (g["x0"] - 8 <= cx <= g["x1"] + 8) or (b[0] <= g["cx"] <= b[2]):
+                g["parts"].append(s)
+                g["x0"] = min(g["x0"], b[0]); g["x1"] = max(g["x1"], b[2])
+                g["y0"] = min(g["y0"], b[1]); g["y1"] = max(g["y1"], b[3])
+                g["cx"] = (g["x0"] + g["x1"]) / 2
+                placed = True
+                break
+        if not placed:
+            groups.append({"parts": [s], "x0": b[0], "y0": b[1], "x1": b[2], "y1": b[3],
+                           "cx": cx})
+    labels = []
+    for g in groups:
+        # Order parts top->bottom, then left->right, join into the label text.
+        parts = sorted(g["parts"], key=lambda z: (round(z["bbox"][1] / 4), z["bbox"][0]))
+        text = " ".join(p.get("text_stripped", p.get("text", "")).strip() for p in parts)
+        labels.append({"text": text.strip(), "x0": g["x0"], "y0": g["y0"],
+                       "x1": g["x1"], "y1": g["y1"]})
+    labels.sort(key=lambda z: z["x0"])
+    return labels
+
+
+def detect_header_cells(grid, header_spans, tolerance=6.0):
+    """
+    Map header source spans to their TRUE header cells, including MERGED
+    (column-spanning) cells. A merged header cell is defined by which VERTICAL GRID
+    LINES actually extend into the header band — a merged cell has NO interior vertical
+    line crossing it in the header row, even though the content rows below are split
+    into more columns. E.g. "WORDS" sits in one header cell (x65-280) that spans three
+    content columns because no vertical line crosses x137/x208 within the header band.
+
+    Book-agnostic: derived from the detected grid + header-band vertical lines + header
+    span geometry. No per-title constants.
+
+    Returns:
+      {
+        "header_row_box": (x0, y0, x1, y1) | None,
+        "cells": [ {
+            "text", "cell_box", "column_start", "column_end", "column_span",
+            "source_box"
+        }, ... ]  # left -> right
+      }
+    """
+    if grid is None or not getattr(grid, "columns", None) or not grid.rows:
+        return {"header_row_box": None, "cells": []}
+
+    # Header band = the first (short) row.
+    hb0, hb1 = grid.rows[0]
+    columns = grid.columns
+
+    # Vertical lines that TRAVERSE the header band define the header cells. A line
+    # only counts if it spans most of the band height (a content-column divider that
+    # merely touches the band bottom must NOT split the merged header).
+    band_h = max(1.0, hb1 - hb0)
+    band_xs = []
+    for (x, ys, ye) in grid.vertical_lines:
+        overlap = min(ye, hb1) - max(ys, hb0)
+        if overlap >= band_h * 0.6:
+            band_xs.append(x)
+    band_xs = sorted(_cluster_positions(band_xs, tolerance)) if band_xs else []
+
+    # Fall back to the outer column bounds if too few header verticals were found.
+    left = columns[0][0]
+    right = columns[-1][1]
+    edges = [e for e in band_xs if left - tolerance <= e <= right + tolerance]
+    if not edges or edges[0] > left + tolerance:
+        edges = [left] + edges
+    if edges[-1] < right - tolerance:
+        edges = edges + [right]
+    edges = sorted(_cluster_positions(edges, tolerance))
+
+    # Header cells = consecutive header-band edge pairs.
+    header_cells_x = [(edges[i], edges[i + 1]) for i in range(len(edges) - 1)]
+
+    def _content_col_index(x):
+        for i, (cs, ce) in enumerate(columns):
+            if cs - tolerance <= x <= ce + tolerance:
+                return i
+        return min(range(len(columns)),
+                   key=lambda i: abs(x - (columns[i][0] + columns[i][1]) / 2))
+
+    labels = _cluster_header_spans(header_spans)
+
+    cells = []
+    for (cx0, cx1) in header_cells_x:
+        # Which header label(s) fall inside this header cell (by center-x)?
+        inside = [l for l in labels if cx0 - tolerance <= (l["x0"] + l["x1"]) / 2 <= cx1 + tolerance]
+        text = " ".join(l["text"] for l in sorted(inside, key=lambda z: z["y0"])).strip()
+        # Content columns this header cell covers (for column_span).
+        c_start = _content_col_index(cx0 + 1)
+        c_end = _content_col_index(cx1 - 1)
+        if c_end < c_start:
+            c_start, c_end = c_end, c_start
+        if inside:
+            sb = (min(l["x0"] for l in inside), min(l["y0"] for l in inside),
+                  max(l["x1"] for l in inside), max(l["y1"] for l in inside))
+        else:
+            sb = (cx0, hb0, cx1, hb1)
+        cells.append({
+            "text": text,
+            "cell_box": (cx0, hb0, cx1, hb1),
+            "column_start": c_start,
+            "column_end": c_end,
+            "column_span": (c_end - c_start + 1),
+            "source_box": sb,
+        })
+
+    header_row_box = (edges[0], hb0, edges[-1], hb1) if edges else None
+    return {"header_row_box": header_row_box, "cells": cells}
+
+
 # =============================================================================
 # VECTOR RECTANGLE DETECTION — Filled/stroked boxes containing text
 # =============================================================================
