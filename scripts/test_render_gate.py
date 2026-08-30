@@ -273,6 +273,90 @@ def test_golden_layout_families():
     check("golden library covers full layout-family breadth", covered >= 18)
 
 
+def test_font_fidelity_flags_fallback():
+    """A page whose text renders in a built-in FALLBACK font (not an approved house
+    font) must be flagged by validate_font_fidelity; a house-font page passes."""
+    from render_gate import validate_font_fidelity
+    ff = _font()
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=120)
+    if ff:
+        page.insert_text(pymupdf.Point(20, 60), "hierdie is huis teks", fontsize=14,
+                         fontname="F0", fontfile=ff)
+    good = validate_font_fidelity(page, FONTS)
+    doc.close()
+    check("font fidelity: house-font page passes", good["ok"])
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=120)
+    page.insert_text(pymupdf.Point(20, 60), "hierdie is fallback teks lang genoeg",
+                     fontsize=14, fontname="helv")
+    bad = validate_font_fidelity(page, FONTS)
+    doc.close()
+    check("font fidelity: fallback-font page is flagged",
+          (not bad["ok"]) and any(f["constraint"] == "fontFidelity" for f in bad["failures"]))
+
+
+def test_size_consistency_flags_inconsistent_peers():
+    """Peers (same role) at materially different sizes are flagged; a legitimate
+    hierarchy (title >> subtitle, separate clusters) is NOT."""
+    from render_gate import validate_size_consistency
+    ff = _font()
+
+    def _page(sizes):
+        doc = pymupdf.open()
+        page = doc.new_page(width=400, height=300)
+        y = 40
+        for sz in sizes:
+            if ff:
+                page.insert_text(pymupdf.Point(30, y), f"lyn grootte {sz}", fontsize=sz,
+                                 fontname="F0", fontfile=ff)
+            else:
+                page.insert_text(pymupdf.Point(30, y), f"lyn grootte {sz}", fontsize=sz)
+            y += sz * 1.6 + 10
+        return doc, page
+
+    doc, page = _page([22, 14, 22, 14])
+    inc = validate_size_consistency(page, "back_cover")
+    doc.close()
+    check("size consistency: inconsistent peer group flagged", not inc["ok"])
+
+    doc, page = _page([48, 16, 16, 16])
+    ok = validate_size_consistency(page, "cover")
+    doc.close()
+    check("size consistency: legit hierarchy passes", ok["ok"])
+
+
+def test_structure_deviations_surfaced_in_manifest():
+    """TASK 12: per-element structure_gate failures (with element_id + box) are
+    surfaced in the diagnostic manifest as structureDeviations so the admin overlay
+    can point at each deviating element and say why."""
+    from render_gate import build_diagnostic_manifest
+    report = {
+        "version": "v8",
+        "scene": {"1": {"page_type": "vocabulary", "region_count": 0, "unit_count": 0,
+                        "units": []}},
+        "render_gate": {"pages": {1: {"ok": True, "failures": []}}},
+        "structure_gate": {"ok": False, "pages": {1: {"ok": False, "failures": [
+            {"constraint": "elementMissing", "element_id": "p01_s0003",
+             "role": "heading", "box": [10, 10, 100, 40],
+             "detail": "no rendered text in cell for element p01_s0003"},
+            {"constraint": "peerSizeMismatch", "element_id": "p01-headers",
+             "detail": "peer group p01-headers sizes vary 10.0..24.0pt"},
+        ]}}},
+        "font_resolution": {"resolved_family": "Foo", "font_file_hash": "abc"},
+    }
+    m = build_diagnostic_manifest("x", report)
+    page = m["pages"][0]
+    devs = page.get("structureDeviations", [])
+    check("manifest carries structureOk=False", page.get("structureOk") is False)
+    check("manifest surfaces both structure deviations", len(devs) == 2)
+    missing = next((d for d in devs if d["constraint"] == "elementMissing"), None)
+    check("deviation carries element id + box + detail",
+          missing is not None and missing["elementId"] == "p01_s0003"
+          and missing["box"] == [10, 10, 100, 40] and "p01_s0003" in missing["detail"])
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("RENDER GATE TESTS (brief §17.1/§17.3)")
@@ -293,6 +377,9 @@ if __name__ == "__main__":
     test_casing_mirror_helper()
     test_apply_source_casing_per_item()
     test_golden_layout_families()
+    test_font_fidelity_flags_fallback()
+    test_size_consistency_flags_inconsistent_peers()
+    test_structure_deviations_surfaced_in_manifest()
     print("=" * 60)
     print(f"RESULTS: {_passed} passed, {_failed} failed")
     print("=" * 60)

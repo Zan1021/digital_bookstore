@@ -29,6 +29,148 @@ _EDGE_MARGIN = 2.0
 _COLLISION_MARGIN = 0.5
 
 
+def validate_structure(expected_elements, rendered_pdf, fonts_dir=None, tol=3.0):
+    """
+    STRUCTURAL COMPARISON GATE (spec Req 4): compare the RENDERED output against the
+    SOURCE structure, element by element. For each expected element that carries a
+    cell_box (headers + structured cells), verify:
+      - PRESENT: some rendered text lies within the element's cell_box;
+      - IN-BOX: that text does not spill outside the cell_box (beyond tol);
+      - PEER SIZE: elements sharing a peer_group_id render at one consistent size;
+      - FONT: drawn font is approved (not a built-in fallback) when fonts_dir given.
+    Also checks the STRICT band for INVENTED elements: rendered text inside the
+    header/marker band envelope that falls in no expected cell_box is flagged
+    (elementInvented) — catching an added element the source never had.
+
+    expected_elements: iterable of dicts with keys: id, page_number, cell_box,
+        peer_group_id (optional), semantic_role (optional). (The contract items.)
+
+    Returns {"ok": bool, "pages": {n: {ok, failures}}, "review_pages": [...]}.
+    Book-agnostic: all expectations come from the source-derived contract.
+    """
+    result = {"ok": True, "pages": {}, "review_pages": []}
+    expected = [e for e in (expected_elements or []) if e.get("cell_box")]
+    if not expected:
+        return result  # nothing structural to check
+
+    approved = _approved_font_stems(fonts_dir) if fonts_dir else set()
+
+    doc = pymupdf.open(rendered_pdf)
+    # Group expectations by page.
+    by_page = {}
+    for e in expected:
+        by_page.setdefault(e.get("page_number"), []).append(e)
+
+    import re as _re
+    for pn, elems in by_page.items():
+        if pn is None or pn < 1 or pn > len(doc):
+            continue
+        page = doc[pn - 1]
+        d = page.get_text("dict")
+        spans = []
+        for b in d.get("blocks", []):
+            for l in b.get("lines", []):
+                for s in l.get("spans", []):
+                    if (s.get("text") or "").strip():
+                        spans.append(s)
+        failures = []
+        # Per peer group: collect the rendered sizes to check consistency.
+        peer_sizes = {}
+        for e in elems:
+            cb = e["cell_box"]
+            role = (e.get("semantic_role") or "").lower()
+            # Header cells have precise boxes -> strict in-box + peer-size checks.
+            # Content word cells currently share a full-column box (row not modelled
+            # per-word), so strict in-box/peer-size would false-positive; for those we
+            # only verify PRESENCE + approved FONT. (Row-level content boxes: future.)
+            strict = role in ("heading", "table_header", "merged_header", "end_marker")
+            inside = [s for s in spans
+                      if cb[0] - tol <= (s["bbox"][0] + s["bbox"][2]) / 2 <= cb[2] + tol
+                      and cb[1] - tol <= (s["bbox"][1] + s["bbox"][3]) / 2 <= cb[3] + tol]
+            if not inside:
+                failures.append({"constraint": "elementMissing", "element_id": e.get("id"),
+                                 "role": role or None, "box": list(cb),
+                                 "detail": f"no rendered text in cell for element {e.get('id')}"})
+                continue
+            if strict:
+                # In-box: no glyph spills HORIZONTALLY outside the cell (borders are
+                # vertical grid lines — the real "crossing" risk). Vertical tolerance
+                # is looser for headers because a multi-line header legitimately fills
+                # (and slightly overshoots) the header band via line leading.
+                vtol = tol + (e.get("cell_box")[3] - e.get("cell_box")[1]) * 0.35
+                for s in inside:
+                    bb = s["bbox"]
+                    if bb[0] < cb[0] - tol or bb[2] > cb[2] + tol \
+                       or bb[1] < cb[1] - vtol or bb[3] > cb[3] + vtol:
+                        failures.append({"constraint": "elementOutOfBox", "element_id": e.get("id"),
+                                         "role": role or None, "box": list(cb),
+                                         "detail": f"element {e.get('id')} text spills outside its cell"})
+                        break
+            # Font fidelity for this element's text (all element kinds).
+            if approved:
+                for s in inside:
+                    norm = _re.sub(r"[^a-z0-9]", "", (s.get("font") or "").lower())
+                    is_fb = any(m in norm for m in _FALLBACK_FONT_MARKERS)
+                    is_ap = any(stem in norm or norm in stem for stem in approved)
+                    if is_fb and not is_ap and len((s.get("text") or "").strip()) >= 4:
+                        failures.append({"constraint": "elementFont", "element_id": e.get("id"),
+                                         "role": role or None, "box": list(cb),
+                                         "detail": f"element {e.get('id')} in fallback font '{s.get('font')}'"})
+                        break
+            pg = e.get("peer_group_id")
+            if strict and pg:
+                peer_sizes.setdefault(pg, []).append(max(round(s.get("size", 0), 1) for s in inside))
+
+        # INVENTED / EXTRA element: a rendered text cluster in the STRICT band (the
+        # header/marker rows we model precisely) that does not fall inside ANY expected
+        # cell_box is an element the source never had. We only police the strict band's
+        # y-range so prose/content columns (not modelled per-word) never false-positive.
+        strict_boxes = [e["cell_box"] for e in elems
+                        if (e.get("semantic_role") or "").lower()
+                        in ("heading", "table_header", "merged_header", "end_marker")]
+        if strict_boxes:
+            bx0 = min(cb[0] for cb in strict_boxes)
+            by0 = min(cb[1] for cb in strict_boxes)
+            bx1 = max(cb[2] for cb in strict_boxes)
+            by1 = max(cb[3] for cb in strict_boxes)
+            for s in spans:
+                sx = (s["bbox"][0] + s["bbox"][2]) / 2
+                sy = (s["bbox"][1] + s["bbox"][3]) / 2
+                # Only consider spans sitting within the strict band's envelope.
+                if not (bx0 - tol <= sx <= bx1 + tol and by0 - tol <= sy <= by1 + tol):
+                    continue
+                accounted = any(cb[0] - tol <= sx <= cb[2] + tol
+                                and cb[1] - tol <= sy <= cb[3] + tol
+                                for cb in strict_boxes)
+                if not accounted:
+                    failures.append({"constraint": "elementInvented",
+                                     "box": [s["bbox"][0], s["bbox"][1], s["bbox"][2], s["bbox"][3]],
+                                     "detail": f"rendered text '{(s.get('text') or '').strip()[:20]}' "
+                                               f"has no corresponding source element"})
+                    break
+
+        # Peer-size consistency within each group. Header peer groups may legitimately
+        # contain a MULTI-LINE header (e.g. a 2-line "HIGH FREQUENCY / WORDS") whose
+        # rendered extent is ~2x a single-line peer ("WORDS"); that is faithful to the
+        # source design, not a defect. So header peers use a ratio that admits a
+        # 2-line-vs-1-line difference; other strict peers stay tight. (Calibrated from
+        # real source geometry across books, not tuned to one — see Task 10.)
+        for pg, sizes in peer_sizes.items():
+            sizes = [s for s in sizes if s > 0]
+            ratio_limit = 2.1 if "header" in pg else 1.18
+            if len(sizes) >= 2 and min(sizes) > 0 and (max(sizes) / min(sizes)) > ratio_limit:
+                failures.append({"constraint": "peerSizeMismatch", "element_id": pg,
+                                 "detail": f"peer group {pg} sizes vary {min(sizes)}..{max(sizes)}pt"})
+
+        result["pages"][pn] = {"ok": not failures, "failures": failures}
+        if failures:
+            result["ok"] = False
+            result["review_pages"].append(pn)
+
+    doc.close()
+    return result
+
+
 def _horizontal_gridlines_and_verticals(page):
     """
     Return (horizontals, verticals) — lists of detected straight table/grid lines
@@ -178,6 +320,7 @@ def build_diagnostic_manifest(pdf_path, report):
     """
     scene = report.get("scene", {})
     gate = report.get("render_gate", {}).get("pages", {})
+    struct_gate = report.get("structure_gate", {}).get("pages", {})
     typo = report.get("typography", {}).get("pages", {}) if isinstance(report.get("typography"), dict) else {}
     font_res = report.get("font_resolution", {})
     manifest = {
@@ -200,6 +343,20 @@ def build_diagnostic_manifest(pdf_path, report):
         failures = page_gate.get("failures", [])
         constraints = {f.get("constraint") for f in failures}
         typo_page = typo.get(pn) or typo.get(pn_str) or {"ok": True, "failures": []}
+        # TASK 12: per-element structural comparison verdict for this page — the list
+        # of elements that deviated from the source structure and WHY (constraint +
+        # human detail + element id + box), so the admin overlay can point at each one.
+        struct_page = struct_gate.get(pn) or struct_gate.get(pn_str) or {"ok": True, "failures": []}
+        structure_deviations = [
+            {
+                "elementId": f.get("element_id"),
+                "role": f.get("role"),
+                "constraint": f.get("constraint"),
+                "box": f.get("box"),
+                "detail": f.get("detail"),
+            }
+            for f in struct_page.get("failures", [])
+        ]
 
         # Build per-region diagnostics (§14). Fall back to a single synthetic region
         # when only the flat unit record is present (no region-graph).
@@ -256,6 +413,8 @@ def build_diagnostic_manifest(pdf_path, report):
             "neighbourCollisions": [f["detail"] for f in failures
                                     if f.get("constraint") == "neighbourTextIntersections"],
             "typographyFailures": [f.get("detail") for f in typo_page.get("failures", [])],
+            "structureDeviations": structure_deviations,
+            "structureOk": struct_page.get("ok", True),
             "fitStatus": "FAILED" if not page_gate.get("ok", True) else "OK",
             "failureReasons": [f.get("detail") for f in failures],
         })
@@ -483,10 +642,165 @@ def validate_typography(report, document_type=None, market=None, output_format="
     return result
 
 
-def validate_document(pdf_path, page_types=None, expected_by_page=None):
+def _approved_font_stems(fonts_dir):
+    """Return the set of normalized family stems available in the fonts dir (the
+    approved/house fonts). Book-agnostic: derived from the shipped fonts, no
+    hardcoded names."""
+    import os, re
+    stems = set()
+    if not fonts_dir or not os.path.isdir(fonts_dir):
+        return stems
+    for f in os.listdir(fonts_dir):
+        if not f.lower().endswith((".ttf", ".otf")):
+            continue
+        stem = f.rsplit(".", 1)[0]
+        for suf in ("-Regular", "-Bold", "-SemiBold", "-Medium", "-Light",
+                    "Regular", "Bold", "SemiBold", "Medium", "Light"):
+            stem = stem.replace(suf, "")
+        stem = re.sub(r"[^a-z0-9]", "", stem.lower())
+        if stem:
+            stems.add(stem)
+    return stems
+
+
+# Known PyMuPDF built-in FALLBACK fonts. If replaced text renders in one of these,
+# the intended (house/source) font was NOT embedded — a fidelity failure.
+_FALLBACK_FONT_MARKERS = ("charissil", "charis", "nimbussans", "nimbus", "helvetica",
+                          "helv", "timesnewroman", "times", "courier", "sans-serif")
+
+
+def validate_font_fidelity(page, fonts_dir, min_chars=8):
+    """
+    Verify the page's REPLACED text actually rendered in an approved (house/source)
+    font — not a built-in fallback (CharisSIL/NimbusSans/etc.). This is the check
+    that catches insert_htmlbox silently falling back to a substitute font, which
+    the geometry gates cannot see.
+
+    Book-agnostic: the approved set is derived from the shipped fonts directory; the
+    fallback set is PyMuPDF's built-ins. We look at the fonts actually DRAWN (via
+    get_text('dict')) and flag a page where a material amount of text (>= min_chars)
+    was drawn in a fallback font while an approved font was available.
+
+    Returns {"ok": bool, "failures": [...], "drawn": {font: char_count}}.
+    """
+    import re
+    failures = []
+    approved = _approved_font_stems(fonts_dir)
+    drawn = {}
+    try:
+        d = page.get_text("dict")
+    except Exception:
+        return {"ok": True, "failures": [], "drawn": {}}
+    for b in d.get("blocks", []):
+        for l in b.get("lines", []):
+            for s in l.get("spans", []):
+                t = (s.get("text") or "").strip()
+                if not t:
+                    continue
+                fn = s.get("font", "")
+                drawn[fn] = drawn.get(fn, 0) + len(t)
+
+    if not approved:
+        # No approved set to compare against — cannot judge; don't false-flag.
+        return {"ok": True, "failures": [], "drawn": drawn}
+
+    for fn, count in drawn.items():
+        norm = re.sub(r"[^a-z0-9]", "", fn.lower())
+        is_fallback = any(m in norm for m in _FALLBACK_FONT_MARKERS)
+        is_approved = any(stem in norm or norm in stem for stem in approved)
+        if is_fallback and not is_approved and count >= min_chars:
+            failures.append({
+                "constraint": "fontFidelity",
+                "detail": (f"text drawn in fallback font '{fn}' ({count} chars) instead "
+                           f"of an approved/house font — intended font not embedded"),
+            })
+    return {"ok": len(failures) == 0, "failures": failures, "drawn": drawn}
+
+
+def validate_size_consistency(page, page_type, rel_tol=0.18):
+    """
+    Flag a page where PEER text lines (lines of the SAME visual role) render at
+    materially different sizes — e.g. list entries that should share a size, or a
+    header row rendered in mixed sizes. Book-agnostic and hierarchy-safe:
+
+    Legitimate size hierarchy (a big title over a small subtitle) forms SEPARATE
+    size clusters and must NOT be flagged. So we cluster the per-line sizes and only
+    flag when a SINGLE cluster (peers) has internal spread beyond rel_tol — i.e.
+    lines that are supposed to match don't. Clustering is done by relative gap:
+    consecutive sorted sizes within rel_tol of each other join the same cluster.
+
+    Only applies to structured display pages (cover/back_cover); vocabulary word
+    CELLS are intentionally fitted per-cell by the fitting ladder (§9.5) so their
+    body sizes legitimately differ and are excluded. Story prose is excluded too.
+
+    Returns {"ok": bool, "failures": [...]}.
+    """
+    if page_type not in ("back_cover", "cover"):
+        return {"ok": True, "failures": []}
+    failures = []
+    try:
+        d = page.get_text("dict")
+    except Exception:
+        return {"ok": True, "failures": []}
+    sizes = []
+    for b in d.get("blocks", []):
+        for l in b.get("lines", []):
+            line_sizes = [round(s.get("size", 0), 1) for s in l.get("spans", [])
+                          if (s.get("text") or "").strip()]
+            if line_sizes:
+                sizes.append(max(line_sizes))
+    sizes = sorted(s for s in sizes if s > 0)
+    if len(sizes) < 2:
+        return {"ok": True, "failures": []}
+
+    # Cluster sizes: start a new cluster when the gap to the previous size exceeds
+    # rel_tol of the previous size (a real hierarchy step). Peers land in one cluster.
+    clusters = [[sizes[0]]]
+    for s in sizes[1:]:
+        prev = clusters[-1][-1]
+        if prev > 0 and (s - prev) / prev > rel_tol:
+            clusters.append([s])
+        else:
+            clusters[-1].append(s)
+
+    # Two kinds of inconsistency:
+    #  (a) within a single peer cluster the spread still exceeds rel_tol; or
+    #  (b) there are MULTIPLE clusters that each contain >=2 lines — i.e. competing
+    #      "peer groups" at different sizes (e.g. a list rendered alternately at 22pt
+    #      and 14pt). A lone heading (single-line cluster) over a uniform body is a
+    #      legitimate hierarchy and does NOT trip this.
+    multi_line_clusters = [c for c in clusters if len(c) >= 2]
+    if len(multi_line_clusters) >= 2:
+        allsz = [s for c in multi_line_clusters for s in c]
+        lo, hi = min(allsz), max(allsz)
+        failures.append({
+            "constraint": "sizeConsistency",
+            "detail": (f"multiple peer groups at different sizes "
+                       f"(min {lo}pt vs max {hi}pt) — lines that should share a size do not"),
+        })
+    else:
+        for c in clusters:
+            if len(c) >= 2:
+                lo, hi = min(c), max(c)
+                if lo > 0 and (hi / lo) > (1 + rel_tol):
+                    failures.append({
+                        "constraint": "sizeConsistency",
+                        "detail": (f"peer text lines render at inconsistent sizes "
+                                   f"(min {lo}pt vs max {hi}pt within one role group)"),
+                    })
+                    break
+    return {"ok": len(failures) == 0, "failures": failures}
+
+
+def validate_document(pdf_path, page_types=None, expected_by_page=None, fonts_dir=None):
     """
     Validate every page of a rendered PDF. Returns a diagnostic dict:
     {"ok": bool, "pages": {n: {ok, failures}}, "review_pages": [...]}.
+
+    When fonts_dir is given, also runs the FONT-FIDELITY check (replaced text must
+    render in an approved font, not a fallback) and the SIZE-CONSISTENCY check
+    (peer lines must share a size) — the output-verifying gates that catch font
+    substitution and inconsistent sizing the geometry checks cannot see.
     """
     page_types = page_types or {}
     expected_by_page = expected_by_page or {}
@@ -501,11 +815,28 @@ def validate_document(pdf_path, page_types=None, expected_by_page=None):
         if ptype == "back_cover" and expected_by_page.get(pn):
             exp_units = [l.strip() for l in expected_by_page[pn].split("\n") if l.strip()]
         sres = validate_semantics(doc[idx], ptype, exp_units)
-        if not sres["ok"]:
-            pres = {"ok": False, "failures": pres.get("failures", []) + sres["failures"]}
+        extra_failures = list(sres["failures"]) if not sres["ok"] else []
+
+        # Output-verifying gates (font fidelity + size consistency).
+        if fonts_dir:
+            fres = validate_font_fidelity(doc[idx], fonts_dir)
+            if not fres["ok"]:
+                extra_failures += fres["failures"]
+        zres = validate_size_consistency(doc[idx], ptype)
+        if not zres["ok"]:
+            extra_failures += zres["failures"]
+
+        if extra_failures:
+            pres = {"ok": False, "failures": pres.get("failures", []) + extra_failures}
         result["pages"][pn] = pres
         if not pres["ok"]:
             result["ok"] = False
             result["review_pages"].append(pn)
     doc.close()
     return result
+
+
+def _validate_document_legacy(pdf_path, page_types=None, expected_by_page=None):
+    """Deprecated alias: superseded by validate_document (which also runs the
+    output-verifying font/size gates)."""
+    return validate_document(pdf_path, page_types, expected_by_page)

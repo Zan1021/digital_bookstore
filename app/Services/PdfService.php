@@ -63,6 +63,11 @@ class PdfService
 
         $book->update(['status' => 'ready']);
 
+        // Auto-classify + draft a store description on import (book-classification-discovery
+        // spec, Req 4.1/5.1). Queued so upload isn't blocked; failure never blocks the book.
+        // V8-safe: reads extracted text only, never the render engine.
+        \App\Jobs\AnalyzeBookClassificationJob::dispatch($book->id);
+
         // Auto-resolve fonts from the PDF (downloads matching Google Fonts)
         $this->resolveFonts($fullPath);
 

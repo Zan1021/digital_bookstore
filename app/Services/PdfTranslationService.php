@@ -75,12 +75,18 @@ class PdfTranslationService
     }
 
     /**
-     * Create a translated PDF using PyMuPDF V6 engine.
+     * Create a translated PDF for an edition (LIVE render).
      *
-     * V6 approach:
-     * 1. Pass full translated text per page to Python
-     * 2. Python classifies page types (cover, story, vocabulary, back_cover)
-     * 3. Python erases text zones and re-renders with insert_htmlbox + CSS
+     * TASK 9 (spec Req 2.4): the CONTRACT path is now the default source of truth.
+     * We build+persist the per-element contract, resolve each element's translation
+     * (override > page text > source), and drive the engine with the ID-mapped,
+     * structure-carrying items payload — NOT the lossy flat translated_text. This
+     * resolves the flat/merge mismatch (e.g. p15 phonics fragments) because the
+     * engine places each logical element in its true cell instead of re-splitting a
+     * flat text blob by line position.
+     *
+     * The flat translated_text path is retained ONLY as a fallback for when the
+     * engine cannot produce a contract for a source (no structural manifest).
      */
     public function createTranslatedPdf(Book $book, Translation $translation): string
     {
@@ -91,9 +97,29 @@ class PdfTranslationService
             throw new \RuntimeException("No translated pages found for translation #{$translation->id}");
         }
 
-        // Build translations JSON (V6: just full text per page)
         $this->setCurrentBook($book);
-        $translationsData = $this->buildTranslationsJson([], $translatedPages);
+
+        // CONTRACT PATH (default): build+persist the per-element contract and render
+        // from it. Fall back to the flat path only if no contract items are available.
+        $usedContract = false;
+        try {
+            $contractItems = $this->buildEditionContract($book, $translation);
+        } catch (\Throwable $e) {
+            Log::warning("Edition contract build failed for book #{$book->id} "
+                . "({$translation->language_code}); falling back to flat render: " . $e->getMessage());
+            $contractItems = [];
+        }
+
+        if (!empty($contractItems)) {
+            $itemTranslations = $this->resolveItemTranslations($contractItems, $translation);
+            $translationsData = $this->buildIdMappedTranslationsJson($contractItems, $itemTranslations);
+            $usedContract = !empty($translationsData['items']);
+        }
+
+        if (!$usedContract) {
+            // Fallback: legacy flat per-page translated_text (lossy line-position map).
+            $translationsData = $this->buildTranslationsJson([], $translatedPages);
+        }
 
         // Write translations to temp file
         $translationsPath = storage_path("app/temp/translations_{$book->id}_{$translation->language_code}.json");
@@ -111,10 +137,15 @@ class PdfTranslationService
             mkdir($outputDir, 0755, true);
         }
 
-        // Run the appropriate rendering engine based on book setting
+        // Run the rendering engine (full render — no --only-items, so every page that
+        // owns contract items is rendered from the contract).
+        // TASK 11: the lossy legacy flat mapper is opt-in only. When we fell back to
+        // the flat payload (no contract available), pass --allow-legacy-flat so the
+        // edition still renders; on the default CONTRACT path we do NOT, so any page
+        // the contract cannot cover fails closed to review instead of mapping lossily.
         $scriptPath = $this->getScriptPath($book);
-        
-        $process = new Process([
+
+        $cmd = [
             'python',
             $scriptPath,
             'replace',
@@ -122,7 +153,12 @@ class PdfTranslationService
             '--output', $outputPath,
             '--translations', $translationsPath,
             '--fonts-dir', $this->fontsDir,
-        ]);
+        ];
+        if (!$usedContract) {
+            $cmd[] = '--allow-legacy-flat';
+        }
+
+        $process = new Process($cmd);
 
         $process->setTimeout(300);
         $process->run();
@@ -139,13 +175,19 @@ class PdfTranslationService
 
         // Log the replacement report
         if ($report) {
-            Log::info("PDF translation V6 report for book #{$book->id} ({$translation->language_code})", $report);
+            $report['render_source'] = $usedContract ? 'contract' : 'flat';
+            Log::info("PDF translation report for book #{$book->id} ({$translation->language_code})"
+                . " via " . ($usedContract ? 'CONTRACT' : 'FLAT') . " path", $report);
 
             if (!empty($report['errors'])) {
-                Log::warning("V6 rendering errors", $report['errors']);
+                Log::warning("Rendering errors", $report['errors']);
             }
             if (!empty($report['overflow_warnings'])) {
-                Log::warning("V6 text overflow warnings", $report['overflow_warnings']);
+                Log::warning("Text overflow warnings", $report['overflow_warnings']);
+            }
+            if (!$usedContract && !empty($report['flags']['LEGACY_FLAT_MAPPING'])) {
+                Log::warning("Edition rendered via LEGACY_FLAT_MAPPING pages",
+                    $report['flags']['LEGACY_FLAT_MAPPING']);
             }
         }
 
@@ -294,6 +336,75 @@ class PdfTranslationService
     }
 
     /**
+     * TASK 9 — Build AND PERSIST the per-element contract for an edition, then return
+     * its item list. This is the source of truth the LIVE render uses (spec Req 2.4):
+     * each item carries its stable id, page_number, reading order, source_text and the
+     * structure-aware placement fields (cell_box, align_h/v, peer_group_id,
+     * column_span, is_merged, semantic_role).
+     *
+     * Idempotent: reuses the stored contract on the translation unless $force is set
+     * (e.g. after the source PDF changed). Book-agnostic — the shape comes entirely
+     * from the engine's `contract` command.
+     *
+     * @return array the contract item list ([] if the engine produced none)
+     */
+    public function buildEditionContract(Book $book, Translation $translation, bool $force = false): array
+    {
+        $stored = $translation->translation_contract['items'] ?? null;
+        if (!$force && is_array($stored) && count($stored) > 0) {
+            return $stored;
+        }
+
+        $full = $this->buildStableIdContract($book, $translation->language_code);
+        $items = $full['items'] ?? [];
+
+        // Persist the full contract envelope (not just items) so downstream tooling
+        // has the schema_version / language metadata too.
+        $translation->forceFill([
+            'translation_contract' => array_merge($full, ['items' => $items]),
+        ])->save();
+
+        return $items;
+    }
+
+    /**
+     * TASK 9 — Resolve a book-wide stable-id => translation map for the contract
+     * render. Generalises the per-page resolution used by the single-page overlay
+     * re-render so a FULL edition render is driven by the same per-element source.
+     *
+     * Priority per item (highest first):
+     *   1. a per-region override edited in the admin overlay (layout_overrides[id]);
+     *   2. the current per-page translated_text (what the admin edits in the editor);
+     *   3. the item's source_text (so an untranslated element still renders in place
+     *      rather than vanishing).
+     *
+     * @param array       $contractItems the persisted contract item list
+     * @param Translation $translation
+     * @return array<string,string> stable id => translated string
+     */
+    public function resolveItemTranslations(array $contractItems, Translation $translation): array
+    {
+        $overrides = $translation->layout_overrides ?? [];
+        $pageText = $translation->translatedPages()
+            ->pluck('translated_text', 'page_number')
+            ->toArray();
+
+        $map = [];
+        foreach ($contractItems as $item) {
+            $id = $item['id'] ?? null;
+            if ($id === null) {
+                continue;
+            }
+            $page = $item['page_number'] ?? null;
+            $map[$id] = $overrides[$id]['translation']
+                ?? ($page !== null ? ($pageText[$page] ?? null) : null)
+                ?? ($item['source_text'] ?? '');
+        }
+
+        return $map;
+    }
+
+    /**
      * Build an ID-mapped translations payload (§2.2) from stored per-item
      * translations. $itemTranslations maps stable unit ID => translated string.
      * The engine consumes these IDs DIRECTLY (no re-splitting of flat text).
@@ -303,18 +414,31 @@ class PdfTranslationService
      */
     private function buildIdMappedTranslationsJson(array $contractItems, array $itemTranslations): array
     {
+        // Structure-aware placement fields (spec Req 2/3) carried through to the
+        // engine so the contract render places each element in its true cell.
+        $structureKeys = ['source_text', 'semantic_role', 'cell_box', 'align_h',
+                          'align_v', 'peer_group_id', 'column_span', 'is_merged'];
+
         $items = [];
         foreach ($contractItems as $order => $item) {
             $id = $item['id'] ?? null;
             if ($id === null || !array_key_exists($id, $itemTranslations)) {
                 continue;
             }
-            $items[] = [
+            $entry = [
                 'id' => $id,
                 'page_number' => $item['page_number'] ?? null,
-                'reading_order' => $order,
+                'reading_order' => $item['reading_order'] ?? $order,
                 'translation' => (string) $itemTranslations[$id],
             ];
+            // Forward any structure fields the contract carries (only when present,
+            // so non-structured items stay compact — matches the engine's expectation).
+            foreach ($structureKeys as $k) {
+                if (array_key_exists($k, $item)) {
+                    $entry[$k] = $item[$k];
+                }
+            }
+            $items[] = $entry;
         }
 
         return ['items' => $items];

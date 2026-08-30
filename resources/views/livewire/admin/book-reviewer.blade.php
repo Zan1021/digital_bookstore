@@ -111,7 +111,7 @@
 
             {{-- Toggle bar --}}
             <div class="flex flex-wrap gap-3 px-4 py-2 text-xs border-b bg-gray-50">
-                @foreach(['sourceBounds' => 'Source boxes', 'safeInnerBounds' => 'Safe inner', 'renderedGlyphBounds' => 'Glyph bounds', 'readingOrder' => 'Reading order', 'invalidRegions' => 'Invalid (red)'] as $key => $label)
+                @foreach(['sourceBounds' => 'Source boxes', 'safeInnerBounds' => 'Safe inner', 'renderedGlyphBounds' => 'Glyph bounds', 'readingOrder' => 'Reading order', 'invalidRegions' => 'Invalid (red)', 'structureDeviations' => 'Structure deviations'] as $key => $label)
                     <label class="inline-flex items-center gap-1 cursor-pointer">
                         <input type="checkbox" wire:click="toggleOverlayLayer('{{ $key }}')"
                             @checked($overlayToggles[$key] ?? false) class="rounded">
@@ -162,12 +162,51 @@
                                           fill="none" stroke="#f59e0b" stroke-width="3"/>
                                 @endif
                             @endforeach
+                            {{-- TASK 12: per-element structural comparison deviations --}}
+                            @if($overlayToggles['structureDeviations'] ?? false)
+                                @foreach(($overlayData['structureDeviations'] ?? []) as $dev)
+                                    @if(!empty($dev['box']))
+                                        @php($b = $dev['box'])
+                                        <rect x="{{ $b[0] }}" y="{{ $b[1] }}" width="{{ $b[2]-$b[0] }}" height="{{ $b[3]-$b[1] }}"
+                                              fill="rgba(220,38,38,0.12)" stroke="#dc2626" stroke-width="2" stroke-dasharray="2 2"/>
+                                        <text x="{{ $b[0]+2 }}" y="{{ max(10, $b[1]-3) }}" fill="#b91c1c" font-size="11" font-weight="bold">{{ $dev['constraint'] }}</text>
+                                    @endif
+                                @endforeach
+                            @endif
                         </svg>
                     </div>
                 </div>
 
                 {{-- Region list + per-region actions --}}
                 <div class="col-span-1 text-xs">
+                    {{-- TASK 12: structural comparison verdict — which element deviated + why --}}
+                    @php($devs = $overlayData['structureDeviations'] ?? [])
+                    <div class="mb-3 p-2 rounded border {{ ($overlayData['structureOk'] ?? true) ? 'border-green-200 bg-green-50' : 'border-red-300 bg-red-50' }}">
+                        <p class="font-semibold {{ ($overlayData['structureOk'] ?? true) ? 'text-green-700' : 'text-red-700' }}">
+                            Structural comparison:
+                            {{ ($overlayData['structureOk'] ?? true) ? 'PASS — every element matches the source' : 'DEVIATIONS (' . count($devs) . ')' }}
+                        </p>
+                        @if(!empty($devs))
+                            <ul class="mt-1 space-y-1">
+                                @foreach($devs as $dev)
+                                    <li class="border-l-2 border-red-400 pl-2">
+                                        <span class="font-mono text-red-700">{{ $dev['constraint'] }}</span>
+                                        @if(!empty($dev['elementId']))
+                                            <span class="text-gray-500">· {{ $dev['elementId'] }}</span>
+                                        @endif
+                                        @if(!empty($dev['role']))
+                                            <span class="text-gray-400">({{ $dev['role'] }})</span>
+                                        @endif
+                                        <span class="block text-gray-600">{{ $dev['detail'] }}</span>
+                                    </li>
+                                @endforeach
+                            </ul>
+                            <p class="mt-1 text-[10px] text-gray-500">
+                                Toggle "Structure deviations" above to highlight each on the page.
+                            </p>
+                        @endif
+                    </div>
+
                     <p class="font-semibold text-gray-700 mb-1">Regions ({{ count($regions) }})</p>
                     <div class="space-y-1 max-h-[560px] overflow-auto">
                         @foreach($regions as $r)
@@ -190,6 +229,29 @@
                         Select a region to highlight it. Edit its translation in the page editor below,
                         then "Re-render this page" to update just this page (§15).
                     </p>
+
+                    {{-- Per-region inline translation editor (§15) --}}
+                    @if($selectedRegionId)
+                        <div class="mt-3 p-2 border border-amber-300 rounded bg-amber-50">
+                            <p class="text-[11px] font-semibold text-amber-800 mb-1">
+                                Edit region <span class="font-mono">{{ $selectedRegionId }}</span>
+                            </p>
+                            <textarea wire:model="regionEditText" rows="4"
+                                class="w-full border border-gray-300 rounded p-2 text-xs"
+                                placeholder="Edited translation for this region..."></textarea>
+                            <div class="flex gap-2 mt-2">
+                                <button type="button" wire:click="saveRegionTranslation"
+                                    wire:loading.attr="disabled"
+                                    class="px-3 py-1 text-xs rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+                                    <span wire:loading.remove wire:target="saveRegionTranslation">Save &amp; re-render page</span>
+                                    <span wire:loading wire:target="saveRegionTranslation">Rendering…</span>
+                                </button>
+                            </div>
+                            <p class="mt-1 text-[10px] text-gray-500">
+                                Saved as a per-edition override (audited); re-renders only this page.
+                            </p>
+                        </div>
+                    @endif
                 </div>
             </div>
         </div>

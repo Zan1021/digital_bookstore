@@ -21,6 +21,12 @@ class Translation extends Model
         'qa_report',
         'layout_overrides',
         'translation_contract',
+        // Edition-level classification/discovery fields
+        'reading_level_id',
+        'education_phase',
+        'language_role',
+        'price',
+        'publication_status',
     ];
 
     protected $casts = [
@@ -92,5 +98,27 @@ class Translation extends Model
             ->orderBy('page_number')
             ->pluck('translated_text')
             ->implode("\n\n");
+    }
+
+    // ---- Edition-level classification/discovery (book-classification-discovery) ----
+
+    public function readingLevel(): BelongsTo
+    {
+        return $this->belongsTo(ReadingLevel::class);
+    }
+
+    public function features(): \Illuminate\Database\Eloquent\Relations\BelongsToMany
+    {
+        return $this->belongsToMany(Feature::class, 'edition_features')->withTimestamps();
+    }
+
+    public function rights(): \Illuminate\Database\Eloquent\Relations\HasOne
+    {
+        return $this->hasOne(EditionRight::class);
+    }
+
+    public function hasFeature(string $slug): bool
+    {
+        return $this->features->contains('slug', $slug);
     }
 }

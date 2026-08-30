@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Book extends Model
@@ -31,6 +32,14 @@ class Book extends Model
         'crop_percent',
         'crop_enabled',
         'crop_box',
+        // Classification/discovery (book-classification-discovery spec)
+        'classification_status',
+        'book_type',
+        'age_min',
+        'age_max',
+        'audience_range_id',
+        'series',
+        'series_volume',
     ];
 
     protected $casts = [
@@ -83,6 +92,92 @@ class Book extends Model
     public function processingJobs(): HasMany
     {
         return $this->hasMany(ProcessingJob::class);
+    }
+
+    // ---- Classification / discovery relationships (book-classification-discovery) ----
+
+    public function categories(): \Illuminate\Database\Eloquent\Relations\BelongsToMany
+    {
+        return $this->belongsToMany(Category::class, 'book_categories')
+            ->withPivot(['is_primary', 'source', 'confidence', 'approved_at', 'approved_by'])
+            ->withTimestamps();
+    }
+
+    public function tags(): \Illuminate\Database\Eloquent\Relations\BelongsToMany
+    {
+        return $this->belongsToMany(Tag::class, 'book_tags')
+            ->withPivot(['source', 'confidence', 'approved_at', 'approved_by'])
+            ->withTimestamps();
+    }
+
+    public function contentAdvisories(): \Illuminate\Database\Eloquent\Relations\BelongsToMany
+    {
+        return $this->belongsToMany(ContentAdvisory::class, 'book_content_advisories')
+            ->withPivot(['source', 'approved_at'])->withTimestamps();
+    }
+
+    public function audienceRange(): BelongsTo
+    {
+        return $this->belongsTo(AudienceRange::class);
+    }
+
+    public function descriptions(): HasMany
+    {
+        return $this->hasMany(BookDescription::class);
+    }
+
+    public function classificationSuggestions(): HasMany
+    {
+        return $this->hasMany(ClassificationSuggestion::class);
+    }
+
+    /** The primary (approved) category for this book, if any. */
+    public function primaryCategory(): ?Category
+    {
+        return $this->categories()->wherePivot('is_primary', true)->first();
+    }
+
+    /** Approved description for a language (falls back to English, then any approved). */
+    public function approvedDescription(string $lang = 'en'): ?BookDescription
+    {
+        return $this->descriptions()->approved()->where('language_code', $lang)->first()
+            ?? $this->descriptions()->approved()->where('language_code', 'en')->first()
+            ?? $this->descriptions()->approved()->first();
+    }
+
+    /**
+     * Kids-domain series progression (Req 8.5): the next book in the same series by
+     * volume, preferring one at a comparable reading level to a given edition. Returns
+     * null when there is no series or no later volume. Book-agnostic.
+     */
+    public function nextInSeries(?int $readingLevelRank = null): ?Book
+    {
+        if (empty($this->series) || $this->series_volume === null) {
+            return null;
+        }
+        $laterVolumes = static::where('series', $this->series)
+            ->where('series_volume', '>', $this->series_volume)
+            ->orderBy('series_volume')
+            ->get();
+
+        if ($laterVolumes->isEmpty()) {
+            return null;
+        }
+        if ($readingLevelRank === null) {
+            return $laterVolumes->first();
+        }
+        // Prefer the earliest later volume whose easiest edition is at a comparable
+        // (<= +1 rank) reading level; else fall back to the next volume.
+        foreach ($laterVolumes as $candidate) {
+            $rank = $candidate->translations()
+                ->with('readingLevel')->get()
+                ->map(fn ($t) => $t->readingLevel?->rank)
+                ->filter()->min();
+            if ($rank !== null && $rank <= $readingLevelRank + 1) {
+                return $candidate;
+            }
+        }
+        return $laterVolumes->first();
     }
 
     public function getExtractedText(): string

@@ -33,8 +33,12 @@ class BookReviewer extends Component
         'renderedGlyphBounds' => false,
         'readingOrder' => false,
         'invalidRegions' => true,
+        'structureDeviations' => true,
     ];
     public ?string $selectedRegionId = null;
+
+    // Inline per-region translation edit (overlay §15)
+    public string $regionEditText = '';
 
     public function mount(Book $book, string $language = 'af')
     {
@@ -251,8 +255,10 @@ class BookReviewer extends Component
         try {
             $service = app(PdfTranslationService::class);
             $this->overlayData = $service->buildOverlayData($this->book, $this->translation, $page);
+            $this->currentPage = $page;
             $this->showOverlay = true;
             $this->selectedRegionId = null;
+            $this->regionEditText = '';
         } catch (\Throwable $e) {
             session()->flash('error', 'Could not build overlay: ' . $e->getMessage());
         }
@@ -268,6 +274,28 @@ class BookReviewer extends Component
     public function selectRegion(string $regionId)
     {
         $this->selectedRegionId = $regionId;
+        // Preload any previously saved override translation for this region so the
+        // editor shows the current edited value.
+        $overrides = $this->translation->layout_overrides ?? [];
+        $this->regionEditText = $overrides[$regionId]['translation'] ?? '';
+    }
+
+    /**
+     * Save an edited translation for the selected region as a per-edition override
+     * (§15), then re-render just this page so the change is reflected immediately.
+     * The override takes precedence over the page-level translation on re-render.
+     */
+    public function saveRegionTranslation()
+    {
+        if (!$this->translation || !$this->selectedRegionId) {
+            session()->flash('error', 'Select a region first.');
+            return;
+        }
+        $this->saveRegionOverride($this->selectedRegionId, [
+            'translation' => $this->regionEditText,
+        ]);
+        // Re-render the page this region belongs to so the edit is visible.
+        $this->reRenderPage($this->currentPage);
     }
 
     /**
@@ -299,24 +327,29 @@ class BookReviewer extends Component
 
         try {
             $service = app(PdfTranslationService::class);
-            $contract = $this->translation->translation_contract['items'] ?? [];
-            if (empty($contract)) {
-                // No stored contract yet — build and persist one.
-                $full = $service->buildStableIdContract($this->book, $this->translation->language_code);
-                $contract = $full['items'] ?? [];
-                $this->translation->update(['translation_contract' => ['items' => $contract]]);
-            }
+            // Build+persist the edition contract once (idempotent) — same source of
+            // truth the full live render uses (Task 9).
+            $contract = $service->buildEditionContract($this->book, $this->translation);
 
             // Collect the stable IDs that belong to this page + their translations.
+            // Priority per item: saved region override (edited in overlay) > the
+            // current page translation from translated_pages > source text.
             $itemIds = [];
             $itemTranslations = [];
             $overrides = $this->translation->layout_overrides ?? [];
+
+            // Current per-page translations (the real translated content the admin
+            // sees/edits in the page editor), keyed by page number.
+            $pageText = $this->translation->translatedPages()
+                ->pluck('translated_text', 'page_number')
+                ->toArray();
+
             foreach ($contract as $item) {
                 if (($item['page_number'] ?? null) !== $page) continue;
                 $id = $item['id'];
                 $itemIds[] = $id;
-                // Prefer an edited override translation; else the source (round-trip).
                 $itemTranslations[$id] = $overrides[$id]['translation']
+                    ?? ($pageText[$page] ?? null)
                     ?? ($item['source_text'] ?? '');
             }
 
