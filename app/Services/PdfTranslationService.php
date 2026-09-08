@@ -234,6 +234,49 @@ class PdfTranslationService
             }
         }
 
+        // VISUAL QA GATE (Task 6, gpt-4o vision) — optional, config-gated. Renders
+        // source vs translated page images and asks a vision model to flag layout
+        // defects the structural gate can't see (clipping, inconsistent sizes, overlap,
+        // garbled/missing text). Flagged pages force NEEDS_LAYOUT_REVIEW. Off by default
+        // (costs one vision call per reviewed page). Never blocks on its own failure.
+        if (config('bookstore.visual_qa_enabled')) {
+            try {
+                $scope = config('bookstore.visual_qa_scope', 'structured');
+                $qaPages = null; // null = all
+                if ($scope === 'structured' && is_array($report) && !empty($report['page_types'])) {
+                    $qaPages = [];
+                    foreach ($report['page_types'] as $pn => $ptype) {
+                        if (in_array($ptype, ['vocabulary', 'cover', 'back_cover'], true)) {
+                            $qaPages[] = (int) $pn;
+                        }
+                    }
+                    $qaPages = $qaPages ?: null;
+                }
+                $qa = (new VisualQaService())->review($book, $translation, $qaPages);
+                if (is_array($report)) {
+                    $report['visual_qa'] = $qa;
+                }
+                if (!($qa['ok'] ?? true) && !empty($qa['flagged_pages'])) {
+                    $publishable = false;
+                    $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+                    Log::warning('Visual QA flagged pages — routing edition to review', [
+                        'book' => $book->id,
+                        'language' => $translation->language_code,
+                        'flagged_pages' => $qa['flagged_pages'],
+                    ]);
+                    if (is_array($report)) {
+                        $report['publishable'] = false;
+                        $report['render_status'] = 'NEEDS_LAYOUT_REVIEW';
+                        $report['review_pages'] = array_values(array_unique(array_merge(
+                            $report['review_pages'] ?? [], $qa['flagged_pages']
+                        )));
+                    }
+                }
+            } catch (\Throwable $e) {
+                Log::warning('Visual QA gate errored (non-blocking)', ['error' => $e->getMessage()]);
+            }
+        }
+
         $translation->forceFill([
             'render_status' => $renderStatus,
             'qa_report' => $report ? json_encode($report, JSON_UNESCAPED_UNICODE) : null,

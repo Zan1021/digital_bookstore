@@ -186,6 +186,159 @@ def remove_span(page, span, fill_color=None):
     page.add_redact_annot(rect, text="", fill=fill_color)
 
 
+def remove_spans_preserving_background(page, spans, padding=1):
+    """
+    Remove a set of text spans by ERASING their glyphs (true text redaction)
+    while leaving whatever is underneath — flat fill, gradient, or artwork —
+    completely intact.
+
+    This is the book-agnostic replacement for fill-rectangle masking: instead of
+    guessing a background colour and stamping a solid box (which never matches a
+    gradient/textured/JPEG-compressed background exactly, leaving a visible
+    block), we redact with text removal only. Art and vector line-work are
+    preserved (PDF_REDACT_IMAGE_NONE / PDF_REDACT_LINE_ART_NONE), so no image or
+    drawing under the text is disturbed.
+
+    Mirrors the proven vocabulary/phonics render path. Returns True if every
+    span's source text is verified gone from the page after redaction.
+    """
+    if not spans:
+        return True
+
+    for span in spans:
+        bbox = span["bbox"]
+        rect = pymupdf.Rect(
+            bbox[0] - padding,
+            bbox[1] - padding,
+            bbox[2] + padding,
+            bbox[3] + padding,
+        )
+        if rect.is_empty or rect.is_infinite:
+            continue
+        # fill=False => no rectangle is painted; only the glyphs are removed.
+        page.add_redact_annot(rect, fill=False)
+
+    try:
+        page.apply_redactions(
+            images=getattr(pymupdf, "PDF_REDACT_IMAGE_NONE", 0),
+            graphics=getattr(pymupdf, "PDF_REDACT_LINE_ART_NONE", 0),
+            text=getattr(pymupdf, "PDF_REDACT_TEXT_REMOVE", 0),
+        )
+    except TypeError:
+        # Older PyMuPDF signature: text removal is the default; still preserve art.
+        page.apply_redactions(images=0, graphics=0)
+
+    # Verify removal with a fresh extraction (not cached).
+    post = page.get_text()
+    for span in spans:
+        srcw = (span.get("text_stripped") or "").strip()
+        if srcw and srcw in post:
+            return False
+    return True
+
+
+def remove_outline_duplicate_vectors(page, band, color_thresh=0.72, max_stroke_width=1.0, pad=3):
+    """
+    Hide vector "outline duplicate" glyphs left behind after a text span is
+    redacted.
+
+    Some source pages draw a decorative OUTLINE/EMBOSS copy of a title as vector
+    line-art *in addition to* the live text glyphs. Text redaction (which we use
+    to preserve real artwork) intentionally leaves line-art alone, so that outline
+    copy of the ORIGINAL-language title remains visible as a ghost behind the
+    translated title.
+
+    We CANNOT use apply_redactions(graphics=REMOVE) to drop these: redaction
+    graphics-removal is page-global and deletes ANY vector overlapping ANY redact
+    rect — including a page-sized background fill — which blanks the whole cover.
+
+    Instead we cover ONLY each ghost glyph box with a small filled rectangle in the
+    LOCAL background colour, and ONLY when that local background is effectively
+    uniform (a flat field), so the cover-up is invisible. This never disturbs any
+    other drawing. Book-agnostic and FAIL-SAFE: if the ghost sits on a non-uniform
+    area (gradient/artwork), or no ghost matches, we do nothing and leave the page
+    untouched rather than risk covering real art.
+
+    A drawing is treated as a ghost only when ALL hold:
+      * stroke-only (no fill) — an outline, not a solid shape;
+      * light stroke colour (min channel >= color_thresh) — an outline highlight;
+      * hairline (stroke width <= max_stroke_width);
+      * bbox fully CONTAINED within `band` (the redacted subtitle bbox).
+
+    Returns the number of ghost boxes covered (0 if none / not safe).
+    """
+    band = pymupdf.Rect(band)
+
+    def _light(color):
+        return color is not None and min(color) >= color_thresh
+
+    def _contained(r):
+        return (r.x0 >= band.x0 - pad and r.y0 >= band.y0 - pad
+                and r.x1 <= band.x1 + pad and r.y1 <= band.y1 + pad)
+
+    victims = []
+    for dr in page.get_drawings():
+        r = pymupdf.Rect(dr["rect"])
+        if r.is_empty or r.is_infinite:
+            continue
+        stroke_only = dr.get("type") == "s" and dr.get("fill") is None
+        hairline = (dr.get("width") or 0) <= max_stroke_width
+        if stroke_only and hairline and _light(dr.get("color")) and _contained(r):
+            victims.append(r)
+
+    if not victims:
+        return 0
+
+    # Determine the LOCAL background colour + how uniform the band is. We sample
+    # the band and take the dominant colour; if it doesn't dominate, the field is
+    # not flat and a cover-up would be visible -> bail out (fail safe).
+    bg_rgb, dom_frac = _dominant_color_in_rect(page, band)
+    if bg_rgb is None or dom_frac < 0.55:
+        return 0
+    fill = (bg_rgb[0] / 255.0, bg_rgb[1] / 255.0, bg_rgb[2] / 255.0)
+
+    # Paint each ghost box with the flat background colour. Small inset avoids
+    # nibbling neighbouring art; a hair of overpaint on a uniform field is invisible.
+    covered = 0
+    shape = page.new_shape()
+    for r in victims:
+        rr = pymupdf.Rect(r.x0 - 0.5, r.y0 - 0.5, r.x1 + 0.5, r.y1 + 0.5)
+        shape.draw_rect(rr)
+        covered += 1
+    shape.finish(fill=fill, color=fill, width=0)
+    shape.commit()
+    return covered
+
+
+def _dominant_color_in_rect(page, rect, dpi=150):
+    """Return ((r,g,b) 0-255, dominant_fraction) for the pixels inside `rect`.
+    Used to (a) get the flat background colour and (b) measure how uniform it is.
+    Book-agnostic: no colour is assumed."""
+    from collections import Counter
+    rect = pymupdf.Rect(rect) & page.rect
+    if rect.is_empty:
+        return None, 0.0
+    try:
+        pix = page.get_pixmap(clip=rect, dpi=dpi)
+    except Exception:
+        return None, 0.0
+    if pix.width < 2 or pix.height < 2:
+        return None, 0.0
+    c = Counter()
+    step_x = max(1, pix.width // 120)
+    step_y = max(1, pix.height // 120)
+    total = 0
+    for x in range(0, pix.width, step_x):
+        for y in range(0, pix.height, step_y):
+            p = pix.pixel(x, y)
+            c[(p[0], p[1], p[2])] += 1
+            total += 1
+    if not total:
+        return None, 0.0
+    col, n = c.most_common(1)[0]
+    return col, n / total
+
+
 def _source_text_transform(spans):
     """
     Return the CSS text-transform that mirrors the SOURCE casing so the
@@ -1421,43 +1574,210 @@ def render_vocabulary_page_from_scene(page, page_scene, id_to_translation, fonts
     if still_present:
         stages["source_survived"] = still_present[:10]
 
-    # 4) Group units by cell_box into ordered slots and place.
+    # 4) Place each unit inside its cell_box, book-agnostically, honouring the
+    #    structure the weekend module produced: PADDING, PEER-GROUP UNIFORM SIZING,
+    #    and ROW-ALIGNED vertical placement (not evenly-divided bands).
     font_file = _house_font_file(fonts_dir) or None
-    # Bucket by rounded cell_box; units without a cell_box get their own bbox slot.
     from collections import defaultdict
-    cells = defaultdict(list)
-    for u in units:
-        cb = tuple(round(c, 1) for c in u.cell_box) if getattr(u, "cell_box", None) else tuple(round(c, 1) for c in u.bbox)
-        cells[cb].append(u)
 
-    for cb, cell_units in cells.items():
-        # Order units within the cell top->bottom, left->right (reading order).
-        cell_units.sort(key=lambda z: (round(z.bbox[1], 1), z.bbox[0]))
-        x0, y0, x1, y1 = cb
-        n = len(cell_units)
-        if n == 0:
+    # Cell padding: a fraction of the smaller cell dimension, clamped to a sane
+    # pt range. Keeps text off the grid lines on any book/scale. (container_detection
+    # uses ~8px; we derive it so it scales with the table.)
+    def _cell_pad(x0, y0, x1, y1):
+        return max(2.0, min(6.0, 0.06 * min(x1 - x0, y1 - y0)))
+
+    # --- PEER-GROUP UNIFORM SIZE (render_gate Req: peers render at one size) ---
+    # For each peer_group_id, choose ONE font size = the largest size that lets the
+    # WIDEST member fit its padded cell width, capped by the source glyph height.
+    # Every member of the group then renders at that single size.
+    def _text_width(s, size):
+        try:
+            from text_shaping import accurate_text_width
+            return accurate_text_width(s, font_file, size)
+        except Exception:
+            return len(s) * size * 0.5  # rough fallback
+
+    peer_members = defaultdict(list)   # pg -> [(unit, translated)]
+    standalone = []                    # units with no peer group
+    for u in units:
+        tr = resolved.get(u.id)
+        if tr is None:
             continue
-        # Distinct vertical slots so units sharing a cell never overlap.
-        slot_h = (y1 - y0) / n
-        for i, u in enumerate(cell_units):
-            tr = resolved.get(u.id)
-            if tr is None:
-                continue  # unresolved -> already flagged; leave blank (fail closed)
-            # Mirror source casing (headers are ALL-CAPS in source).
-            tr_cased = _source_text_transform_apply(tr, [{"text": u.source_text}]) \
-                if u.semantic_role in ("heading", "table_header") else tr
-            slot = pymupdf.Rect(x0, y0 + i * slot_h, x1, y0 + (i + 1) * slot_h)
-            align = {"center": 1, "right": 2}.get(getattr(u, "align_h", None) or "left", 0)
-            base_size = min(max(8.0, u.bbox[3] - u.bbox[1]), slot.height)
-            used = draw_paragraph_text(
-                page, slot, tr_cased, font_file, round(base_size, 1),
-                color=(0, 0, 0), align={0: "left", 1: "center", 2: "right"}[align],
-                min_size=7.0, valign="middle", clip=slot & page.rect,
-            )
-            if used is None or (isinstance(used, (int, float)) and used < 0):
-                stages["overflow"].append(u.id)
+        pg = getattr(u, "peer_group_id", None)
+        (peer_members[pg].append((u, tr)) if pg else standalone.append((u, tr)))
+
+    peer_size = {}   # pg -> chosen pt size
+    for pg, members in peer_members.items():
+        # Source cap: median source glyph height in the group (apparent size).
+        src_heights = sorted((u.bbox[3] - u.bbox[1]) for u, _ in members)
+        cap = src_heights[len(src_heights) // 2] if src_heights else 12.0
+        cap = max(8.0, min(cap, 40.0))
+        size = cap
+
+        # HEIGHT CAP: CONTENT items sharing ONE column cell are distributed into n
+        # rows; the per-row pitch limits how tall the text can be or rows overlap
+        # (the 'g' descenders collided). Cap size by the smallest row pitch — but ONLY
+        # for content cells, never header cells (headers are not row-distributed and
+        # capping them regressed merged-header centering/fit). Book-agnostic.
+        member_roles = {getattr(u, "semantic_role", "") for u, _ in members}
+        is_content_group = not (member_roles & {"heading", "table_header", "merged_header"})
+        if is_content_group:
+            by_cell = {}
+            for u, _tr in members:
+                cbk = tuple(round(c, 1) for c in (getattr(u, "cell_box", None) or u.bbox))
+                by_cell.setdefault(cbk, 0)
+                by_cell[cbk] += 1
+            for cbk, count in by_cell.items():
+                if count <= 0:
+                    continue
+                pad = _cell_pad(*cbk)
+                inner_h = (cbk[3] - pad) - (cbk[1] + pad)
+                pitch = inner_h / count if count else inner_h
+                # Leave headroom: text box ~= size*1.3 tall, so size <= pitch/1.3.
+                size = min(size, max(7.0, pitch / 1.3))
+
+        # WIDTH CAP: shrink until the widest member's longest line fits its padded width.
+        for u, tr in members:
+            cb = getattr(u, "cell_box", None) or u.bbox
+            pad = _cell_pad(*cb)
+            avail_w = max(4.0, (cb[2] - cb[0]) - 2 * pad)
+            longest = max((ln for ln in str(tr).split("\n")), key=len, default=str(tr))
+            while size > 7.0 and _text_width(longest, size) > avail_w:
+                size -= 0.5
+        peer_size[pg] = round(size, 1)
+
+    # CROSS-COLUMN HARMONISATION: the body content columns (word_list_item / phonics)
+    # are peers of EACH OTHER, not just within a column. Sized independently, a column
+    # with fewer rows gets a taller row pitch and renders BIGGER than its neighbours
+    # (the middle column looked oversized). Clamp all content columns to their SHARED
+    # minimum so the table body is one consistent size, like the source. Headers are
+    # excluded (they legitimately differ from body text). Book-agnostic.
+    content_pgs = []
+    for pg, members in peer_members.items():
+        roles = {getattr(u, "semantic_role", "") for u, _ in members}
+        if not (roles & {"heading", "table_header", "merged_header"}):
+            content_pgs.append(pg)
+    if len(content_pgs) >= 2:
+        shared = min(peer_size[pg] for pg in content_pgs)
+        for pg in content_pgs:
+            peer_size[pg] = shared
+
+    def _place(u, tr, size_override=None):
+        cb = tuple(getattr(u, "cell_box", None) or u.bbox)
+        x0, y0, x1, y1 = cb
+        pad = _cell_pad(x0, y0, x1, y1)
+        role = getattr(u, "semantic_role", "") or ""
+        is_header = role in ("heading", "table_header", "merged_header")
+        tr_cased = _source_text_transform_apply(tr, [{"text": u.source_text}]) if is_header else tr
+        align_h = {"center": "center", "right": "right"}.get(getattr(u, "align_h", None), "left")
+        # size: peer size if in a group, else source glyph height (clamped).
+        if size_override is not None:
+            size = size_override
+        else:
+            size = max(8.0, min(u.bbox[3] - u.bbox[1], 40.0))
+
+        # TASK 3 (uniform size): LOCK the peer size ONLY for non-header CONTENT items
+        # (word-list/phonics), so long words don't auto-shrink smaller than their peers.
+        # Headers must keep their natural fit/centering (locking them regressed the
+        # merged-header centering), so headers are never size-locked here.
+        draw_min = round(size, 1) if (size_override is not None and not is_header) else 7.0
+
+        if is_header:
+            # Header fills its (padded) cell; honour align_v.
+            valign = {"top": "top", "bottom": "bottom"}.get(getattr(u, "align_v", None), "middle")
+            box = pymupdf.Rect(x0 + pad, y0 + pad, x1 - pad, y1 - pad)
+        else:
+            # CONTENT item: place at its SOURCE ROW position within the column so
+            # rows line up across columns (don't redistribute into even bands).
+            # Row height must comfortably fit the LOCKED size so it isn't clipped.
+            row_h = max(size * 1.3, (u.bbox[3] - u.bbox[1]) * 1.15)
+            top = max(y0 + pad, min(u.bbox[1], y1 - pad - row_h))
+            box = pymupdf.Rect(x0 + pad, top, x1 - pad, min(top + row_h, y1 - pad))
+            valign = "middle"
+
+        clip = box & page.rect
+        used = draw_paragraph_text(
+            page, box, tr_cased, font_file, round(size, 1),
+            color=(0, 0, 0), align=align_h, min_size=draw_min, valign=valign, clip=clip,
+        )
+        return used
+
+    for u, tr in standalone:
+        used = _place(u, tr)
+        if used is None or (isinstance(used, (int, float)) and used < 0):
+            stages["overflow"].append(u.id)
+        else:
+            stages["inserted"] += 1
+
+    for pg, members in peer_members.items():
+        # Order top->bottom, left->right so reading order is preserved.
+        members.sort(key=lambda z: (round(z[0].bbox[1], 1), z[0].bbox[0]))
+
+        # Coalesce units that SHARE a cell_box (e.g. a multi-word/multi-line header
+        # "HIGH FREQUENCY WORDS" arrives as 3 heading units on ONE cell). Drawing them
+        # separately stacks them on top of each other (garbled). Instead join them in
+        # reading order and render the cell ONCE. Book-agnostic: keyed purely on a
+        # shared cell_box, not on any specific header text.
+        from collections import OrderedDict
+        groups = OrderedDict()
+        for u, tr in members:
+            cb = tuple(round(c, 1) for c in (getattr(u, "cell_box", None) or u.bbox))
+            groups.setdefault(cb, []).append((u, tr))
+
+        for cb, cell_members in groups.items():
+            if len(cell_members) == 1:
+                u, tr = cell_members[0]
+                used = _place(u, tr, size_override=peer_size.get(pg))
+                if used is None or (isinstance(used, (int, float)) and used < 0):
+                    stages["overflow"].append(u.id)
+                else:
+                    stages["inserted"] += 1
+                continue
+
+            # Multiple units share this cell.
+            roles = {getattr(u, "semantic_role", "") for u, _ in cell_members}
+            is_header_cell = roles & {"heading", "table_header", "merged_header"}
+            if is_header_cell:
+                rep_u = cell_members[0][0]
+                joined = " ".join(str(tr).strip() for _, tr in cell_members if str(tr).strip())
+                used = _place(rep_u, joined, size_override=peer_size.get(pg))
+                # Count each source unit as placed (the cell is rendered).
+                if used is None or (isinstance(used, (int, float)) and used < 0):
+                    stages["overflow"].extend(u.id for u, _ in cell_members)
+                else:
+                    stages["inserted"] += len(cell_members)
             else:
-                stages["inserted"] += 1
+                # TASK 5 (vertical distribution): content items share ONE full-column
+                # cell_box. Distribute them EVENLY down the column (uniform row pitch)
+                # instead of at raw source-y, so columns with different item counts each
+                # fill their height with consistent rhythm and read cleanly. Book-agnostic.
+                cell_members.sort(key=lambda z: (round(z[0].bbox[1], 1), z[0].bbox[0]))
+                x0, y0, x1, y1 = cb
+                pad = _cell_pad(x0, y0, x1, y1)
+                n = len(cell_members)
+                size = peer_size.get(pg) or max(8.0, min(cell_members[0][0].bbox[3] - cell_members[0][0].bbox[1], 40.0))
+                # Start clearly below the cell top so the first row never rides up into
+                # the header band above it (content cell_box top can abut the header,
+                # and a colspan header covers several content columns).
+                top_inset = max(pad, size * 0.9, 8.0)
+                inner_top = y0 + top_inset
+                inner_h = (y1 - pad) - inner_top
+                pitch = inner_h / n if n else inner_h
+                align_h = {"center": "center", "right": "right"}.get(
+                    getattr(cell_members[0][0], "align_h", None), "left")
+                for i, (u, tr) in enumerate(cell_members):
+                    slot = pymupdf.Rect(x0 + pad, inner_top + i * pitch,
+                                        x1 - pad, inner_top + (i + 1) * pitch)
+                    clip = slot & page.rect
+                    used = draw_paragraph_text(
+                        page, slot, tr, font_file, round(size, 1),
+                        color=(0, 0, 0), align=align_h, min_size=round(size, 1),
+                        valign="middle", clip=clip,
+                    )
+                    if used is None or (isinstance(used, (int, float)) and used < 0):
+                        stages["overflow"].append(u.id)
+                    else:
+                        stages["inserted"] += 1
 
     # 5) Record + fail-closed policy.
     report.setdefault("vocabulary", {})[str(page_num)] = stages
@@ -1474,6 +1794,13 @@ def render_vocabulary_page_v8(page, page_spans, translations_map, fonts_dir, pag
                               id_to_translation=None, allow_legacy_flat=False, page_scene=None):
     """
     V8 vocabulary page: Manifest-driven per-span replacement.
+
+    FALLBACK renderer: the production dispatch prefers
+    render_vocabulary_page_from_scene() and only reaches this when there is no scene
+    graph / no stable-ID contract for the page. It fails closed (CONTRACT_BRIDGE_MISS
+    + route to review) unless allow_legacy_flat is explicitly set (Task 11). Retained
+    deliberately as the tested no-contract fallback — do not delete without updating
+    test_table_structure.py's Task-11 cases.
 
     Uses the page manifest to get stable content IDs and exact coordinates.
 
@@ -1976,6 +2303,34 @@ def _find_span_at_origin(page_spans, origin, tolerance=3):
 # COVER PAGE — Replace only subtitle
 # =============================================================================
 
+def _dominant_span_color(spans, default=(0, 0, 0)):
+    """
+    Return the source subtitle colour as an (r,g,b) 0-1 tuple, taken from the
+    source spans so the translated subtitle matches the ORIGINAL text colour
+    (book-agnostic — no hardcoded palette). Picks the most common span colour,
+    weighted by text length so the dominant title colour wins over any stray
+    symbol span. Spans store colour as '#rrggbb' (see span extraction).
+    """
+    from collections import Counter
+    tally = Counter()
+    for s in spans or []:
+        hexcol = s.get("color")
+        if not isinstance(hexcol, str) or not hexcol.startswith("#") or len(hexcol) != 7:
+            continue
+        weight = max(1, len((s.get("text_stripped") or "").strip()))
+        tally[hexcol.lower()] += weight
+    if not tally:
+        return default
+    hexcol = tally.most_common(1)[0][0]
+    try:
+        r = int(hexcol[1:3], 16) / 255.0
+        g = int(hexcol[3:5], 16) / 255.0
+        b = int(hexcol[5:7], 16) / 255.0
+        return (r, g, b)
+    except ValueError:
+        return default
+
+
 def render_cover_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report):
     """
     V8 cover: Find the subtitle span(s) (large text, not symbols),
@@ -1985,10 +2340,15 @@ def render_cover_page_v8(page, page_spans, translations_map, fonts_dir, page_num
     if not translated_text.strip():
         return
 
-    # Find subtitle spans (>= 40px, more than 2 chars, not ®)
+    # Find subtitle spans: large font (>= 40px) that carry real letters/digits.
+    # We DON'T require >2 chars per span, because some covers set the subtitle as
+    # one span PER LETTER (e.g. 'C','o','l','o','u','r','s'); requiring >2 chars
+    # dropped the whole title on those books. Instead we keep any large-font span
+    # with at least one alphanumeric char, which still excludes the ® symbol span
+    # (it extracts as a non-alphanumeric replacement char). Book-agnostic.
     subtitle_spans = [s for s in page_spans
                       if s["font_size"] >= 40
-                      and len(s["text_stripped"]) > 2]
+                      and any(ch.isalnum() for ch in s["text_stripped"])]
 
     if not subtitle_spans:
         return
@@ -2007,11 +2367,22 @@ def render_cover_page_v8(page, page_spans, translations_map, fonts_dir, page_num
     sub_max_x = max(s["bbox"][2] for s in subtitle_spans)
     sub_max_y = max(s["bbox"][3] for s in subtitle_spans)
 
-    # Remove subtitle spans with bg-color-aware fill
-    for span in subtitle_spans:
-        bg = _detect_bg_at_span(page, span)
-        remove_span(page, span, fill_color=bg)
-    page.apply_redactions()
+    # Remove subtitle spans by ERASING glyphs against the true background
+    # (no fill rectangle) so we never stamp an off-colour block behind the
+    # translated subtitle. Book-agnostic: works on any cover background.
+    remove_spans_preserving_background(page, subtitle_spans)
+
+    # Some covers draw a decorative OUTLINE/EMBOSS duplicate of the original
+    # title as vector line-art behind the live text. Text redaction preserves
+    # line-art, so that outline copy of the SOURCE-language title survives as a
+    # ghost behind the translated title. Remove only those outline duplicates
+    # (stroke-only, light, hairline vectors fully inside the subtitle band).
+    # Book-agnostic: matches nothing when no such ghost exists.
+    band = pymupdf.Rect(sub_min_x, sub_min_y, sub_max_x, sub_max_y)
+    ghosts = remove_outline_duplicate_vectors(page, band)
+    if ghosts:
+        report.setdefault("cover_outline_ghosts_removed", 0)
+        report["cover_outline_ghosts_removed"] += ghosts
 
     # Reliable font path (insert_text + explicit fontfile): htmlbox falls back to
     # CharisSIL and corrupts the text layer on this PyMuPDF. Match the SOURCE
@@ -2020,10 +2391,14 @@ def render_cover_page_v8(page, page_spans, translations_map, fonts_dir, page_num
     subtitle_text = _source_text_transform_apply(subtitle_text, subtitle_spans)
     font_file = _weight_aware_house_font(subtitle_spans, fonts_dir)
     src_size = max((s["font_size"] for s in subtitle_spans), default=44)
+    # Use the SOURCE subtitle's own colour so the translation matches the original
+    # design exactly, instead of a hardcoded purple. Book-agnostic: read from the
+    # source spans (the extractor stores each span's colour as #rrggbb).
+    text_color = _dominant_span_color(subtitle_spans, default=(0x3d / 255, 0x2c / 255, 0x7c / 255))
     box = pymupdf.Rect(40, sub_min_y - 10, page.rect.width - 40, sub_max_y + 15)
     used = draw_paragraph_text(
         page, box, subtitle_text, font_file, round(src_size),
-        color=(0x3d / 255, 0x2c / 255, 0x7c / 255),  # keep the cover's purple
+        color=text_color,
         line_height=1.2, align="center", min_size=round(src_size) * 0.6,
     )
     if used is not None:
@@ -2055,12 +2430,10 @@ def render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num
     # source's visual casing so the translated book matches the original design.
     text_transform = _source_text_transform(content_spans)
 
-    # Mask original text using the DOMINANT page background (not a single left
-    # pixel) so we don't stamp white boxes on a coloured page.
-    bg_color = _detect_page_background(page)
-    for span in content_spans:
-        remove_span(page, span, fill_color=bg_color)
-    page.apply_redactions()
+    # Erase original text glyphs against the TRUE background (no fill rectangle),
+    # so no coloured box is stamped behind each translated title line. This
+    # preserves gradients/artwork under the text and is book-agnostic.
+    remove_spans_preserving_background(page, content_spans)
 
     # Text zone from span positions
     min_x = min(s["bbox"][0] for s in content_spans)
@@ -3426,13 +3799,15 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None, onl
         elif page_type == 'vocabulary':
             # Book-agnostic scene-driven path (place by stable id + cell_box) when the
             # scene graph AND a stable-id contract are available; otherwise fall back to
-            # the legacy page_spans path (which fails closed on no-contract per Task 11).
+            # the legacy page_spans path (which fails closed on no-contract per Task 11,
+            # and only uses the lossy legacy flat mapper when allow_legacy_flat is set).
             _handled = None
             if page_scene_obj is not None and id_to_translation:
                 _handled = render_vocabulary_page_from_scene(
                     page, page_scene_obj, id_to_translation, fonts_dir, page_num, report)
             # _handled is True/False when the scene path did the work (flagged or not);
-            # None means it declined (no units) → fall back to the legacy renderer.
+            # None means it declined (no units / no contract) → legacy path, which
+            # itself fails closed (CONTRACT_BRIDGE_MISS + review) unless allow_legacy_flat.
             if _handled is None:
                 render_vocabulary_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report,
                                           id_to_translation=id_to_translation or None,

@@ -117,8 +117,8 @@
         /* Select */
         .tb-select {
             height: 36px; padding: 0 10px;
-            border: none; border-radius: var(--control-radius);
-            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.10); border-radius: var(--control-radius);
+            background-color: rgba(255,255,255,0.08);
             color: var(--toolbar-text);
             font-size: 12px;
             cursor: pointer;
@@ -128,6 +128,24 @@
             background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%23aaa' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");
             background-repeat: no-repeat;
             background-position: right 8px center;
+            transition: background-color var(--transition-fast), border-color var(--transition-fast);
+        }
+        .tb-select:hover { background-color: rgba(255,255,255,0.14); }
+        .tb-select:focus {
+            outline: none;
+            border-color: var(--brand-accent);
+            box-shadow: 0 0 0 2px rgba(249,115,22,0.35);
+        }
+        /* Open dropdown list: match the dark purple reader chrome instead of the
+           browser's default white + harsh blue highlight. */
+        .tb-select option {
+            background: #241f38;              /* deep purple, harmonises with --stage-bg */
+            color: var(--toolbar-text);
+        }
+        .tb-select option:checked,
+        .tb-select option:hover {
+            background: var(--brand-accent);  /* Mthombothi orange for the active item */
+            color: #ffffff;
         }
 
         /* ===== READING STAGE ===== */
@@ -932,6 +950,9 @@
             totalPages: {{ $book->page_count }},
             currentPage: 1,
             bookId: {{ $book->id }},
+            // Printed page labels from the PDF's /PageLabels (Task 11). 1-based sheet
+            // index => book's printed folio string. Empty when the PDF has none.
+            pageLabels: @json($pageLabels ?? []),
             viewMode: 'auto',      // 'auto', 'single', 'spread'
             displayMode: 'single', // actual current mode: 'single' or 'spread'
             hasRightPage: false,   // whether the current spread has a right page to show
@@ -1019,12 +1040,20 @@
             touchStartY: 0,
 
             // === COMPUTED ===
+            // Printed folio for a 1-based sheet index (Task 11): prefer the PDF's own
+            // page label; fall back to the raw sheet number when no label exists.
+            labelFor(sheet) {
+                const l = this.pageLabels && this.pageLabels[sheet];
+                return (l !== undefined && l !== null && String(l).trim() !== '')
+                    ? String(l) : String(sheet);
+            },
+
             get pageLabel() {
                 if (this.displayMode === 'spread' && this.currentPage < this.totalPages) {
                     const right = Math.min(this.currentPage + 1, this.totalPages);
-                    return `Pages ${this.currentPage}-${right} of ${this.totalPages}`;
+                    return `Pages ${this.labelFor(this.currentPage)}-${this.labelFor(right)} of ${this.totalPages}`;
                 }
-                return `Page ${this.currentPage} of ${this.totalPages}`;
+                return `Page ${this.labelFor(this.currentPage)} of ${this.totalPages}`;
             },
 
             get progressPct() {
@@ -1032,12 +1061,14 @@
             },
 
             // Compact "current/total" counter for the bottom bar (FlipHTML5 style).
+            // Shows the BOOK's printed page number (from PDF page labels) with the total
+            // sheet count, so it matches the folio printed on the page.
             get pageCounter() {
                 if (this.displayMode === 'spread' && this.hasRightPage) {
                     const right = Math.min(this.currentPage + 1, this.totalPages);
-                    return `${this.currentPage}-${right}/${this.totalPages}`;
+                    return `${this.labelFor(this.currentPage)}-${this.labelFor(right)}/${this.totalPages}`;
                 }
-                return `${this.currentPage}/${this.totalPages}`;
+                return `${this.labelFor(this.currentPage)}/${this.totalPages}`;
             },
 
             get pageStyle() {

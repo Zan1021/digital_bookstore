@@ -646,6 +646,23 @@ The page contains three types of content:
    - Use natural {$langName} example words appropriate for the age group
    - Preserve the educational objective and approximate difficulty level
    - Example: English "oa - float" → {$langName} equivalent sound-spelling pattern with examples
+
+   ⚠️ ABSOLUTE RULE FOR PHONICS EXAMPLES (most common mistake — do NOT make it):
+   Every example word you give MUST literally CONTAIN the exact letter-pattern being taught.
+   The pattern is the letters BEFORE the dash; the words after it are examples of that pattern.
+   - If the pattern is a letter combination (e.g. "sk", "oe", "aa", "ei"), EACH example word
+     must contain those exact letters in that order.
+   - If the pattern is a doubled letter (e.g. "ll", "kk", "ss"), EACH example word must contain
+     that doubled letter (e.g. "ll" → "ballon, stelle" — NOT "bal" or "val" which have one l).
+   - WRONG (do NOT do this): "kk - trek" (trek has one k), "ss - mis" (mis has one s),
+     "gg - eier" (eier has no gg).
+   - RIGHT: "kk - lekker, bakker", "aa - maan, kraal", "oe - koek, boek", "ei - trein, eier".
+   - Choose a {$langName} pattern that genuinely has good, common, age-appropriate example words.
+     You do NOT need to mirror the English pattern — pick a valid {$langName} one that teaches a
+     real {$langName} spelling rule.
+   - Before finalising, RE-READ each line and verify every example word contains the pattern.
+     If a word does not contain the pattern, replace it with one that does, or change the pattern.
+   Format each phonics line as: "pattern - word1, word2" (2 example words per pattern).
 {$glossaryStr}
 
 OUTPUT FORMAT:
@@ -657,13 +674,130 @@ STORY CONTEXT (to help resolve word meanings):
 The book is about a child called Kolulu who lives in an African setting with forests, rivers, waterfalls, and wildlife. Activities include swimming, sports, table tennis, reading, and exploring outdoors.
 PROMPT;
 
-        return $this->chatWithRetry([
-            'messages' => [
-                ['role' => 'system', 'content' => $systemPrompt],
-                ['role' => 'user', 'content' => "Translate this educational page:\n\n{$text}"],
-            ],
-            'temperature' => 0.3, // Low temperature for educational accuracy
-        ]);
+        // Generate, then VALIDATE phonics examples deterministically. If any example
+        // word does not contain its taught pattern, ask the model to fix ONLY those
+        // lines (up to 2 correction passes). If still invalid, return the best result
+        // and log the offenders so the page is flagged for human review rather than
+        // silently shipping pedagogically wrong phonics. Book-agnostic: the check is a
+        // pure substring test (pattern must appear in each example word).
+        $messages = [
+            ['role' => 'system', 'content' => $systemPrompt],
+            ['role' => 'user', 'content' => "Translate this educational page:\n\n{$text}"],
+        ];
+        $result = $this->chatWithRetry(['messages' => $messages, 'temperature' => 0.3]);
+
+        for ($pass = 0; $pass < 2; $pass++) {
+            $bad = $this->invalidPhonicsLines($result);
+            if (empty($bad)) {
+                break;
+            }
+            Log::warning('Phonics examples failed validation; requesting correction', [
+                'pass' => $pass + 1,
+                'invalid_lines' => $bad,
+            ]);
+            $fixList = implode("\n", array_map(fn ($b) => "  - \"{$b['line']}\" — the word(s) "
+                . implode(', ', $b['bad_words']) . " do not contain the pattern \"{$b['pattern']}\"", $bad));
+            $messages[] = ['role' => 'assistant', 'content' => $result];
+            $messages[] = ['role' => 'user', 'content' =>
+                "Some phonics lines are INVALID — the example word must literally contain the "
+                . "pattern (the letters before the dash):\n{$fixList}\n\n"
+                . "Return the FULL page again, correcting ONLY those phonics lines so every example "
+                . "word contains its pattern (replace the word, or change the pattern to a valid "
+                . "{$langName} one with real example words). Keep everything else identical."];
+            $result = $this->chatWithRetry(['messages' => $messages, 'temperature' => 0.2]);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Deterministically validate the phonics lines in a translated vocabulary page.
+     * A phonics line looks like "pattern - word1, word2" (the pattern is the token
+     * before the dash; the comma-separated words after it are examples). Every example
+     * word MUST literally contain the pattern (case-insensitive, spaces ignored).
+     *
+     * Returns a list of offending lines: [['line'=>..., 'pattern'=>..., 'bad_words'=>[...]]].
+     * Empty list == all phonics examples are valid. Book-agnostic — no language-specific
+     * assumptions, just substring containment.
+     *
+     * @return array<int,array{line:string,pattern:string,bad_words:array<int,string>}>
+     */
+    private function invalidPhonicsLines(string $translatedPage): array
+    {
+        // Normalise into logical phonics entries. Source phonics come in two shapes:
+        //   (A) one line: "br - broek, breek"  OR  "- kk lekker, bakker"
+        //   (B) two lines: "- kk"  then  "   lekker, bakker"  (pattern then examples)
+        // We first pair up shape (B) so every entry is (pattern, examples).
+        $rawLines = preg_split('/\r\n|\r|\n/', $translatedPage);
+        $lines = [];
+        foreach ($rawLines as $raw) {
+            $t = trim($raw);
+            if ($t !== '') {
+                $lines[] = $t;
+            }
+        }
+
+        // Section headers we must NEVER treat as phonics patterns.
+        $isHeaderLike = function (string $s): bool {
+            $letters = preg_replace('/[^\p{L}]/u', '', $s);
+            // All-caps line (e.g. "WOORDE", "HOË FREKWENSIE WOORDE", "FONIES", "KLANKLEER").
+            if ($letters !== '' && mb_strtoupper($letters) === $letters) {
+                return true;
+            }
+            return (bool) preg_match('/\b(WOORDE|FREKWENSIE|FONIES|KLANKLEER|WORDS|PHONICS|FREQUENCY)\b/ui', $s);
+        };
+
+        // Build (pattern, examples) entries.
+        $entries = [];
+        for ($i = 0; $i < count($lines); $i++) {
+            $line = $lines[$i];
+            if ($isHeaderLike($line)) {
+                continue;
+            }
+            // Shape (A): pattern + separator + examples on the same line.
+            if (preg_match('/^[-–—•]?\s*([\p{L}]{1,4}(?:\s[\p{L}])?)\s*[-–—]\s+(.+)$/u', $line, $m)) {
+                $entries[] = ['line' => $line, 'pattern' => $m[1], 'examples' => $m[2]];
+                continue;
+            }
+            // Shape (B): a lone "pattern" line (e.g. "- kk") followed by an examples line.
+            if (preg_match('/^[-–—•]\s*([\p{L}]{1,4})\s*$/u', $line, $m)) {
+                $next = $lines[$i + 1] ?? '';
+                if ($next !== '' && !$isHeaderLike($next) && preg_match('/\p{L}/u', $next)
+                    && !preg_match('/^[-–—•]/u', $next)) {
+                    $entries[] = ['line' => $line . ' ' . $next, 'pattern' => $m[1], 'examples' => $next];
+                    $i++; // consume the examples line
+                }
+                continue;
+            }
+            // Shape (A) with a SPACE separator: "- kk lekker, bakker" (pattern then space).
+            if (preg_match('/^[-–—•]\s*([\p{L}]{1,4})\s+([\p{L}].+)$/u', $line, $m)) {
+                $entries[] = ['line' => $line, 'pattern' => $m[1], 'examples' => $m[2]];
+                continue;
+            }
+        }
+
+        $offenders = [];
+        foreach ($entries as $e) {
+            $pattern = mb_strtolower(str_replace(' ', '', $e['pattern']));
+            if (mb_strlen($pattern) < 1 || mb_strlen($pattern) > 4) {
+                continue;
+            }
+            $badWords = [];
+            foreach (preg_split('/[,\/]/u', $e['examples']) as $wordRaw) {
+                $word = mb_strtolower(trim($wordRaw));
+                $word = preg_replace('/[^\p{L}]/u', '', $word);
+                if ($word === '') {
+                    continue;
+                }
+                if (mb_strpos($word, $pattern) === false) {
+                    $badWords[] = trim($wordRaw);
+                }
+            }
+            if (!empty($badWords)) {
+                $offenders[] = ['line' => $e['line'], 'pattern' => $e['pattern'], 'bad_words' => $badWords];
+            }
+        }
+        return $offenders;
     }
 
     /**

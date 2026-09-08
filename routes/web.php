@@ -119,7 +119,49 @@ Route::get('/read/{book}', function (Book $book) {
         }
     }
 
-    return view('reader', compact('book', 'pdfPath', 'lang', 'pageAudioMap', 'pageTimingMap'));
+    // PAGE LABELS (Task 11): the ebook viewer was showing the raw PDF SHEET index
+    // (e.g. 14/20) while the book's own printed folio is different (e.g. 12), because
+    // unnumbered front matter (cover/copyright/title) is counted by the viewer but not
+    // by the book. Many of these PDFs carry embedded /PageLabels that define the real
+    // printed numbering. We cache the extracted per-sheet labels on book.metadata so we
+    // never shell out at request time after the first load. Book-agnostic; empty when
+    // the PDF has no labels (reader then falls back to the sheet index).
+    $pageLabels = [];
+    $meta = $book->metadata ?? [];
+    if (isset($meta['page_labels']) && is_array($meta['page_labels'])) {
+        $pageLabels = $meta['page_labels'];
+    } else {
+        try {
+            // Read labels from the SOURCE PDF (printed folios are identical across
+            // languages, and the translated render may not carry /PageLabels through).
+            $absPdf = \Illuminate\Support\Facades\Storage::disk('public')->path($book->pdf_path);
+            if (is_file($absPdf)) {
+                $proc = new \Symfony\Component\Process\Process([
+                    'python', '-c',
+                    'import sys,json,pymupdf; d=pymupdf.open(sys.argv[1]); '
+                    . 'print(json.dumps([d[i].get_label() or "" for i in range(len(d))]))',
+                    $absPdf,
+                ]);
+                $proc->setTimeout(30);
+                $proc->run();
+                if ($proc->isSuccessful()) {
+                    $decoded = json_decode(trim($proc->getOutput()), true);
+                    if (is_array($decoded)) {
+                        foreach ($decoded as $idx => $label) {
+                            $pageLabels[$idx + 1] = (string) $label;
+                        }
+                        // Cache on the book so future loads skip the subprocess.
+                        $meta['page_labels'] = $pageLabels;
+                        $book->forceFill(['metadata' => $meta])->save();
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            $pageLabels = []; // Non-fatal: reader falls back to the sheet index.
+        }
+    }
+
+    return view('reader', compact('book', 'pdfPath', 'lang', 'pageAudioMap', 'pageTimingMap', 'pageLabels'));
 })->name('reader');
 
 // THROWAWAY page-curl prototype (spec: specs/page-curl-reader). Self-contained, does NOT
