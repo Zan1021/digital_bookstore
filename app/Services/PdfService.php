@@ -72,17 +72,12 @@ class PdfService
         $this->resolveFonts($fullPath);
 
         // Generate V8 page manifest (stable content IDs for translation)
-        $this->generateManifest($book, $fullPath);
+        $this->rebuildManifest($book, $fullPath);
 
-        // Auto-generate narration if text was extracted and ElevenLabs is configured
-        if ($hasText && !empty(config('services.elevenlabs.api_key'))) {
-            try {
-                $this->autoNarrate($book);
-            } catch (\Throwable $e) {
-                // Don't fail the upload if narration fails
-                \Log::warning("Auto-narration failed for book {$book->id}: " . $e->getMessage());
-            }
-        }
+        // NOTE: narration is intentionally NOT triggered here. Upload only creates the
+        // ebook; narration is chosen deliberately on the book management page
+        // (gated-translation-narration-flow Req 1.3 / Req 2). The original language may
+        // be narrated immediately there; translated editions only after approval.
 
         return $book;
     }
@@ -224,15 +219,29 @@ class PdfService
     /**
      * Generate V8 page manifest using the Python manifest builder.
      * Stores the manifest as JSON alongside the book's PDF.
+     *
+     * PUBLIC + reusable: called both on upload and by `book:rebuild-manifest`. Uses the
+     * scene-graph builder (builder=scene_graph) which carries merged-header structure.
+     * If $pdfPath is null it is resolved from the book's stored pdf_path.
+     *
+     * @return bool true if the manifest was (re)generated successfully.
      */
-    private function generateManifest(Book $book, string $pdfPath): void
+    public function rebuildManifest(Book $book, ?string $pdfPath = null): bool
     {
         $scriptPath = base_path('scripts/page_manifest.py');
         $manifestPath = storage_path("app/public/books/manifests/{$book->id}_manifest.json");
 
+        if ($pdfPath === null) {
+            if (!$book->pdf_path || !Storage::disk('public')->exists($book->pdf_path)) {
+                Log::warning("rebuildManifest: source PDF missing for book {$book->id}");
+                return false;
+            }
+            $pdfPath = Storage::disk('public')->path($book->pdf_path);
+        }
+
         if (!file_exists($scriptPath)) {
             Log::warning("Page manifest script not found: {$scriptPath}");
-            return;
+            return false;
         }
 
         // Ensure manifests directory exists
@@ -242,6 +251,7 @@ class PdfService
         }
 
         try {
+            // Scene-graph builder (default, no --legacy): carries merged-header structure.
             $process = new \Symfony\Component\Process\Process([
                 'python',
                 $scriptPath,
@@ -249,19 +259,30 @@ class PdfService
                 '--output', $manifestPath,
             ]);
 
-            $process->setTimeout(60);
+            // Scene graph is heavier than the old flat builder; give it room.
+            $process->setTimeout(180);
             $process->run();
 
             if ($process->isSuccessful()) {
-                // Store manifest path on the book
                 $book->update(['manifest_path' => "books/manifests/{$book->id}_manifest.json"]);
-                Log::info("V8 manifest generated for book {$book->id}: {$manifestPath}");
-            } else {
-                Log::warning("Manifest generation failed for book {$book->id}: " . $process->getErrorOutput());
+                Log::info("V8 scene-graph manifest generated for book {$book->id}: {$manifestPath}");
+                return true;
             }
+
+            Log::warning("Manifest generation failed for book {$book->id}: " . $process->getErrorOutput());
+            return false;
         } catch (\Throwable $e) {
             Log::warning("Manifest generation error for book {$book->id}: " . $e->getMessage());
+            return false;
         }
+    }
+
+    /**
+     * @deprecated Use rebuildManifest(). Kept as a thin alias for any internal callers.
+     */
+    private function generateManifest(Book $book, string $pdfPath): void
+    {
+        $this->rebuildManifest($book, $pdfPath);
     }
 
     /**
@@ -269,6 +290,95 @@ class PdfService
      * Returns null if no TrimBox is found.
      */
     public function detectCropMarks(string $pdfPath): ?array
+    {
+        try {
+            $fullPath = Storage::disk('public')->path($pdfPath);
+            if (!is_file($fullPath)) {
+                return null;
+            }
+
+            // Use the dedicated crop-mark detection engine (scripts/cropmark_detection.py):
+            // TrimBox metadata → vector crop-mark detection → book-wide consensus. This
+            // is far more capable than a PHP-only TrimBox read (which misses PDFs whose
+            // marks are vector art with no TrimBox, and mis-reads some TrimBox encodings).
+            $scriptPath = base_path('scripts/cropmark_detection.py');
+            if (!file_exists($scriptPath)) {
+                return $this->detectCropMarksFallback($pdfPath); // legacy TrimBox reader
+            }
+
+            $process = new \Symfony\Component\Process\Process([
+                'python', $scriptPath, 'detect', '--input', $fullPath, '--json',
+            ]);
+            $process->setTimeout(120);
+            $process->run();
+
+            if (!$process->isSuccessful()) {
+                Log::warning("cropmark_detection.py failed for {$pdfPath}: " . $process->getErrorOutput());
+                return $this->detectCropMarksFallback($pdfPath);
+            }
+
+            $result = json_decode($process->getOutput(), true);
+            if (!is_array($result) || empty($result['has_crop_marks']) || empty($result['consensus_trim_box'])) {
+                // No crop marks — render as-is (this is a valid, confident outcome).
+                return null;
+            }
+
+            // consensus_trim_box is absolute points [x0,y0,x1,y1]. Convert to per-edge
+            // fractions of the MediaBox — the loss-free representation the reader
+            // consumes via Book::getCropBoxFractions().
+            $trim = $result['consensus_trim_box'];
+            $media = $result['media_box'] ?? null;
+            if (!$media || count($media) < 4) {
+                return $this->detectCropMarksFallback($pdfPath);
+            }
+
+            $mediaW = $media[2] - $media[0];
+            $mediaH = $media[3] - $media[1];
+            if ($mediaW <= 0 || $mediaH <= 0) {
+                return $this->detectCropMarksFallback($pdfPath);
+            }
+
+            $left   = ($trim[0] - $media[0]) / $mediaW;
+            $bottom = ($trim[1] - $media[1]) / $mediaH;
+            $right  = ($media[2] - $trim[2]) / $mediaW;
+            $top    = ($media[3] - $trim[3]) / $mediaH;
+
+            $cropTop = round($top * 100, 1);
+            $cropBottom = round($bottom * 100, 1);
+            $cropLeft = round($left * 100, 1);
+            $cropRight = round($right * 100, 1);
+
+            return [
+                'detected' => true,
+                'confidence' => $result['confidence'] ?? null,
+                'detection_source' => $result['detection_summary'] ?? null,
+                'crop_top' => $cropTop,
+                'crop_bottom' => $cropBottom,
+                'crop_left' => $cropLeft,
+                'crop_right' => $cropRight,
+                'crop_avg' => round(($cropTop + $cropBottom + $cropLeft + $cropRight) / 4, 1),
+                'crop_box' => [
+                    'left' => round($left, 4),
+                    'top' => round($top, 4),
+                    'right' => round($right, 4),
+                    'bottom' => round($bottom, 4),
+                ],
+                'trim_width_mm' => round(($trim[2] - $trim[0]) * 0.3528),
+                'trim_height_mm' => round(($trim[3] - $trim[1]) * 0.3528),
+                'media_width_mm' => round($mediaW * 0.3528),
+                'media_height_mm' => round($mediaH * 0.3528),
+            ];
+        } catch (\Throwable $e) {
+            Log::warning("detectCropMarks error for {$pdfPath}: " . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Legacy PHP-only TrimBox reader — used only if the Python crop engine is
+     * unavailable. Detects crop only when an explicit TrimBox < MediaBox exists.
+     */
+    private function detectCropMarksFallback(string $pdfPath): ?array
     {
         try {
             $fullPath = Storage::disk('public')->path($pdfPath);

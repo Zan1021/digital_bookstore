@@ -6,7 +6,6 @@ use App\Models\Book;
 use App\Models\ProcessingJob;
 use App\Models\Translation;
 use App\Models\Narration;
-use Illuminate\Support\Facades\Storage;
 use Livewire\Component;
 
 class Dashboard extends Component
@@ -32,45 +31,25 @@ class Dashboard extends Component
 
     public function deleteBook(int $bookId)
     {
-        $book = Book::findOrFail($bookId);
+        // Resolve without throwing: if the card was already deleted (e.g. a
+        // double-click or a stale list before Livewire re-rendered), just clear
+        // the confirm state so the UI recovers without needing a page refresh.
+        $book = Book::find($bookId);
 
-        // Delete associated files
-        if ($book->pdf_path && Storage::disk('public')->exists($book->pdf_path)) {
-            Storage::disk('public')->delete($book->pdf_path);
+        if (! $book) {
+            $this->confirmingDelete = null;
+            return;
         }
 
-        // Delete narration audio files
-        foreach ($book->narrations as $narration) {
-            if ($narration->page_audio_paths) {
-                foreach ($narration->page_audio_paths as $path) {
-                    if (Storage::disk('public')->exists($path)) {
-                        Storage::disk('public')->delete($path);
-                    }
-                    $timingPath = str_replace('.mp3', '-timing.json', $path);
-                    if (Storage::disk('public')->exists($timingPath)) {
-                        Storage::disk('public')->delete($timingPath);
-                    }
-                }
-            }
-        }
+        $title = $book->title;
 
-        // Delete translated PDFs
-        foreach ($book->translations as $translation) {
-            $translatedPdfPath = "books/translated/{$book->id}_{$translation->language_code}.pdf";
-            if (Storage::disk('public')->exists($translatedPdfPath)) {
-                Storage::disk('public')->delete($translatedPdfPath);
-            }
-            $translation->translatedPages()->delete();
-        }
-
-        // Delete related records
-        $book->narrations()->delete();
-        $book->translations()->delete();
-        $book->pages()->delete();
+        // The Book model's deleting hook removes every associated file (source PDF,
+        // cover, manifest, translated PDFs, narration audio tree, comparison renders)
+        // and cascades child records — so a single delete() is a complete teardown.
         $book->delete();
 
         $this->confirmingDelete = null;
-        session()->flash('success', "Deleted \"{$book->title}\" and all associated files.");
+        session()->flash('success', "Deleted \"{$title}\" and all associated files.");
     }
 
     public function render()

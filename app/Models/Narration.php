@@ -17,6 +17,7 @@ class Narration extends Model
         'voice_id',
         'voice_name',
         'status',
+        'is_outdated',
         'audio_path',
         'page_audio_paths',
         'duration_seconds',
@@ -24,6 +25,7 @@ class Narration extends Model
 
     protected $casts = [
         'page_audio_paths' => 'array',
+        'is_outdated' => 'boolean',
     ];
 
     public function book(): BelongsTo

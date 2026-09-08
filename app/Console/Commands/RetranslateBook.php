@@ -27,17 +27,31 @@ class RetranslateBook extends Command
 
         try {
             $service = new TranslationService();
-            $translation = $service->translate($book, $language);
+            // Use the manifest-driven path so per-id translations are persisted
+            // (item_translations / fix B). Falls back to legacy translate() automatically
+            // if the book has no manifest.
+            $translation = $service->translateWithManifest($book, $language);
 
             $this->info("✓ Translation complete! ID: {$translation->id}, Status: {$translation->status}");
             $this->info("Now re-rendering PDF...");
 
-            // Trigger PDF render
+            // Trigger PDF render (createTranslatedPdf takes the book + translation)
             $pdfService = app(\App\Services\PdfTranslationService::class);
-            $pdfService->renderTranslatedPdf($translation);
+            $outputPath = $pdfService->createTranslatedPdf($book, $translation);
+
+            // Persist the render result so admin surfaces (review queue, book manager,
+            // reader route) resolve the FRESH pdf. Without this, rendered_pdf_path/status
+            // stay stale and the review queue shows an old render. Fail-closed (§13):
+            // only mark rendered when layout QA passed.
+            $translation->refresh();
+            $translation->update([
+                'rendered_pdf_path' => $outputPath,
+                'status' => $translation->isPublishable() ? 'rendered' : 'needs_review',
+            ]);
 
             $this->info("✓ PDF rendered successfully.");
-            $this->info("URL: http://127.0.0.1:8001/storage/books/translated/{$bookId}_{$language}.pdf");
+            $this->info("Render status: {$translation->render_status} · edition status: {$translation->status}");
+            $this->info("URL: http://127.0.0.1:8000/read/{$bookId}?lang={$language}");
 
             return 0;
         } catch (\Exception $e) {

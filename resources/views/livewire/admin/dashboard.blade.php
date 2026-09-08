@@ -114,10 +114,10 @@
     @else
         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
             @foreach($recentBooks as $book)
-                <div class="bg-white rounded-xl border border-gray-100 overflow-hidden shadow-sm hover:shadow-lg transition group">
+                <div wire:key="book-{{ $book->id }}" class="bg-white rounded-xl border border-gray-100 overflow-hidden shadow-sm hover:shadow-lg transition group">
                     {{-- Cover image --}}
-                    <a href="{{ route('reader', $book) }}" class="block relative aspect-[3/4] bg-gray-100 overflow-hidden">
-                        <canvas class="pdf-cover w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                    <a href="{{ route('reader', $book) }}" class="block relative bg-gray-100 overflow-hidden" style="aspect-ratio: 467/680;">
+                        <canvas class="pdf-cover w-full h-full group-hover:scale-105 transition duration-300"
                                 data-pdf="{{ asset('storage/' . $book->pdf_path) }}"></canvas>
 
                         {{-- Status badge --}}

@@ -678,6 +678,13 @@ PROMPT;
      */
     public function translateWithManifest(Book $book, string $languageCode): Translation
     {
+        // FRESHNESS / PROVENANCE GUARD (spec §5.2): never trust a stale or old-builder
+        // manifest. Structured pages (vocab/table merged headers) render correctly ONLY
+        // from a scene-graph manifest. If the persisted manifest is missing, produced by
+        // the old flat builder, an older schema, or older than the source PDF, rebuild it
+        // from the scene graph before translating.
+        $this->ensureFreshManifest($book);
+
         // Check if manifest exists
         if (!$book->manifest_path || !\Illuminate\Support\Facades\Storage::disk('public')->exists($book->manifest_path)) {
             Log::info("No manifest for book {$book->id}, falling back to legacy translation.");
@@ -777,6 +784,59 @@ PROMPT;
     }
 
     /**
+     * Freshness/provenance guard for the persisted manifest (spec §5.2).
+     *
+     * Rebuilds the manifest from the scene graph (builder=scene_graph) when the persisted
+     * one is missing, produced by the old flat builder, an older schema, or older than the
+     * source PDF. This guarantees structured pages carry merged-header structure at render
+     * time instead of a stale flat blueprint. Best-effort: on any failure we log and leave
+     * the existing manifest so translation can still proceed (fail-open for translation,
+     * but the render gate remains authoritative for structure).
+     */
+    private function ensureFreshManifest(Book $book): void
+    {
+        try {
+            $disk = \Illuminate\Support\Facades\Storage::disk('public');
+
+            // No source PDF → nothing to rebuild from.
+            if (!$book->pdf_path || !$disk->exists($book->pdf_path)) {
+                return;
+            }
+
+            $needsRebuild = false;
+            $reason = '';
+
+            if (!$book->manifest_path || !$disk->exists($book->manifest_path)) {
+                $needsRebuild = true;
+                $reason = 'missing';
+            } else {
+                $manifest = json_decode($disk->get($book->manifest_path), true);
+                $builder = $manifest['builder'] ?? 'legacy_flat';
+                $schema = (string) ($manifest['schema_version'] ?? '1.0');
+
+                if ($builder !== 'scene_graph') {
+                    $needsRebuild = true;
+                    $reason = "old builder ({$builder})";
+                } elseif (version_compare($schema, '2.0', '<')) {
+                    $needsRebuild = true;
+                    $reason = "old schema ({$schema})";
+                } elseif ($disk->lastModified($book->manifest_path) < $disk->lastModified($book->pdf_path)) {
+                    $needsRebuild = true;
+                    $reason = 'older than source PDF';
+                }
+            }
+
+            if ($needsRebuild) {
+                Log::info("Manifest rebuild for book {$book->id}: {$reason}");
+                app(\App\Services\PdfService::class)->rebuildManifest($book);
+                $book->refresh();
+            }
+        } catch (\Throwable $e) {
+            Log::warning("ensureFreshManifest error for book {$book->id}: " . $e->getMessage());
+        }
+    }
+
+    /**
      * Translate a page's manifest items using structured GPT request.
      * Sends items with IDs, expects translations keyed to those IDs.
      */
@@ -805,7 +865,7 @@ RULES:
 - For word_list items: translate to a single word equivalent.
 - For story_prose: translate the full text naturally as a flowing paragraph.
 - For book_subtitle: translate the title naturally.
-- For phonics (educational_adaptation): create equivalent {$langName} phonics at same difficulty.
+- For phonics (educational_adaptation): DO NOT translate the English letters/words. These teach a sound-to-spelling pattern. Produce an EQUIVALENT {$langName} phonics exercise of the same difficulty: pick a spelling pattern that genuinely EXISTS in {$langName} and give real {$langName} example words for it. Keep the same "pattern - example(s)" shape. If the English pattern (e.g. "wh") has NO {$langName} equivalent, REPLACE it entirely with a valid {$langName} pattern and {$langName} examples — never leave English example words like "when/where/stream". Instruction lines (e.g. "Recognise X at the beginning of words") must be rewritten in {$langName} referring to the {$langName} pattern you chose.
 - For high_frequency_words: translate to the {$langName} equivalent.
 - For table headers (translate_headers): translate the header text.
 {$glossaryStr}

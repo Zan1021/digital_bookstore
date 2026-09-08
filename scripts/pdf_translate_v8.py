@@ -867,7 +867,9 @@ def _extract_header_translations(id_to_translation, page_manifest):
     headers = []
     seen = set()
     for region in page_manifest.get("regions", []):
-        if region.get("semantic_role") != "table_header":
+        # Accept both the scene-graph role ("heading") and the legacy role
+        # ("table_header") so header extraction works across manifest builders.
+        if region.get("semantic_role") not in ("table_header", "heading"):
             continue
         for item in region.get("items", []):
             t = (id_to_translation.get(item["id"]) or "").strip()
@@ -956,28 +958,75 @@ def _safe_cell_bounds(cell_x0, cell_x1, verticals, pad):
 def _infer_source_alignment(source_spans, cell_x0, cell_x1):
     """
     Infer the SOURCE header's horizontal alignment within its cell from glyph
-    geometry (§9: mirror the original, don't impose our own). Compares the left
-    gap (source left edge - cell left) against the right gap (cell right - source
-    right edge):
-      - gaps roughly equal   -> "center"
-      - left gap much smaller -> "left"
-      - right gap much smaller -> "right"
+    geometry (§9: mirror the original, don't impose our own).
+
+    MULTI-LINE AWARE: for a stacked header, alignment is best read from the LEFT/RIGHT
+    edges of each source LINE, not the combined bbox — a left-aligned block whose
+    widest line nearly fills the cell would otherwise look "centered" by the combined
+    left/right gap (the "HIGH FREQUENCY WORDS" bug). We therefore:
+      - group spans into lines by y,
+      - if every line shares the SAME left edge (within tol) -> "left",
+      - else if every line shares the SAME right edge (within tol) -> "right",
+      - else fall back to the combined left-gap vs right-gap comparison (center/…).
     Book-agnostic: pure geometry, no per-book constants.
     """
     if not source_spans:
         return "center"
-    s_left = min(s["bbox"][0] for s in source_spans)
-    s_right = max(s["bbox"][2] for s in source_spans)
+
+    # Group into source lines by y-center proximity.
+    heights = sorted((s["bbox"][3] - s["bbox"][1]) for s in source_spans)
+    med_h = heights[len(heights) // 2] if heights else 12.0
+    med_h = med_h if med_h > 1 else 12.0
+    by_line = {}
+    for s in source_spans:
+        yc = (s["bbox"][1] + s["bbox"][3]) / 2
+        key = round(yc / max(1.0, med_h * 0.6))
+        by_line.setdefault(key, []).append(s)
+
+    line_lefts = [min(s["bbox"][0] for s in ln) for ln in by_line.values()]
+    line_rights = [max(s["bbox"][2] for s in ln) for ln in by_line.values()]
+    tol = max(2.0, med_h * 0.35)
+
+    if len(by_line) >= 2:
+        # Consistent left edges across lines => left-aligned (regardless of widths).
+        if (max(line_lefts) - min(line_lefts)) <= tol:
+            return "left"
+        # Consistent right edges across lines => right-aligned.
+        if (max(line_rights) - min(line_rights)) <= tol:
+            return "right"
+        # Otherwise fall through to gap comparison (likely centered).
+
+    s_left = min(line_lefts)
+    s_right = max(line_rights)
     left_gap = max(0.0, s_left - cell_x0)
     right_gap = max(0.0, cell_x1 - s_right)
     total = left_gap + right_gap
     if total <= 1.0:
         return "center"
-    # Relative difference of the two side gaps.
     diff = abs(left_gap - right_gap) / max(1.0, cell_x1 - cell_x0)
     if diff < 0.12:
         return "center"
     return "left" if left_gap < right_gap else "right"
+
+
+def _manifest_source_to_translation(page_manifest, id_to_translation):
+    """
+    Build {normalized_source_text: [translation, ...]} from the page manifest joined
+    with a plain id->translation map. Used when the caller supplies a flat id->str map
+    (no rich contract), so per-span header assembly can still resolve each source
+    span's translation. Buckets are ordered by manifest reading order to support
+    duplicate source words (e.g. two "WORDS" headers). Book-agnostic.
+    """
+    out = {}
+    if not id_to_translation:
+        return out
+    for region in page_manifest.get("regions", []):
+        for item in region.get("items", []):
+            key = _norm_lookup_key(item.get("text", ""))
+            tr = id_to_translation.get(item.get("id"))
+            if key and tr:
+                out.setdefault(key, []).append(tr)
+    return out
 
 
 def _place_vocab_headers(page, page_manifest, header_spans_all, id_to_translation,
@@ -1004,9 +1053,24 @@ def _place_vocab_headers(page, page_manifest, header_spans_all, id_to_translatio
     struct_cells = hdr.get("cells") if hdr else None
     header_row_box = hdr.get("header_row_box") if hdr else None
 
-    # Translations for header cells, keyed by SOURCE TEXT when available (contract),
-    # else by reading order from the manifest.
+    # Translations for header cells, matched GEOMETRICALLY (per semantic review):
+    # each header source span is assigned to exactly one cell by half-open center-x
+    # containment, then a cell's translation is ASSEMBLED from its constituent spans'
+    # own contract translations — ordered top->bottom, left->right — with hard line
+    # breaks between source lines. This fixes the merged-cell swap (grouped cell text
+    # like "HIGH FREQUENCY WORDS" has no single contract key) and preserves the
+    # source's own line structure. Book-agnostic: pure geometry + the contract.
     header_translations = _extract_header_translations(id_to_translation, page_manifest)
+    # Private, freshly-built bucket copy so header consumption never corrupts other
+    # consumers of the contract (e.g. the manifest bridge).
+    src_to_trans = _contract_source_to_translation(id_to_translation, page_num)
+    # FALLBACK: render_vocabulary_page_v8 passes a PLAIN id->str map (not the rich
+    # contract dict), so _contract_source_to_translation returns {}. Rebuild the
+    # source_text -> [translation] buckets from the manifest itself: each manifest
+    # item carries its source `text` and `id`; id_to_translation gives id->translation.
+    # This is what lets per-span header assembly find each span's translation.
+    if not src_to_trans:
+        src_to_trans = _manifest_source_to_translation(page_manifest, id_to_translation)
 
     if not struct_cells:
         # No grid structure detected — nothing reliable to place. Flag for review.
@@ -1015,36 +1079,103 @@ def _place_vocab_headers(page, page_manifest, header_spans_all, id_to_translatio
             report["review_pages"].append(page_num)
         return
 
-    # Coverage check.
-    if len(header_translations) != len(struct_cells):
-        report["errors"].append({
-            "page": page_num,
-            "error": (f"Header coverage mismatch: {len(struct_cells)} header cells vs "
-                      f"{len(header_translations)} translations — flagged for review."),
-        })
-        report.setdefault("review_pages", [])
-        if page_num not in report["review_pages"]:
-            report["review_pages"].append(page_num)
+    TOL = 6.0  # single tolerance, matching detect_header_cells
+
+    def _spans_in_cell(cell):
+        """Assign header spans to this cell by half-open center-x containment
+        [cx0, cx1) with a single tolerance, so every span lands in exactly one cell
+        (no double-claim on shared edges). Ordered top->bottom, left->right — the
+        same key detect_header_cells/_cluster_header_spans use to group labels."""
+        cx0, cx1 = cell["cell_box"][0], cell["cell_box"][2]
+        inside = []
+        for s in header_spans_all:
+            cxc = (s["bbox"][0] + s["bbox"][2]) / 2
+            # Cells are contiguous (shared edges), so a half-open interval partitions
+            # every span into exactly one cell. Widen only the outermost edges by TOL
+            # so a span hugging the table's left/right border isn't dropped.
+            lo = cx0 - TOL if cell is struct_cells[0] else cx0
+            hi = cx1 + TOL if cell is struct_cells[-1] else cx1
+            if lo <= cxc < hi:
+                inside.append(s)
+        return sorted(inside, key=lambda z: (round(z["bbox"][1] / 4.0), z["bbox"][0]))
+
+    def _assemble_cell_translation(cell_spans):
+        """Assemble the translated header text from the cell's source spans, joining
+        spans on DIFFERENT source lines with '\\n' (hard break, preserves the source's
+        stacking) and spans on the SAME line with a space. Returns (text, matched_all).
+        matched_all is False if any span had no contract translation (=> fail-closed)."""
+        if not cell_spans:
+            return "", False
+        # Group spans into source lines by y proximity.
+        med_h = sorted((s["bbox"][3] - s["bbox"][1]) for s in cell_spans)[len(cell_spans) // 2]
+        med_h = med_h if med_h > 1 else 12.0
+        lines_of_spans, cur_line, last_yc = [], [], None
+        for s in cell_spans:
+            yc = (s["bbox"][1] + s["bbox"][3]) / 2
+            if last_yc is not None and (yc - last_yc) > med_h * 0.6:
+                lines_of_spans.append(cur_line)
+                cur_line = []
+            cur_line.append(s)
+            last_yc = yc
+        if cur_line:
+            lines_of_spans.append(cur_line)
+
+        matched_all = True
+        line_strs = []
+        for ln in lines_of_spans:
+            parts = []
+            for s in ln:
+                key = _norm_lookup_key(s.get("text_stripped", s.get("text", "")))
+                if key and src_to_trans.get(key):
+                    parts.append(src_to_trans[key].pop(0))
+                else:
+                    matched_all = False
+            if parts:
+                line_strs.append(" ".join(parts))
+        return "\n".join(line_strs), matched_all
 
     pad = 3.0  # cell padding (§6.3)
     from text_fit_solver import FitConstraints, solve_text_fit
 
     for idx, cell in enumerate(struct_cells):
-        if idx >= len(header_translations):
-            break
-        text = header_translations[idx]
         cb = cell["cell_box"]           # TRUE cell box (spans merged columns)
-        sb = cell.get("source_box", cb)  # tight source glyph box
+        sb = cell.get("source_box", cb)  # tight source glyph box (multi-line aware)
+        ry0 = header_row_box[1] if header_row_box else cb[1]
+        ry1 = header_row_box[3] if header_row_box else cb[3]
+
+        # Geometric span->cell assignment (exactly one cell per span).
+        cell_spans = _spans_in_cell(cell)
+
+        # Assemble this cell's translation from its own spans (hard-break aware).
+        text, matched_all = _assemble_cell_translation(cell_spans)
+        if not text:
+            # Last-resort: reading-order translation, else the source text itself.
+            text = header_translations[idx] if idx < len(header_translations) else cell.get("text", "")
+        if not matched_all:
+            # Fail-closed: a partially-assembled header must not ship silently.
+            report.setdefault("review_pages", [])
+            if page_num not in report["review_pages"]:
+                report["review_pages"].append(page_num)
+        if not text:
+            continue
+
         # Safe inner box = the full cell minus padding. Merged header uses the FULL
         # spanned width, so it centers across all its columns (fixes off-center bug).
         sx0, sx1 = cb[0] + pad, cb[2] - pad
         safe_w = max(6.0, sx1 - sx0)
-        # Vertical extent = the header-row box (so multi-line headers vertically
-        # center in the row, not just around the source glyphs).
-        ry0 = header_row_box[1] if header_row_box else cb[1]
-        ry1 = header_row_box[3] if header_row_box else cb[3]
 
-        src_size = (sb[3] - sb[1]) if (sb[3] - sb[1]) > 4 else 12
+        # ALIGNMENT: mirror the SOURCE header's alignment inside its cell (§9), do NOT
+        # force-center. Inferred from source glyph geometry vs the cell bounds.
+        align = _infer_source_alignment(cell_spans, cb[0], cb[2]) if cell_spans else "center"
+
+        # SOURCE LINE COUNT: how many visual lines did this header occupy in the
+        # source? Preserved via the hard breaks in `text`; also used to seed sizing.
+        src_lines = _count_source_lines(cell_spans)
+
+        # Per-line size from the source glyph height (fall back to 12pt).
+        src_size = (sb[3] - sb[1]) / max(1, src_lines) if (sb[3] - sb[1]) > 4 else 12
+        if src_size < 5:
+            src_size = 12
 
         constraints = FitConstraints(
             container_width=safe_w,
@@ -1053,7 +1184,7 @@ def _place_vocab_headers(page, page_manifest, header_spans_all, id_to_translatio
             min_font_size=6.0,
             max_shrink_ratio=0.5,
             allow_multiline=True,
-            max_lines=3,
+            max_lines=max(3, src_lines + 1),
             line_height_ratio=1.05,
             padding_x=0.5,
             single_word=False,
@@ -1063,19 +1194,36 @@ def _place_vocab_headers(page, page_manifest, header_spans_all, id_to_translatio
 
         rect = pymupdf.Rect(sx0, ry0, sx1, ry1)
         clip = rect & page.rect
-        # Table headers are centered horizontally in their (possibly merged) cell and
-        # vertically in the header row. Font = house font by source weight (correct
-        # font + real text layer). Casing natural (translation carries intended case).
+        # Header placed with the SOURCE alignment, vertically centered in the header
+        # row. Font = house font by source weight (correct font + real text layer).
         font_file = _weight_aware_house_font(header_spans_all, fonts_dir)
         used = draw_paragraph_text(
             page, rect, text, font_file, round(fit_size),
-            color=(0, 0, 0), line_height=1.05, align="center", min_size=6.0,
+            color=(0, 0, 0), line_height=1.05, align=align, min_size=6.0,
             valign="middle", clip=clip,
         )
         if used is not None:
             report["spans_replaced"] += 1
         else:
             report["errors"].append({"page": page_num, "error": "Header render produced no text"})
+
+
+def _count_source_lines(cell_spans):
+    """
+    Count the distinct visual text lines a header cell's source spans occupy, by
+    clustering their y-centers. Book-agnostic: a line break is a y-gap larger than
+    ~60% of the median span height. Returns at least 1.
+    """
+    if not cell_spans:
+        return 1
+    heights = sorted((s["bbox"][3] - s["bbox"][1]) for s in cell_spans)
+    med_h = heights[len(heights) // 2] if heights else 12.0
+    centers = sorted((s["bbox"][1] + s["bbox"][3]) / 2 for s in cell_spans)
+    lines = 1
+    for prev, cur in zip(centers, centers[1:]):
+        if cur - prev > med_h * 0.6:
+            lines += 1
+    return max(1, lines)
 
 
 def _norm_lookup_key(s):
@@ -1108,8 +1256,222 @@ def _contract_source_to_translation(id_to_translation, page_num):
     return out
 
 
+def _lookup_id_translation(id_to_translation, unit_id):
+    """Return the translation string for a stable id from either a rich
+    ({id:{translation,...}}) or plain ({id:str}) contract map. None if absent."""
+    if not id_to_translation:
+        return None
+    val = id_to_translation.get(unit_id)
+    if val is None:
+        return None
+    if isinstance(val, dict):
+        return val.get("translation")
+    return val
+
+
+def _vocab_manifest_from_scene(page_scene, page_num):
+    """Build the vocabulary page_manifest structure the renderer expects DIRECTLY from
+    the scene graph, so item ids are the STABLE contract ids (p{page}_s{index}) and each
+    item carries its true cell_box + geometry.
+
+    Regions:
+      - one 'table_header' region grouping all heading units;
+      - one 'word_list_column' region per column_index for the body/phonics units.
+    Each item: {id, text, origin, bbox, cell_box, semantic_role, align_h, align_v}.
+    Book-agnostic: every value comes from the scene units, no per-book constants.
+    """
+    if page_scene is None:
+        return None
+    units = [u for u in getattr(page_scene, "text_units", [])
+             if u.translation_policy in ("translate", "educational_adaptation")]
+    if not units:
+        return None
+
+    def _item(u):
+        bbox = list(u.bbox)
+        it = {
+            "id": u.id,
+            "text": u.source_text,
+            "origin": [bbox[0], bbox[1]],
+            "bbox": bbox,
+            "semantic_role": u.semantic_role,
+        }
+        if getattr(u, "cell_box", None) is not None:
+            it["cell_box"] = list(u.cell_box)
+        if getattr(u, "align_h", None):
+            it["align_h"] = u.align_h
+        if getattr(u, "align_v", None):
+            it["align_v"] = u.align_v
+        if getattr(u, "column_span", 1) and u.column_span != 1:
+            it["column_span"] = u.column_span
+        if getattr(u, "is_merged", False):
+            it["is_merged"] = True
+        return it
+
+    header_units = [u for u in units if u.semantic_role in ("heading", "table_header")]
+    body_units = [u for u in units if u not in header_units]
+
+    regions = []
+    if header_units:
+        regions.append({
+            "id": f"p{page_num:02d}-headers",
+            "semantic_role": "table_header",
+            "translation_policy": "translate_items",
+            "items": [_item(u) for u in sorted(header_units, key=lambda z: (z.bbox[0], z.bbox[1]))],
+        })
+
+    # Group body units by column_index (fallback: cluster by x origin).
+    cols = {}
+    for u in body_units:
+        ci = getattr(u, "column_index", None)
+        if ci is None:
+            ci = int(round(u.bbox[0] / 24.0))
+        cols.setdefault(ci, []).append(u)
+
+    for ci in sorted(cols.keys()):
+        col_units = sorted(cols[ci], key=lambda z: (z.bbox[1], z.bbox[0]))  # top->bottom
+        lefts = [u.bbox[0] for u in col_units]
+        rights = [u.bbox[2] for u in col_units]
+        # Prefer the cell_box x-extent when present (border-accurate).
+        cbs = [u.cell_box for u in col_units if getattr(u, "cell_box", None)]
+        if cbs:
+            col_left = min(cb[0] for cb in cbs)
+            col_right = max(cb[2] for cb in cbs)
+        else:
+            col_left, col_right = min(lefts), max(rights)
+        regions.append({
+            "id": f"p{page_num:02d}-col-{ci}",
+            "semantic_role": "word_list_column",
+            "translation_policy": "translate_items",
+            "column_index": ci,
+            "column_center": (col_left + col_right) / 2,
+            "column_width": max(6.0, col_right - col_left),
+            "items": [_item(u) for u in col_units],
+        })
+
+    return {
+        "page_number": page_num,
+        "page_type": "vocabulary",
+        "builder": "scene_graph",
+        "regions": regions,
+    }
+
+
+def render_vocabulary_page_from_scene(page, page_scene, id_to_translation, fonts_dir,
+                                      page_num, report):
+    """Book-agnostic vocabulary/phonics render driven ENTIRELY by the scene graph
+    (ChatGPT-reviewed Option B). Identity + geometry come from scene units; text comes
+    from the contract keyed by stable id. Does NOT use page_spans / _find_span_at_origin
+    (whose baseline-vs-top origin convention differs from the scene bbox — the bug that
+    left English on the page).
+
+    Pipeline per the review:
+      1. Resolve each renderable unit's translation by id (fail closed on missing).
+      2. Redact every renderable unit's source bbox with TEXT REMOVAL, preserving
+         images + line art (table grid lines survive). Apply once.
+      3. Verify removal by fresh extraction.
+      4. Group units sharing a cell into ordered slots; place each unit's translation
+         in its slot within the cell_box (alignment, shrink-to-fit, explicit clip).
+         insert failures / overflow => blank + flag (never English fallback).
+      5. Record staged counters for verification.
+    Returns True on a fully-placed page, False when the page was flagged for review.
+    """
+    units = page_scene.get_renderable_units() if hasattr(page_scene, "get_renderable_units") \
+        else [u for u in page_scene.text_units
+              if u.translation_policy in ("translate", "educational_adaptation")]
+    if not units:
+        return None  # not handled → caller may fall back to legacy path
+
+    stages = {"resolved": 0, "redaction_verified": False, "inserted": 0,
+              "units_total": len(units), "unresolved": [], "overflow": [], "mode": "scene_id"}
+
+    # 1) Resolve translations by id (fail closed — never source text).
+    resolved = {}   # unit.id -> translated string
+    for u in units:
+        tr = _lookup_id_translation(id_to_translation, u.id)
+        if tr is not None and str(tr).strip() != "":
+            resolved[u.id] = str(tr)
+            stages["resolved"] += 1
+        else:
+            stages["unresolved"].append(u.id)
+
+    # 2) Redact every renderable unit's source bbox: REMOVE text, PRESERVE art/lines.
+    for u in units:
+        rect = pymupdf.Rect(u.bbox)
+        if rect.is_empty or rect.is_infinite:
+            continue
+        page.add_redact_annot(rect, fill=False)
+    try:
+        page.apply_redactions(images=getattr(pymupdf, "PDF_REDACT_IMAGE_NONE", 0),
+                              graphics=getattr(pymupdf, "PDF_REDACT_LINE_ART_NONE", 0),
+                              text=getattr(pymupdf, "PDF_REDACT_TEXT_REMOVE", 0))
+    except TypeError:
+        # Older signature: text removal is the default (text=0); still preserve art.
+        page.apply_redactions(images=0, graphics=0)
+
+    # 3) Verify source removal (fresh extraction, not cached).
+    post = page.get_text()
+    # Any renderable source word still present indicates removal failure for that unit.
+    still_present = []
+    for u in units:
+        srcw = (u.source_text or "").strip()
+        if srcw and srcw in post:
+            still_present.append(u.id)
+    stages["redaction_verified"] = (len(still_present) == 0)
+    if still_present:
+        stages["source_survived"] = still_present[:10]
+
+    # 4) Group units by cell_box into ordered slots and place.
+    font_file = _house_font_file(fonts_dir) or None
+    # Bucket by rounded cell_box; units without a cell_box get their own bbox slot.
+    from collections import defaultdict
+    cells = defaultdict(list)
+    for u in units:
+        cb = tuple(round(c, 1) for c in u.cell_box) if getattr(u, "cell_box", None) else tuple(round(c, 1) for c in u.bbox)
+        cells[cb].append(u)
+
+    for cb, cell_units in cells.items():
+        # Order units within the cell top->bottom, left->right (reading order).
+        cell_units.sort(key=lambda z: (round(z.bbox[1], 1), z.bbox[0]))
+        x0, y0, x1, y1 = cb
+        n = len(cell_units)
+        if n == 0:
+            continue
+        # Distinct vertical slots so units sharing a cell never overlap.
+        slot_h = (y1 - y0) / n
+        for i, u in enumerate(cell_units):
+            tr = resolved.get(u.id)
+            if tr is None:
+                continue  # unresolved -> already flagged; leave blank (fail closed)
+            # Mirror source casing (headers are ALL-CAPS in source).
+            tr_cased = _source_text_transform_apply(tr, [{"text": u.source_text}]) \
+                if u.semantic_role in ("heading", "table_header") else tr
+            slot = pymupdf.Rect(x0, y0 + i * slot_h, x1, y0 + (i + 1) * slot_h)
+            align = {"center": 1, "right": 2}.get(getattr(u, "align_h", None) or "left", 0)
+            base_size = min(max(8.0, u.bbox[3] - u.bbox[1]), slot.height)
+            used = draw_paragraph_text(
+                page, slot, tr_cased, font_file, round(base_size, 1),
+                color=(0, 0, 0), align={0: "left", 1: "center", 2: "right"}[align],
+                min_size=7.0, valign="middle", clip=slot & page.rect,
+            )
+            if used is None or (isinstance(used, (int, float)) and used < 0):
+                stages["overflow"].append(u.id)
+            else:
+                stages["inserted"] += 1
+
+    # 5) Record + fail-closed policy.
+    report.setdefault("vocabulary", {})[str(page_num)] = stages
+    flagged = bool(stages["unresolved"] or stages["overflow"] or not stages["redaction_verified"])
+    if flagged:
+        report.setdefault("unresolved_span_ids", []).extend(stages["unresolved"])
+        report.setdefault("review_pages", [])
+        if page_num not in report["review_pages"]:
+            report["review_pages"].append(page_num)
+    return not flagged
+
+
 def render_vocabulary_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report,
-                              id_to_translation=None, allow_legacy_flat=False):
+                              id_to_translation=None, allow_legacy_flat=False, page_scene=None):
     """
     V8 vocabulary page: Manifest-driven per-span replacement.
 
@@ -1136,19 +1498,12 @@ def render_vocabulary_page_v8(page, page_spans, translations_map, fonts_dir, pag
     # Get translated text
     translated_text = translations_map.get(page_num, "")
 
-    # Build page manifest for this vocabulary page
+    # Build page manifest for this vocabulary page (legacy fallback path only —
+    # the scene-driven render_vocabulary_page_from_scene is preferred when a scene is
+    # available). Book-agnostic column clustering.
     spans_for_manifest = _extract_spans_for_manifest(page, page_num)
     page_manifest = build_vocabulary_manifest(page, page_num, spans_for_manifest)
 
-    # Resolve item_id -> translation. Prefer the stable-ID contract (boundaries
-    # preserved); fall back to legacy flat-text reconstruction only when absent.
-    #
-    # The vocab manifest and the contract use DIFFERENT id schemes (p15-w-c1-001 vs
-    # p15_s0001), so we bridge them by SOURCE TEXT: each manifest item carries its
-    # English `text`; the contract maps source_text -> translation. Matching on the
-    # source text fills each manifest unit from its own contract translation, which
-    # preserves unit boundaries exactly (a wrapped multi-line entry is ONE manifest
-    # item and gets ONE translation — never re-split by line gaps). Book-agnostic.
     manifest_items_flat = []
     for region in page_manifest.get("regions", []):
         for item in region.get("items", []):
@@ -1278,17 +1633,53 @@ def render_vocabulary_page_v8(page, page_spans, translations_map, fonts_dir, pag
             })
 
     # Attach column x-bounds to each item for per-cell clipping (§11).
+    #
+    # CLAMP TO REAL GRID BORDERS: the manifest's column_center ± width/2 can be wider
+    # than the true cell (e.g. the phonics column measured width=120 but its real
+    # border-to-border cell is ~98pt), which let long wrapped lines overflow past the
+    # right table line. We clamp every content column to the nearest detected vertical
+    # gridlines minus padding — the same border-accurate bounds the headers use — so
+    # a translated line always wraps INSIDE its cell. Book-agnostic: pure geometry.
+    _verticals = _detect_vertical_gridlines(page)
+    _CPAD = 3.0
+    # True left edge of each column from its items' origins (robust when the manifest's
+    # column_center/width is a poor estimate — e.g. the phonics column).
+    _col_text_left = {}
+    for r in content_regions:
+        ci = r.get("column_index", 0)
+        lefts = [it.get("origin", it.get("bbox", [0])[0:1])[0]
+                 for it in r.get("items", []) if it.get("origin") or it.get("bbox")]
+        if lefts:
+            _col_text_left[ci] = min(lefts)
     _col_bounds = {}
     for r in content_regions:
         ci = r.get("column_index", 0)
         center = r.get("column_center")
         width = r.get("column_width", 100)
-        if center is not None:
-            _col_bounds[ci] = (center - width / 2, center + width / 2)
+        if center is None:
+            continue
+        # Anchor on the ACTUAL text left, not the (sometimes wrong) center.
+        text_left = _col_text_left.get(ci, center - width / 2)
+        est_l, est_r = text_left, text_left + width
+        if _verticals:
+            # Left border = nearest gridline at/left of the text; right border =
+            # nearest gridline right of it. Clamp inside them minus padding so lines
+            # wrap within the true cell and never cross the table line.
+            left_border = max([v for v in _verticals if v <= text_left + 1], default=text_left - 2)
+            right_border = min([v for v in _verticals if v >= text_left + 1], default=est_r)
+            safe_l = left_border + _CPAD
+            safe_r = right_border - _CPAD
+            if safe_r <= safe_l:
+                safe_l, safe_r = text_left, text_left + width
+            _col_bounds[ci] = (safe_l, safe_r)
+        else:
+            _col_bounds[ci] = (est_l, est_r)
     for it in items_to_render:
         cb = _col_bounds.get(it["col_idx"])
         if cb:
-            it["col_left"], it["col_right"] = cb[0] - 2, cb[1] + 2
+            it["col_left"], it["col_right"] = cb[0], cb[1]
+            # Keep col_width in sync so the wrap/fit width matches the clamped cell.
+            it["col_width"] = max(6.0, cb[1] - cb[0])
 
     # Calculate consistent font size per column (use the MOST COMMON size, not median)
     # This ensures all words in a column render at the same size
@@ -1681,14 +2072,6 @@ def render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num
     # whether upstream preserved the newlines.
     header, entries = _split_title_list(translated_text)
 
-    # Derive font size from the source spans so we stay faithful to the original.
-    src_size = max((s["font_size"] for s in content_spans), default=22)
-    line_size = round(src_size)
-
-    # Reliable font path: explicit house-font FILE by detected source weight
-    # (insert_text — not htmlbox — so glyphs AND text layer are both correct).
-    font_file = _weight_aware_house_font(content_spans, fonts_dir)
-
     # Assemble the ordered list of lines to stack (header first, then entries).
     lines = []
     if header:
@@ -1700,25 +2083,51 @@ def render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num
     # Mirror source casing (e.g. all-caps display font) on each line.
     lines = [_source_text_transform_apply(l, content_spans) for l in lines]
 
-    # Stack the lines downward from the top of the source text zone. Each line gets
-    # its own rect so a long title wraps within the available width instead of
-    # colliding with its neighbour.
-    avail_left = min_x - 10
-    avail_right = max_x + 40
-    zone_top = min_y - 6
-    zone_bottom = page.rect.height - 40
-    step = line_size * 1.15
-    n = max(1, len(lines))
-    # If the natural stack would overflow the zone, compress the step to fit.
-    if zone_top + step * n > zone_bottom:
-        step = max(line_size, (zone_bottom - zone_top) / n)
+    # SOURCE-FAITHFUL PLACEMENT (Captain Zan): mirror the ORIGINAL back cover's
+    # geometry — its horizontal ALIGNMENT and its per-line VERTICAL positions
+    # (which include the gap between the heading and the list). We therefore:
+    #   1. reconstruct the source's visual lines (top y of each) in reading order,
+    #   2. infer the source's horizontal alignment (center/left/right) from the
+    #      line centers vs the page,
+    #   3. place each translated line at its matching source line's y, aligned the
+    #      same way — so the heading gap and line rhythm are reproduced exactly.
+    # Book-agnostic: pure geometry from the source spans, no per-title constants.
+    src_line_tops, src_line_centers, src_line_lefts, src_line_rights = \
+        _source_line_geometry(content_spans)
+    page_w = page.rect.width
 
-    # SIZE CONSISTENCY (§9.4): all lines on the back cover belong to one typographic
-    # group (a series-title list), so they must render at ONE shared size — not each
-    # line independently shrunk. Compute the largest size at which EVERY line fits its
-    # width, then lock every line to that size (min_size == size disables per-line
-    # shrink). Book-agnostic: derived from measured line widths, no per-title constant.
-    line_box_w = (avail_right - avail_left)
+    # Infer source horizontal alignment from the line boxes vs the page.
+    if src_line_centers:
+        avg_ctr = sum(src_line_centers) / len(src_line_centers)
+        centered = all(abs(c - page_w / 2) < page_w * 0.06 for c in src_line_centers)
+        left_consistent = (max(src_line_lefts) - min(src_line_lefts)) < 12
+        if centered:
+            back_align = "center"
+        elif left_consistent:
+            back_align = "left"
+        else:
+            back_align = "center" if abs(avg_ctr - page_w / 2) < page_w * 0.1 else "left"
+    else:
+        back_align = "center"
+
+    # Derive font size from the source spans so we stay faithful to the original.
+    src_size = max((s["font_size"] for s in content_spans), default=22)
+    line_size = round(src_size)
+    font_file = _weight_aware_house_font(content_spans, fonts_dir)
+
+    # Horizontal band: for centered text, use a page-centered band so lines center on
+    # the PAGE midline (not a skewed min_x..max_x box). For left/right, anchor on the
+    # source's own left/right edge to preserve the original indent.
+    if back_align == "center":
+        half = min(page_w / 2 - 20, max((max_x - min_x) / 2 + 40, 120))
+        band_left = page_w / 2 - half
+        band_right = page_w / 2 + half
+    else:
+        band_left = min_x - 6
+        band_right = max_x + 40
+    line_box_w = band_right - band_left
+
+    # SIZE CONSISTENCY (§9.4): one shared size across all lines (series-title group).
     _probe = pymupdf.Font(fontfile=font_file) if font_file else pymupdf.Font("helv")
     shared_size = line_size
     for _ln in lines:
@@ -1727,13 +2136,24 @@ def render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num
             shared_size -= 0.5
     shared_size = max(shared_size, line_size * 0.5)
 
+    # Map each output line to a SOURCE line top (preserving the heading gap + rhythm).
+    # If counts differ, fall back to an even stack from the first source top.
+    if len(src_line_tops) == len(lines) and src_line_tops:
+        row_tops = src_line_tops
+    else:
+        top0 = src_line_tops[0] if src_line_tops else (min_y - 6)
+        step = (src_line_tops[1] - src_line_tops[0]) if len(src_line_tops) >= 2 else shared_size * 1.3
+        row_tops = [top0 + i * step for i in range(len(lines))]
+
+    row_h = shared_size * 1.3
     drew_any = False
     for i, line in enumerate(lines):
-        row_top = zone_top + i * step
-        row_rect = pymupdf.Rect(avail_left, row_top, avail_right, row_top + step)
+        row_top = row_tops[i]
+        row_rect = pymupdf.Rect(band_left, row_top - 2, band_right, row_top + row_h)
         used = draw_paragraph_text(
             page, row_rect, line, font_file, shared_size,
-            color=(0, 0, 0), line_height=1.0, align="left", min_size=shared_size,
+            color=(0, 0, 0), line_height=1.0, align=back_align, min_size=shared_size,
+            valign="top",
         )
         drew_any = drew_any or (used is not None)
 
@@ -1741,6 +2161,41 @@ def render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num
         report["spans_replaced"] += 1
     else:
         report["errors"].append({"page": page_num, "error": "Back cover produced no text"})
+
+
+def _source_line_geometry(content_spans):
+    """
+    Reconstruct the source's visual lines from its spans. Returns four parallel
+    lists (top-to-bottom): line_tops, line_centers, line_lefts, line_rights.
+    Book-agnostic: groups spans by y proximity, no per-title constants.
+    """
+    if not content_spans:
+        return [], [], [], []
+    heights = sorted((s["bbox"][3] - s["bbox"][1]) for s in content_spans)
+    med_h = heights[len(heights) // 2] if heights else 12.0
+    med_h = med_h if med_h > 1 else 12.0
+    rows = []
+    for s in sorted(content_spans, key=lambda z: z["bbox"][1]):
+        yc = (s["bbox"][1] + s["bbox"][3]) / 2
+        placed = False
+        for r in rows:
+            if abs(yc - r["yc"]) <= med_h * 0.6:
+                r["spans"].append(s)
+                r["yc"] = sum((x["bbox"][1] + x["bbox"][3]) / 2 for x in r["spans"]) / len(r["spans"])
+                placed = True
+                break
+        if not placed:
+            rows.append({"yc": yc, "spans": [s]})
+    tops, centers, lefts, rights = [], [], [], []
+    for r in sorted(rows, key=lambda z: z["yc"]):
+        x0 = min(s["bbox"][0] for s in r["spans"])
+        x1 = max(s["bbox"][2] for s in r["spans"])
+        y0 = min(s["bbox"][1] for s in r["spans"])
+        tops.append(y0)
+        centers.append((x0 + x1) / 2)
+        lefts.append(x0)
+        rights.append(x1)
+    return tops, centers, lefts, rights
 
 
 # =============================================================================
@@ -1936,6 +2391,64 @@ def _is_prose_page(page_spans):
     return False
 
 
+def _looks_like_vocabulary_page(page_spans):
+    """
+    Detect a vocabulary / word-table page (e.g. WORDS / HIGH FREQUENCY WORDS /
+    PHONICS grids) STRUCTURALLY, independent of font size.
+
+    The old detector keyed on `small_font_count > 30`, which silently missed books
+    whose word tables are set in large type (e.g. 23pt) — those misclassified as
+    'story' because a high-frequency-word list is full of lowercase function words.
+
+    Signals (book-agnostic, geometry + shape only):
+      - Many short items: most content spans are 1–2 tokens (word-list cells), not
+        sentences.
+      - Multiple columns: content spans cluster into >= 2 distinct left-edge (x)
+        bands — the hallmark of a table/word grid rather than a single prose column.
+      - Little to no sentence prose: few spans carry terminal sentence punctuation.
+    A section-header cue (a short ALL-CAPS heading span) strengthens the signal but
+    is not required, so it works across languages and titles.
+    """
+    content = [s for s in page_spans if not s.get("is_page_number")]
+    n = len(content)
+    if n < 12:
+        return False
+
+    def _tok_count(s):
+        return len((s.get("text_stripped", "") or "").split())
+
+    short_items = sum(1 for s in content if 1 <= _tok_count(s) <= 2)
+    sentence_spans = sum(
+        1 for s in content if re.search(r'[.!?]', s.get("text_stripped", "") or "")
+    )
+
+    # Column bands from span left edges (bbox[0]), quantised to ~24pt buckets so
+    # minor jitter within a column collapses to one band.
+    lefts = [round((s.get("bbox", [0])[0]) / 24.0) for s in content if s.get("bbox")]
+    distinct_columns = len(set(lefts))
+
+    short_ratio = short_items / n if n else 0.0
+    prose_ratio = sentence_spans / n if n else 0.0
+
+    # An all-caps short heading span (WORDS / PHONICS / HOË FREKWENSIE WOORDE) — a
+    # supportive cue, not mandatory.
+    def _is_heading_span(s):
+        t = (s.get("text_stripped", "") or "").strip()
+        letters = [c for c in t if c.isalpha()]
+        return len(t) >= 3 and _tok_count(s) <= 3 and bool(letters) \
+            and all((not c.isalpha()) or c.isupper() for c in t)
+
+    has_caps_heading = any(_is_heading_span(s) for s in content)
+
+    # Decide: dominated by short items, arranged in multiple columns, and not prose.
+    if short_ratio >= 0.6 and distinct_columns >= 2 and prose_ratio <= 0.25:
+        return True
+    # Header-anchored fallback: a caps section heading + mostly short items in a grid.
+    if has_caps_heading and short_ratio >= 0.5 and distinct_columns >= 3 and prose_ratio <= 0.3:
+        return True
+    return False
+
+
 def classify_page(page_spans, page_num, total_pages):
     """
     Classify page type from CONTENT and GEOMETRY signals — never from the page
@@ -1966,6 +2479,14 @@ def classify_page(page_spans, page_num, total_pages):
 
     # 1. Vocabulary: many small-font items, little large text (word tables).
     if small > 30 and large < 5:
+        return 'vocabulary'
+
+    # 1a. Vocabulary (font-size-independent): structural detection of a word/table
+    #     grid (many short items across multiple columns, little prose). Catches word
+    #     tables set in LARGE type that the small-font rule above misses. Runs before
+    #     prose so a high-frequency-word list (full of lowercase function words) is
+    #     not mistaken for running prose.
+    if _looks_like_vocabulary_page(content_spans):
         return 'vocabulary'
 
     # 1b. Front cover signal (book-agnostic, geometry-based): the FIRST page with
@@ -2055,6 +2576,28 @@ def _wrap_paragraph(words, font_file, font, size, max_width):
     return lines
 
 
+def _wrap_text_with_hard_breaks(text, font_file, font, size, max_width):
+    """
+    Wrap `text` into display lines, honoring HARD line breaks (newline chars) as
+    FORCED breaks, then width-wrapping each resulting segment. This lets a caller
+    preserve the source's own line structure (e.g. a two-line header
+    "HIGH FREQUENCY\nWORDS") — each hard segment starts on its own line and only
+    wraps further if it is too wide for `max_width`.
+
+    Book-agnostic: no header strings, just newline-splitting + greedy width wrap.
+    Returns a flat list of line strings in top-to-bottom order.
+    """
+    out = []
+    for segment in (text or "").split("\n"):
+        seg = segment.strip()
+        if not seg:
+            # Preserve an intentional blank line within the block.
+            out.append("")
+            continue
+        out.extend(_wrap_paragraph(seg.split(), font_file, font, size, max_width))
+    return out or [""]
+
+
 def draw_paragraph_text(page, rect, text, font_file, size, color=(0, 0, 0),
                         line_height=1.17, align="left", min_size=None,
                         text_transform="none", valign="top", clip=None):
@@ -2070,12 +2613,19 @@ def draw_paragraph_text(page, rect, text, font_file, size, color=(0, 0, 0),
     min_size, default 60% of size). Book-agnostic: font_file is chosen by the caller
     from detected source weight / house font; nothing here is title-specific.
 
+    HARD LINE BREAKS: newline characters in `text` are honored as forced breaks
+    (each starts a new display line, then width-wraps if needed), so a caller can
+    reproduce the source's own line structure. Width-only wrapping still applies
+    within each hard segment.
+
     align:  horizontal alignment within rect ("left" | "center" | "right").
     valign: vertical alignment of the wrapped block within rect ("top" | "middle").
     clip:   optional pymupdf.Rect — glyphs are confined to it (never cross a border).
 
     Returns the size actually used, or None if it could not render.
     """
+    # Preserve newlines through transform/strip (do NOT collapse them): only trim
+    # outer whitespace and normalize case per segment-agnostic transform.
     text = (text or "").strip()
     if not text:
         return None
@@ -2089,38 +2639,59 @@ def draw_paragraph_text(page, rect, text, font_file, size, color=(0, 0, 0),
     max_height = rect.height
     floor = min_size if min_size else size * 0.6
 
-    # Fit loop: shrink until wrapped block fits the rect height.
+    # Font metrics used for BOTH the fit test and centering, so the shrink guarantees
+    # the true visual block (ascender→descender) fits the cell and can center.
+    try:
+        _asc = font.ascender if (0 < getattr(font, "ascender", 0) <= 1.5) else 0.8
+    except Exception:
+        _asc = 0.8
+    try:
+        _desc = abs(font.descender) if (0 < abs(getattr(font, "descender", 0)) <= 1.0) else 0.2
+    except Exception:
+        _desc = 0.2
+
+    # Fit loop: shrink until the wrapped block fits the rect height. Uses hard-break-
+    # aware wrapping (forced breaks counted) and the TRUE visual block height
+    # (ascender→descender), so a multi-line header never overflows onto the border.
     cur = size
     while cur >= floor:
-        words = text.split()
-        lines = _wrap_paragraph(words, font_file, font, cur, max_width)
+        lines = _wrap_text_with_hard_breaks(text, font_file, font, cur, max_width)
         step = cur * line_height
-        block_h = step * len(lines)
+        visual_h = (len(lines) - 1) * step + cur * (_asc + _desc)
         widest = max((_measure_text_width(l, font_file, font, cur) for l in lines),
                      default=0)
-        if block_h <= max_height and widest <= max_width:
+        if visual_h <= max_height and widest <= max_width:
             break
         cur -= 0.5
     cur = max(cur, floor)
 
-    words = text.split()
-    lines = _wrap_paragraph(words, font_file, font, cur, max_width)
+    lines = _wrap_text_with_hard_breaks(text, font_file, font, cur, max_width)
     step = cur * line_height
+    n = len(lines)
 
-    # Baseline of the first line: drop by ~ascender so glyph tops sit inside rect.
+    # Font metrics for TRUE visual centering (equal padding above and below the block).
     try:
         asc = font.ascender if hasattr(font, "ascender") else 0.8
     except Exception:
         asc = 0.8
     asc = asc if 0 < asc <= 1.5 else 0.8
+    try:
+        desc = abs(font.descender) if hasattr(font, "descender") else 0.2
+    except Exception:
+        desc = 0.2
+    desc = desc if 0 < desc <= 1.0 else 0.2
 
-    # Vertical alignment of the wrapped block inside rect.
-    block_h = step * len(lines)
+    # Visual block height = distance from the TOP of the first line's glyphs to the
+    # BOTTOM of the last line's descender. Baseline math alone biased the block
+    # downward onto the bottom border; this measures the real ink extent so the block
+    # centers with equal space above and below (Captain Zan: same padding top/bottom).
+    visual_block_h = (n - 1) * step + cur * (asc + desc)
     if valign == "middle":
-        top = rect.y0 + max(0, (max_height - block_h) / 2)
+        top_pad = max(0.0, (max_height - visual_block_h) / 2.0)
     else:
-        top = rect.y0
-    baseline_y = top + cur * asc
+        top_pad = 0.0
+    # First baseline sits one ascender below the block's visual top.
+    baseline_y = rect.y0 + top_pad + cur * asc
 
     fontname = "F0" if font_file else "helv"
     _kw = {}
@@ -2131,7 +2702,14 @@ def draw_paragraph_text(page, rect, text, font_file, size, color=(0, 0, 0),
         y = baseline_y + i * step
         if y > rect.y1 + step:
             break
-        lw = _measure_text_width(line, font_file, font, cur)
+        # Use the RENDER advance width (what insert_text actually paints — base
+        # advances, no HarfBuzz GPOS kerning) for horizontal placement, so centered
+        # and right-aligned lines land exactly where painted. _measure_text_width
+        # (HarfBuzz-shaped) is narrower and biased centered text off-center.
+        try:
+            lw = font.text_length(line, fontsize=cur)
+        except Exception:
+            lw = _measure_text_width(line, font_file, font, cur)
         if align == "center":
             x = rect.x0 + max(0, (max_width - lw) / 2)
         elif align == "right":
@@ -2846,9 +3424,20 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None, onl
             render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report,
                                  forced_size=forced_story_size)
         elif page_type == 'vocabulary':
-            render_vocabulary_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report,
-                                      id_to_translation=id_to_translation or None,
-                                      allow_legacy_flat=allow_legacy_flat)
+            # Book-agnostic scene-driven path (place by stable id + cell_box) when the
+            # scene graph AND a stable-id contract are available; otherwise fall back to
+            # the legacy page_spans path (which fails closed on no-contract per Task 11).
+            _handled = None
+            if page_scene_obj is not None and id_to_translation:
+                _handled = render_vocabulary_page_from_scene(
+                    page, page_scene_obj, id_to_translation, fonts_dir, page_num, report)
+            # _handled is True/False when the scene path did the work (flagged or not);
+            # None means it declined (no units) → fall back to the legacy renderer.
+            if _handled is None:
+                render_vocabulary_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report,
+                                          id_to_translation=id_to_translation or None,
+                                          allow_legacy_flat=allow_legacy_flat,
+                                          page_scene=page_scene_obj)
         elif page_type == 'back_cover':
             render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num, report)
         elif page_type == 'copyright':

@@ -9,10 +9,11 @@ use Illuminate\Support\Facades\Route;
 // Redirect root to store (the customer-facing page)
 Route::get('/', fn() => redirect()->route('store'));
 
-// Store (customer-facing)
+// Store (customer-facing landing). Only PUBLISHED books surface (brief: public store shows
+// published editions only). Uses the same discovery engine as /browse for consistency.
 Route::get('/store', function () {
-    $books = Book::with(['translations', 'narrations'])
-        ->where('status', 'ready')
+    $books = (new \App\Services\Discovery\BookQuery([]))->base()
+        ->with(['translations', 'narrations'])
         ->latest()
         ->get();
     return view('store.index', compact('books'));
@@ -23,12 +24,17 @@ Route::get('/store/book/{book}', function (Book $book) {
     return view('store.book', compact('book'));
 })->name('store.book');
 
+// Store discovery catalogue — customer-facing filters/search/facets over PUBLISHED books
+// (wires the tested App\Services\Discovery\BookQuery engine to a real UI).
+Route::get('/browse', \App\Livewire\Store\Catalog::class)->name('store.browse');
+
 // Admin routes (no auth for POC - add later)
 Route::prefix('admin')->group(function () {
     Route::get('/', Dashboard::class)->name('admin.dashboard');
     Route::get('/upload', BookUpload::class)->name('admin.upload');
     Route::get('/onboard', \App\Livewire\Admin\BookOnboarding::class)->name('admin.onboard');
     Route::get('/books/{book}', BookManager::class)->name('admin.book');
+    Route::get('/books/{book}/details', \App\Livewire\Admin\BookReviewDetails::class)->name('admin.book-details');
     Route::get('/books/{book}/review/{language?}', \App\Livewire\Admin\BookReviewer::class)->name('admin.review');
 });
 
@@ -88,8 +94,13 @@ Route::get('/read/{book}', function (Book $book) {
         }
     }
 
-    // Narration data
-    $narration = $book->narrations->where('status', 'completed')->first();
+    // Narration data — an outdated edition narration (translated text edited after
+    // it was generated) must not be served as current (gated flow Req 6.2).
+    $narration = $book->narrations
+        ->where('status', 'completed')
+        ->where('language_code', $lang)
+        ->where('is_outdated', false)
+        ->first();
     $pageAudioMap = [];
     $pageTimingMap = [];
 
@@ -110,6 +121,21 @@ Route::get('/read/{book}', function (Book $book) {
 
     return view('reader', compact('book', 'pdfPath', 'lang', 'pageAudioMap', 'pageTimingMap'));
 })->name('reader');
+
+// THROWAWAY page-curl prototype (spec: specs/page-curl-reader). Self-contained, does NOT
+// touch reader.blade.php. Renders PDF.js page canvases into StPageFlip html-mode pages.
+Route::get('/read-curl/{book}', function (Book $book) {
+    $book->load(['translations.translatedPages']);
+    $lang = request()->query('lang', 'en');
+    $pdfPath = $book->pdf_path;
+    if ($lang !== 'en') {
+        $t = $book->translations->where('language_code', $lang)->first();
+        if ($t && $t->rendered_pdf_path && \Illuminate\Support\Facades\Storage::disk('public')->exists($t->rendered_pdf_path)) {
+            $pdfPath = $t->rendered_pdf_path;
+        }
+    }
+    return view('read-curl', compact('book', 'pdfPath', 'lang'));
+})->name('read-curl');
 
 // RAW PDF — serve the translated PDF directly, no reader/crop, for debugging the engine output.
 Route::get('/raw-pdf/{book}', function (Book $book) {

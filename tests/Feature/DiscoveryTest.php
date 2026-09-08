@@ -141,6 +141,29 @@ class DiscoveryTest extends TestCase
         $this->assertFalse($expired->visibleInTerritory('ZA')); // licence expired
     }
 
+    public function test_edition_rights_gate_applied_in_live_query(): void
+    {
+        // Unrestricted book (no rights record) — visible.
+        $free = $this->publishedBook(['title' => 'Freely Visible']);
+
+        // Restricted book: only edition is US-only, so hidden from the default ZA store.
+        $restricted = $this->publishedBook(['title' => 'US Only'],
+            ['language_code' => 'en', 'language_name' => 'English']);
+        EditionRight::create([
+            'translation_id' => $restricted->translations()->first()->id,
+            'territories' => ['US'], 'digital_rights' => true,
+            'licence_start' => now()->subDay(), 'licence_end' => now()->addYear(),
+        ]);
+
+        $visible = (new BookQuery([]))->base()->pluck('title')->all(); // default territory ZA
+        $this->assertContains('Freely Visible', $visible);
+        $this->assertNotContains('US Only', $visible);
+
+        // Same query for the US territory DOES show it.
+        $us = (new BookQuery(['territory' => 'US']))->base()->pluck('title')->all();
+        $this->assertContains('US Only', $us);
+    }
+
     public function test_series_progression_next_book(): void
     {
         $b1 = $this->publishedBook(['title' => 'Vol1', 'series' => 'Kolulu', 'series_volume' => 1]);

@@ -29,12 +29,12 @@
             <div class="hidden md:flex items-center space-x-8">
                 <a href="#features" class="text-sm text-gray-600 hover:text-brand-500 transition">Features</a>
                 <a href="#how-it-works" class="text-sm text-gray-600 hover:text-brand-500 transition">How It Works</a>
-                <a href="#books" class="text-sm text-gray-600 hover:text-brand-500 transition">Books</a>
+                <a href="{{ route('store.browse') }}" class="text-sm text-gray-600 hover:text-brand-500 transition">Books</a>
                 <a href="#pricing" class="text-sm text-gray-600 hover:text-brand-500 transition">Pricing</a>
             </div>
             <div class="flex items-center space-x-3">
                 <a href="{{ route('admin.dashboard') }}" class="text-sm text-gray-500 hover:text-brand-500 transition">Publisher Login</a>
-                <a href="#books" class="bg-brand-500 text-white px-5 py-2 rounded-full text-sm font-medium hover:bg-brand-600 transition shadow-sm">Browse Books</a>
+                <a href="{{ route('store.browse') }}" class="bg-brand-500 text-white px-5 py-2 rounded-full text-sm font-medium hover:bg-brand-600 transition shadow-sm">Browse Books</a>
             </div>
         </div>
     </nav>

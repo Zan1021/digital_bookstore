@@ -30,6 +30,31 @@ class BookQuery
     {
         $q = Book::query()->where('status', 'published');
 
+        // Rights/territory visibility gate (brief Req: never show an edition whose
+        // territorial/format rights are unavailable). A book is visible only if it has at
+        // least one PUBLISHED edition that is store-visible in the current territory:
+        // an edition with NO rights record is unrestricted; one WITH a record must have
+        // digital_rights, an in-window licence, and the territory permitted (list or "*").
+        $territory = $this->filters['territory'] ?? 'ZA';
+        $today = now()->toDateString();
+        $q->whereHas('translations', function ($t) use ($territory, $today) {
+            $t->where('publication_status', 'published')
+              ->where(function ($w) use ($territory, $today) {
+                  // No rights record => unrestricted.
+                  $w->whereDoesntHave('rights')
+                    // OR a rights record that passes the gate.
+                    ->orWhereHas('rights', function ($r) use ($territory, $today) {
+                        $r->where('digital_rights', true)
+                          ->where(fn ($q) => $q->whereNull('licence_start')->orWhere('licence_start', '<=', $today))
+                          ->where(fn ($q) => $q->whereNull('licence_end')->orWhere('licence_end', '>=', $today))
+                          ->where(function ($q) use ($territory) {
+                              $q->whereJsonContains('territories', '*')
+                                ->orWhereJsonContains('territories', $territory);
+                          });
+                    });
+              });
+        });
+
         if (!empty($this->filters['book_type'])) {
             $q->where('book_type', $this->filters['book_type']);
         }
@@ -50,12 +75,19 @@ class BookQuery
                 $q->whereHas('tags', fn ($t) => $t->where('tags.id', $tagId));
             }
         }
-        // Edition-level facets: language, reading level, narrated, price.
+        // Content advisory (More Filters). Match by advisory slug.
+        if (!empty($this->filters['advisory'])) {
+            $slug = $this->filters['advisory'];
+            $q->whereHas('contentAdvisories', fn ($a) => $a->where('slug', $slug));
+        }
+        // Edition-level facets: language, reading level, narrated, price, education phase.
         $editionFilters = array_filter([
             'language' => $this->filters['language'] ?? null,
             'reading_level' => $this->filters['reading_level'] ?? null,
             'narrated' => $this->filters['narrated'] ?? null,
             'price' => $this->filters['price'] ?? null, // 'free' | 'paid'
+            'education_phase' => $this->filters['education_phase'] ?? null,
+            'feature' => $this->filters['feature'] ?? null, // any single feature slug (More Filters)
         ], fn ($v) => $v !== null && $v !== '');
 
         if (!empty($editionFilters)) {
@@ -67,8 +99,14 @@ class BookQuery
                 if (!empty($editionFilters['reading_level'])) {
                     $t->whereHas('readingLevel', fn ($r) => $r->where('slug', $editionFilters['reading_level']));
                 }
+                if (!empty($editionFilters['education_phase'])) {
+                    $t->where('education_phase', $editionFilters['education_phase']);
+                }
                 if (!empty($editionFilters['narrated'])) {
                     $t->whereHas('features', fn ($f) => $f->whereIn('slug', ['narrated', 'read_along']));
+                }
+                if (!empty($editionFilters['feature'])) {
+                    $t->whereHas('features', fn ($f) => $f->where('slug', $editionFilters['feature']));
                 }
                 if (($editionFilters['price'] ?? null) === 'free') {
                     $t->where(fn ($w) => $w->whereNull('price')->orWhere('price', 0));

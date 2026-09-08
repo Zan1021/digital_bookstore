@@ -474,16 +474,33 @@ def build_copyright_manifest(page, page_num, spans):
 # FULL DOCUMENT MANIFEST
 # =============================================================================
 
-def build_document_manifest(pdf_path: str) -> dict:
+# Manifest schema version emitted by the scene-graph builder. PHP's freshness guard
+# requires the persisted manifest to be at least this version AND builder=scene_graph.
+SCENE_MANIFEST_SCHEMA_VERSION = "2.0"
+
+
+def build_document_manifest(pdf_path: str, legacy: bool = False) -> dict:
     """
     Build a complete structured manifest for an entire PDF.
-    Every text span gets a stable ID and semantic classification.
+
+    DEFAULT (legacy=False): delegate to the scene graph
+    (document_model.build_document_scene). This is THE source of truth and is the ONLY
+    path that carries merged-header structure (column_span / is_merged / cell_box /
+    align_h / align_v / peer_group_id). Structured pages (vocabulary/table) render
+    correctly only via this path.
+
+    legacy=True: the old flat per-type builder (no merged-cell structure). Retained for
+    one release for emergency comparison only; do NOT use for production renders.
     """
+    if not legacy:
+        return build_document_manifest_from_scene(pdf_path)
+
     doc = pymupdf.open(pdf_path)
     total_pages = len(doc)
 
     manifest = {
         "schema_version": "1.0",
+        "builder": "legacy_flat",
         "source_file": os.path.basename(pdf_path),
         "page_count": total_pages,
         "pages": [],
@@ -516,6 +533,102 @@ def build_document_manifest(pdf_path: str) -> dict:
         manifest["pages"].append(page_manifest)
 
     doc.close()
+    return manifest
+
+
+def build_document_manifest_from_scene(pdf_path: str) -> dict:
+    """
+    Build the persisted manifest from the scene graph (document_model).
+
+    Groups each page's text units into regions by semantic_role, carrying the full
+    structure needed by the render resolver so merged headers place correctly:
+      - per item: id, text, semantic_role, bbox, and (when present) cell_box,
+        column_span, is_merged, align_h, align_v, peer_group_id
+      - per region: semantic_role + translation_policy (derived from the units)
+
+    Book-agnostic: every field comes from the scene graph, no per-book constants.
+    """
+    from document_model import build_document_scene
+
+    scene = build_document_scene(pdf_path)
+
+    manifest = {
+        "schema_version": SCENE_MANIFEST_SCHEMA_VERSION,
+        "builder": "scene_graph",
+        "source_file": os.path.basename(pdf_path),
+        "page_count": scene.total_pages,
+        "pages": [],
+    }
+
+    for page in scene.pages:
+        # Group units by (parent_region_id or semantic_role) preserving reading order.
+        region_order = []          # region keys in first-seen order
+        region_units = {}          # key -> list[TextUnit]
+        for unit in sorted(page.text_units, key=lambda u: getattr(u, "reading_order", 0)):
+            key = unit.parent_region_id or f"{page.page_number}-{unit.semantic_role}"
+            if key not in region_units:
+                region_units[key] = []
+                region_order.append(key)
+            region_units[key].append(unit)
+
+        regions = []
+        for key in region_order:
+            units = region_units[key]
+            # Region policy rollup (PHP render/translate layers gate on THIS):
+            #  - educational_adaptation if any unit is a phonics/adaptation item
+            #    (regenerate an equivalent target-language exercise, not translate);
+            #  - else translate_items if any unit translates;
+            #  - else preserve.
+            adapt_any = any(u.translation_policy == "educational_adaptation" for u in units)
+            translate_any = any(
+                u.translation_policy in ("translate", "educational_adaptation") for u in units
+            )
+            if adapt_any:
+                region_policy = "educational_adaptation"
+            elif translate_any:
+                region_policy = "translate_items"
+            else:
+                region_policy = "preserve"
+            role = units[0].semantic_role or "unknown"
+            region = {
+                "id": key,
+                "semantic_role": role,
+                "translation_policy": region_policy,
+                "items": [],
+            }
+            for u in units:
+                item = {
+                    "id": u.id,
+                    "text": u.source_text,
+                    "semantic_role": u.semantic_role,
+                    "translation_policy": u.translation_policy,
+                    "bbox": list(u.bbox),
+                }
+                # Structure-aware placement fields — only when populated (table/vocab).
+                cb = getattr(u, "cell_box", None)
+                if cb is not None:
+                    item["cell_box"] = list(cb)
+                if getattr(u, "align_h", None):
+                    item["align_h"] = u.align_h
+                if getattr(u, "align_v", None):
+                    item["align_v"] = u.align_v
+                if getattr(u, "peer_group_id", None):
+                    item["peer_group_id"] = u.peer_group_id
+                cs = getattr(u, "column_span", 1)
+                if cs and cs != 1:
+                    item["column_span"] = cs
+                if getattr(u, "is_merged", False):
+                    item["is_merged"] = True
+                region["items"].append(item)
+            regions.append(region)
+
+        manifest["pages"].append({
+            "page_number": page.page_number,
+            "page_type": page.page_type,
+            "geometry": {"width": page.width_pt, "height": page.height_pt},
+            "regions": regions,
+        })
+
     return manifest
 
 
@@ -579,10 +692,13 @@ def main():
     parser.add_argument("pdf_path", help="Input PDF file")
     parser.add_argument("--output", "-o", help="Output JSON file (default: stdout)")
     parser.add_argument("--page", "-p", type=int, help="Extract single page only")
+    parser.add_argument("--legacy", action="store_true",
+                        help="Use the OLD flat per-type builder (no merged-cell "
+                             "structure). Emergency comparison only.")
 
     args = parser.parse_args()
 
-    manifest = build_document_manifest(args.pdf_path)
+    manifest = build_document_manifest(args.pdf_path, legacy=args.legacy)
 
     if args.page:
         # Filter to single page

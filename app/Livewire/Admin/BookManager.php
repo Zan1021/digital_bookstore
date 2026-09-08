@@ -3,6 +3,7 @@
 namespace App\Livewire\Admin;
 
 use App\Models\Book;
+use App\Models\Translation;
 use App\Services\NarrationService;
 use App\Services\PdfService;
 use App\Services\PdfTranslationService;
@@ -29,10 +30,10 @@ class BookManager extends Component
     public function mount(Book $book)
     {
         $this->book = $book->load(['pages', 'translations.translatedPages', 'narrations']);
-        $this->narrationStartPage = $book->narration_start_page;
-        $this->narrationEndPage = $book->narration_end_page;
-        $this->cropPercent = $book->crop_percent;
-        $this->cropEnabled = $book->crop_enabled;
+        $this->narrationStartPage = $book->narration_start_page ?? 3;
+        $this->narrationEndPage = $book->narration_end_page ?? max(3, $book->page_count - 2);
+        $this->cropPercent = $book->crop_percent ?? 0;
+        $this->cropEnabled = (bool) $book->crop_enabled;
     }
 
     public function switchTab(string $tab)
@@ -65,30 +66,71 @@ class BookManager extends Component
         $this->suggestedMetadata = null;
     }
 
+    /**
+     * Dispatch a queued translation for the chosen language and return immediately
+     * (spec Req 3.1). The edition + ProcessingJob drive the live status shown via
+     * wire:poll. A demo fallback runs synchronously when TRANSLATION_SYNC=true or no
+     * queue worker is expected (spec Req 3 / Task 12).
+     */
     public function translate()
     {
         if (empty($this->selectedLanguage)) {
             return;
         }
 
-        set_time_limit(600); // 10 minutes — translating page-by-page via OpenAI
-        $this->translating = true;
+        $langName = TranslationService::SUPPORTED_LANGUAGES[$this->selectedLanguage] ?? $this->selectedLanguage;
 
-        try {
-            $service = app(TranslationService::class);
-            $service->translate($this->book, $this->selectedLanguage);
-            $this->book->refresh()->load(['translations.translatedPages']);
+        // Create/reuse the edition immediately so the UI can show it as TRANSLATING.
+        $edition = Translation::updateOrCreate(
+            ['book_id' => $this->book->id, 'language_code' => $this->selectedLanguage],
+            ['language_name' => $langName, 'status' => 'processing',
+             'render_status' => Translation::STATE_TRANSLATING],
+        );
 
-            $langName = TranslationService::SUPPORTED_LANGUAGES[$this->selectedLanguage] ?? $this->selectedLanguage;
-            $pageCount = $this->book->translations->where('language_code', $this->selectedLanguage)->first()?->translatedPages->count() ?? 0;
-            $reviewUrl = route('admin.review', ['book' => $this->book->id, 'language' => $this->selectedLanguage]);
-            $this->dispatch('celebration', message: "🎉 {$langName} translation complete! {$pageCount} pages translated.", redirect: $reviewUrl);
-        } catch (\Throwable $e) {
-            session()->flash('error', 'Translation failed: ' . $e->getMessage());
+        if (config('bookstore.translation_sync', env('TRANSLATION_SYNC', false))) {
+            // Synchronous demo fallback — runs in-request.
+            \App\Jobs\TranslateEditionJob::dispatchSync($edition->id);
+        } else {
+            \App\Jobs\TranslateEditionJob::dispatch($edition->id);
         }
 
-        $this->translating = false;
+        $this->book->refresh()->load(['translations.translatedPages']);
         $this->selectedLanguage = '';
+        session()->flash('success', "{$langName} translation queued. This page updates as it progresses.");
+    }
+
+    /**
+     * Re-dispatch translation for an edition that failed or needs a fresh run
+     * (spec Req 3.4) — no re-upload required.
+     */
+    public function retryTranslation(int $translationId)
+    {
+        $edition = $this->book->translations()->findOrFail($translationId);
+        $edition->forceFill(['render_status' => Translation::STATE_TRANSLATING])->save();
+
+        if (config('bookstore.translation_sync', env('TRANSLATION_SYNC', false))) {
+            \App\Jobs\TranslateEditionJob::dispatchSync($edition->id);
+        } else {
+            \App\Jobs\TranslateEditionJob::dispatch($edition->id);
+        }
+
+        $this->book->refresh()->load(['translations.translatedPages']);
+        session()->flash('success', "{$edition->language_name} translation re-queued.");
+    }
+
+    /**
+     * True while any edition is mid-flight — the view polls with wire:poll only when
+     * this is set, so a settled page does not poll forever.
+     */
+    public function getIsAnyTranslatingProperty(): bool
+    {
+        return $this->book->translations->contains(function ($t) {
+            return in_array($t->render_status, [
+                Translation::STATE_TRANSLATING,
+                Translation::STATE_RENDERING,
+                Translation::STATE_AUTOMATED_QA,
+            ], true);
+        });
     }
 
     public function renderPdf(int $translationId)
@@ -186,6 +228,18 @@ class BookManager extends Component
     {
         if (empty($this->selectedVoice) || empty($this->selectedLanguage)) {
             return;
+        }
+
+        // Narration gate (spec Req 2 & 5): the source language narrates freely; a
+        // translated edition may only be narrated once it is APPROVED. Re-checked here
+        // at execution time, not just via a hidden button.
+        if ($this->selectedLanguage !== 'en') {
+            $edition = $this->book->translations->where('language_code', $this->selectedLanguage)->first();
+            if (! $edition || ! $edition->isApprovedForNarration()) {
+                session()->flash('error',
+                    'This translated edition must be reviewed and approved before it can be narrated.');
+                return;
+            }
         }
 
         set_time_limit(600); // 10 minutes — generating audio per page

@@ -46,7 +46,17 @@ class ReviewQueue extends Component
             $query->where('review_status', 'rejected');
         }
 
-        $this->pages = $query->get()->map(function ($tp) {
+        // Pages the render gate flagged with structure deviations (Req 4.2) — surfaced
+        // so the reviewer's attention is drawn to likely-broken pages.
+        $qa = $this->translation->qa_report ?? [];
+        $deviationPages = [];
+        foreach (($qa['structureDeviations'] ?? $qa['review_pages'] ?? []) as $key => $val) {
+            // Accept either a list of page numbers or a map keyed by page number.
+            $deviationPages[] = is_int($val) ? $val : (int) (is_numeric($key) ? $key : $val);
+        }
+        $deviationPages = array_filter($deviationPages);
+
+        $this->pages = $query->get()->map(function ($tp) use ($deviationPages) {
             return [
                 'id' => $tp->id,
                 'page_number' => $tp->page_number,
@@ -55,6 +65,7 @@ class ReviewQueue extends Component
                 'quality_flag' => $tp->quality_flag ?? 'gray',
                 'quality_notes' => $tp->quality_notes,
                 'review_status' => $tp->review_status ?? 'unreviewed',
+                'has_deviation' => in_array($tp->page_number, $deviationPages, true),
                 'source_image' => $this->getPageImage('source', $tp->page_number),
                 'translated_image' => $this->getPageImage('translated', $tp->page_number),
             ];
@@ -105,6 +116,9 @@ class ReviewQueue extends Component
                 'review_status' => 'approved',
                 'quality_flag' => 'green',
             ]);
+            // Mirror into the edition's page_approvals so markApproved() can gate on it
+            // (spec Req 4.4 / 5.2).
+            $this->translation?->setPageApproval($tp->page_number, true);
             $this->loadTranslation();
         }
     }
@@ -117,6 +131,7 @@ class ReviewQueue extends Component
                 'review_status' => 'rejected',
                 'quality_flag' => 'red',
             ]);
+            $this->translation?->setPageApproval($tp->page_number, false);
             $this->loadTranslation();
         }
     }
@@ -133,17 +148,67 @@ class ReviewQueue extends Component
         }
     }
 
+    /**
+     * Edit a page's translated text, then re-render the edition through the V8
+     * contract path so the change is reflected in the rendered PDF + comparison
+     * images (spec Req 4.3 / Task 9). Editing invalidates the page's approval and any
+     * existing narration for the edition (spec Req 6.1 / Task 11). Full-edition
+     * re-render via the proven contract path avoids reintroducing the English-leak
+     * fallback that a bespoke partial render risked.
+     */
     public function updateTranslation(int $pageId, string $newText)
     {
         $tp = TranslatedPage::find($pageId);
-        if ($tp) {
-            $tp->update([
-                'translated_text' => $newText,
-                'review_status' => 'edited',
-                'quality_notes' => ($tp->quality_notes ?? '') . ' | Manually edited by reviewer.',
-            ]);
-            $this->loadTranslation();
+        if (! $tp || ! $this->translation) {
+            return;
         }
+
+        $tp->update([
+            'translated_text' => $newText,
+            'review_status' => 'edited',
+            'quality_notes' => ($tp->quality_notes ?? '') . ' | Manually edited by reviewer.',
+        ]);
+
+        // The edit un-approves this page (content changed since any prior approval).
+        $this->translation->setPageApproval($tp->page_number, false);
+
+        // Invalidate the edition's narration if it was already generated (Req 6.1).
+        $this->translation->editionNarrations()
+            ->where('status', 'completed')
+            ->update(['is_outdated' => true]);
+
+        // Re-render the edition so the rendered PDF + comparison images reflect the
+        // edit; this also re-runs the hard-constraint gate + Fix C.
+        try {
+            app(\App\Services\PdfTranslationService::class)
+                ->createTranslatedPdf($this->book, $this->translation->fresh());
+            $this->translation = $this->translation->fresh();
+        } catch (\Throwable $e) {
+            session()->flash('error', 'Re-render after edit failed: ' . $e->getMessage());
+        }
+
+        $this->loadTranslation();
+    }
+
+    /**
+     * Promote the edition to APPROVED once every page is approved and layout QA is
+     * clear (spec Req 5.2). Narration for the edition unlocks only after this.
+     */
+    public function approveEdition()
+    {
+        if (! $this->translation) {
+            return;
+        }
+        if ($this->translation->markApproved()) {
+            session()->flash('success',
+                "{$this->translation->language_name} edition approved. Narration is now available.");
+        } else {
+            [$approved, $total] = $this->translation->pageApprovalProgress();
+            session()->flash('error',
+                "Cannot approve yet: {$approved}/{$total} pages approved"
+                . ($this->translation->canBePublished() ? '' : ' and layout QA is not clear') . '.');
+        }
+        $this->loadTranslation();
     }
 
     public function render()
@@ -153,8 +218,16 @@ class ReviewQueue extends Component
             $currentPageData = collect($this->pages)->firstWhere('page_number', $this->currentPage);
         }
 
+        [$editionApproved, $editionTotal] = $this->translation
+            ? $this->translation->pageApprovalProgress()
+            : [0, 0];
+
         return view('livewire.admin.review-queue', [
             'currentPageData' => $currentPageData,
+            'editionApprovedCount' => $editionApproved,
+            'editionTotalPages' => $editionTotal,
+            'editionCanApprove' => $this->translation?->allPagesApproved() && $this->translation?->canBePublished(),
+            'editionRenderStatus' => $this->translation?->render_status,
             'stats' => [
                 'total' => count($this->pages),
                 'approved' => collect($this->pages)->where('review_status', 'approved')->count(),

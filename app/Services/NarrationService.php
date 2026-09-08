@@ -52,6 +52,20 @@ class NarrationService
      */
     public function narrate(Book $book, string $languageCode, string $voiceId, string $voiceName, int $dramaLevel = 90, int $speedLevel = 30): Narration
     {
+        // Independent narration gate (spec Req 5.4): a translated edition must be
+        // APPROVED before narration. Re-checked here so the service is safe even if
+        // called outside the UI. The source language is always allowed.
+        if ($languageCode !== 'en' && $languageCode !== $book->original_language) {
+            $edition = $book->translations()
+                ->where('language_code', $languageCode)->first();
+            if (! $edition || ! $edition->isApprovedForNarration()) {
+                throw new \RuntimeException(
+                    "Edition '{$languageCode}' is not approved for narration. "
+                    . 'Review and approve the translation first.'
+                );
+            }
+        }
+
         $narration = Narration::updateOrCreate(
             ['book_id' => $book->id, 'language_code' => $languageCode],
             [
@@ -60,6 +74,7 @@ class NarrationService
                 'voice_id' => $voiceId,
                 'voice_name' => $voiceName,
                 'status' => 'processing',
+                'is_outdated' => false,
             ]
         );
 

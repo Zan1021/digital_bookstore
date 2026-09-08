@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\Storage;
 
 class Book extends Model
 {
@@ -204,5 +205,83 @@ class Book extends Model
                 $book->sku = 'BK-' . str_pad($lastId + 1, 6, '0', STR_PAD_LEFT);
             }
         });
+
+        // Single source of truth for teardown: whenever a Book is deleted — via the
+        // admin UI, tinker, tests, or future code — remove every associated file and
+        // child record so nothing orphans on disk or in the database.
+        static::deleting(function (Book $book) {
+            $book->deleteAssociatedFiles();
+            $book->deleteAssociatedRecords();
+        });
+    }
+
+    /**
+     * Remove every file this book owns on the public disk: the source PDF, cover
+     * image, manifest, per-language translated PDFs, the per-book narration audio
+     * tree, and the engine comparison/overlay renders. Deletes whole directories
+     * rather than guessing individual filenames, so partial/stale path columns
+     * cannot leave orphans behind.
+     */
+    public function deleteAssociatedFiles(): void
+    {
+        $disk = Storage::disk('public');
+
+        // Single stored file paths on the book record.
+        foreach (['pdf_path', 'cover_image', 'manifest_path'] as $attr) {
+            $path = $this->getAttribute($attr);
+            if ($path && $disk->exists($path)) {
+                $disk->delete($path);
+            }
+        }
+
+        // Per-language translated PDFs: the real column plus the legacy guessed path.
+        foreach ($this->translations as $translation) {
+            $candidates = [
+                $translation->rendered_pdf_path,
+                "books/translated/{$this->id}_{$translation->language_code}.pdf",
+            ];
+            foreach (array_filter($candidates) as $pdf) {
+                if ($disk->exists($pdf)) {
+                    $disk->delete($pdf);
+                }
+            }
+        }
+
+        // Manifest sibling by convention (books/manifests/{id}_manifest.json).
+        $manifestByConvention = "books/manifests/{$this->id}_manifest.json";
+        if ($disk->exists($manifestByConvention)) {
+            $disk->delete($manifestByConvention);
+        }
+
+        // Whole directory trees keyed on the book id — audio + comparison renders.
+        // deleteDirectory() is a no-op when the directory is absent.
+        $disk->deleteDirectory("narrations/book-{$this->id}");
+
+        foreach ($this->translations as $translation) {
+            $disk->deleteDirectory("books/comparison/{$this->id}_{$translation->language_code}");
+        }
+        // Sweep any remaining comparison dirs for this book id (e.g. languages whose
+        // translation row was already removed): books/comparison/{id}_*.
+        foreach ($disk->directories('books/comparison') as $dir) {
+            if (preg_match('#/'.preg_quote((string) $this->id, '#').'_[^/]+$#', $dir)
+                || str_starts_with(basename($dir), "{$this->id}_")) {
+                $disk->deleteDirectory($dir);
+            }
+        }
+    }
+
+    /**
+     * Cascade-delete child rows. translatedPages hang off translations, so remove
+     * them first, then the direct hasMany relations.
+     */
+    public function deleteAssociatedRecords(): void
+    {
+        foreach ($this->translations as $translation) {
+            $translation->translatedPages()->delete();
+        }
+        $this->narrations()->delete();
+        $this->translations()->delete();
+        $this->pages()->delete();
+        $this->processingJobs()->delete();
     }
 }

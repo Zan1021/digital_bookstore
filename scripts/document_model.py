@@ -247,9 +247,23 @@ class PageScene:
     drawing_count: int = 0
     
     def get_translatable_units(self) -> list[TextUnit]:
-        """Get all text units that need translation."""
-        return [u for u in self.text_units 
-                if u.translation_policy == "translate"]
+        """Get all text units that need target-language text produced.
+
+        Includes BOTH literal translation units and educational_adaptation units
+        (phonics/sound-pattern exercises that are REGENERATED in the target language,
+        not translated 1:1). Both require target text and a stable id in the contract;
+        excluding adaptation units previously dropped phonics from the translation
+        request and the required-id validation set. Book-agnostic: keyed on policy.
+        """
+        return [u for u in self.text_units
+                if u.translation_policy in ("translate", "educational_adaptation")]
+
+    def get_renderable_units(self) -> list[TextUnit]:
+        """Units the renderer must place with target-language text (translate +
+        educational_adaptation). Preserved units keep their source and are handled
+        separately. Explicit name for the render path so intent is unambiguous."""
+        return [u for u in self.text_units
+                if u.translation_policy in ("translate", "educational_adaptation")]
     
     def get_preserved_units(self) -> list[TextUnit]:
         """Get all text units that should be preserved unchanged."""
@@ -758,6 +772,10 @@ def _build_page_scene(page, page_num: int, total_pages: int) -> PageScene:
             policy = "preserve"
         elif role == "brand_logo":
             policy = "preserve"
+        elif role == "phonics":
+            # Phonics exercises are regenerated for the target language, not
+            # translated literally (English "wh"/"str" don't exist elsewhere).
+            policy = "educational_adaptation"
         
         # Build style ID from span characteristics
         style_id = _build_style_id(span, page_type)
@@ -993,6 +1011,55 @@ def _mark_end_markers(spans, page_type):
     return spans
 
 
+# Phonics / sound-pattern detection.
+#
+# A phonics exercise teaches a LANGUAGE-SPECIFIC sound-to-spelling pattern
+# (English "oa", "ai", "wh", "str", ...). These must NOT be translated word for
+# word — the target language has its own sounds — so they are tagged with the
+# educational_adaptation policy, which instructs the model to regenerate an
+# equivalent exercise in the target language instead of translating the English.
+#
+# Detection is by CONTENT SHAPE only, so it is book-agnostic and source-language
+# agnostic:
+#   1. "pattern - example(s)"  e.g. "oa - float", "str - str-eam", "ai - plain, rain"
+#      (a short leading token, then a dash, then example words), OR
+#   2. an instruction to recognise/identify a pattern at the start/end of words,
+#      e.g. "Recognise wh- at the beginning of words:".
+import re as _re
+
+# A short leading token (letters, optionally with an internal/trailing hyphen used
+# as a phonics cue, e.g. "wh-") followed by a dash separator and at least one
+# example. Tolerant of the extra spaces PDF extraction often introduces.
+_PHONICS_PATTERN_RE = _re.compile(
+    r"^[a-z][a-z\-]{0,4}\s*[-–—]\s*\S", _re.IGNORECASE
+)
+# Instructional phonics lead-ins, kept language-neutral where practical. The
+# English/Afrikaans forms cover the current corpus; the pattern rule above catches
+# the actual exercise rows regardless of the instruction language.
+_PHONICS_INSTRUCTION_RE = _re.compile(
+    r"\b(recognise|recognize|identify|herken|sound|klank)\b.*\b(begin|beginning|end|einde|word|woord)",
+    _re.IGNORECASE,
+)
+
+
+def _is_phonics_span(text: str) -> bool:
+    """True when a span looks like a phonics/sound-pattern exercise (shape-based)."""
+    t = (text or "").strip()
+    if len(t) < 3:
+        return False
+    # A single ordinary word (no dash separator, no instruction) is NOT phonics.
+    if _PHONICS_INSTRUCTION_RE.search(t):
+        return True
+    if _PHONICS_PATTERN_RE.match(t):
+        # Guard: require a dash that separates a SHORT pattern token from examples,
+        # so ordinary hyphenated words ("mother-in-law") don't match — the leading
+        # token before the dash must be at most 4 chars.
+        lead = _re.split(r"[-–—]", t, 1)[0].strip()
+        if len(lead) <= 4:
+            return True
+    return False
+
+
 def _classify_span_role(span: dict, page_type: str) -> str:
     """Classify the semantic role of a span based on its characteristics."""
     if span.get("is_page_number"):
@@ -1020,6 +1087,8 @@ def _classify_span_role(span: dict, page_type: str) -> str:
     elif page_type == "vocabulary":
         if text.isupper() and len(text) > 2:
             return "heading"
+        elif _is_phonics_span(text):
+            return "phonics"
         else:
             return "word_list_item"
     elif page_type == "back_cover":
@@ -1058,6 +1127,10 @@ def _get_region_key(span: dict, page_type: str, page_num: int) -> str:
         text = span.get("text_stripped", "")
         if text.isupper() and len(text) > 2:
             return "headers"
+        elif _is_phonics_span(text):
+            # Keep all phonics rows in ONE region so the exercise is adapted as a
+            # coherent unit, not scattered across x-position columns.
+            return "phonics"
         else:
             # Group by column (x position)
             col = int(span["origin"][0] / 120)
@@ -1080,6 +1153,7 @@ def _region_type_from_key(key: str) -> str:
         "headers": "table_header",
         "title-list": "title_list",
         "prose": "story_prose",
+        "phonics": "phonics",
     }
     if key.startswith("col-"):
         return "word_list"

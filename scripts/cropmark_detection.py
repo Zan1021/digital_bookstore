@@ -652,9 +652,14 @@ def main():
         result = detect_crop_marks_document(args.input)
         
         if args.json:
-            # Remove page_results for brevity in JSON mode
+            # Remove page_results for brevity in JSON mode, but surface the first
+            # page's MediaBox so callers can convert the consensus trim box into
+            # per-edge fractions without re-opening the PDF.
             output = {k: v for k, v in result.items() if k != "page_results"}
             output["page_count_with_details"] = len(result["page_results"])
+            if result["page_results"]:
+                _d = result["page_results"][0].get("details", {})
+                output["media_box"] = _d.get("media_box")
             print(json.dumps(output, indent=2))
         else:
             print(f"Crop-Mark Detection: {os.path.basename(args.input)}")

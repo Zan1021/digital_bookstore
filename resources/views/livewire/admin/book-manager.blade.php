@@ -16,13 +16,19 @@
             <h1 class="text-3xl font-bold text-gray-800">{{ $book->title }}</h1>
             <p class="text-gray-500 mt-1">{{ $book->sku }} &middot; {{ $book->page_count }} pages</p>
         </div>
-        <a href="{{ route('flipbook', $book) }}" target="_blank"
-           class="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition flex items-center">
-            <svg class="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-            </svg>
-            View Flipbook
-        </a>
+        <div class="flex items-center gap-3">
+            <a href="{{ route('admin.book-details', $book) }}"
+               class="bg-white border border-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-50 transition flex items-center text-sm font-medium">
+                Review Details
+            </a>
+            <a href="{{ route('reader', $book) }}" target="_blank"
+               class="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition flex items-center">
+                <svg class="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                </svg>
+                View Flipbook
+            </a>
+        </div>
     </div>
 
     {{-- Tabs --}}
@@ -216,14 +222,28 @@
             {{-- Existing Translations --}}
             @if($book->translations->isNotEmpty())
                 <div class="mt-8 pt-6 border-t">
-                    <div class="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
-                        <p class="text-sm text-green-700 font-medium">✅ Translation complete! View the translated book below.</p>
-                    </div>
-                    <h4 class="font-medium text-gray-700 mb-4">Completed Translations</h4>
+                    <h4 class="font-medium text-gray-700 mb-4">Editions</h4>
                     @foreach($book->translations as $translation)
                         <div class="mb-6 border border-gray-200 rounded-xl p-4">
                             <div class="flex items-center justify-between mb-3">
-                                <h5 class="font-medium text-brand-600">{{ $translation->language_name }}</h5>
+                                <div class="flex items-center gap-2">
+                                    <h5 class="font-medium text-brand-600">{{ $translation->language_name }}</h5>
+                                    @php $rs = $translation->render_status; @endphp
+                                    @if(in_array($rs, ['TRANSLATING','RENDERING','AUTOMATED_QA']))
+                                        <span wire:poll.3s class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 animate-pulse">{{ $rs }}…</span>
+                                    @elseif($rs === 'NEEDS_LAYOUT_REVIEW')
+                                        <span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">NEEDS REVIEW</span>
+                                    @elseif($rs === 'NEEDS_LANGUAGE_REVIEW')
+                                        <span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-red-100 text-red-700">FAILED — retry</span>
+                                    @elseif($rs === 'READY_FOR_REVIEW')
+                                        <span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">READY FOR REVIEW</span>
+                                    @elseif($rs === 'APPROVED')
+                                        <span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-green-100 text-green-700">APPROVED ✓</span>
+                                    @endif
+                                    @if($translation->editionNarrations()->where('is_outdated', true)->exists())
+                                        <span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-orange-100 text-orange-700">NARRATION OUTDATED — re-generate</span>
+                                    @endif
+                                </div>
                                 <div class="flex items-center gap-3">
                                     @php
                                         $transChars = $translation->translatedPages->sum(fn($tp) => mb_strlen($tp->translated_text ?? ''));
@@ -233,20 +253,26 @@
                                     @endphp
                                     <span class="text-xs text-green-600 font-medium bg-green-50 px-2 py-1 rounded">~R{{ number_format($transCostZar, 2) }}</span>
                                     <span class="text-xs text-gray-500">{{ $translation->translatedPages->count() }} pages</span>
-                                    <a href="{{ route('flipbook', ['book' => $book->id, 'lang' => $translation->language_code]) }}" target="_blank"
+                                    <a href="{{ route('reader', ['book' => $book->id, 'lang' => $translation->language_code]) }}" target="_blank"
                                        class="inline-flex items-center gap-1 text-xs bg-brand-500 text-white px-3 py-1.5 rounded-lg hover:bg-brand-600 transition">
                                         <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
                                         </svg>
                                         View Flipbook
                                     </a>
-                                    <a href="{{ route('admin.review', ['book' => $book->id, 'language' => $translation->language_code]) }}" target="_blank"
+                                    <a href="{{ route('admin.review-queue', ['book' => $book->id, 'language' => $translation->language_code]) }}" target="_blank"
                                        class="inline-flex items-center gap-1 text-xs bg-purple-500 text-white px-3 py-1.5 rounded-lg hover:bg-purple-600 transition">
                                         <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
                                         </svg>
-                                        Review
+                                        Compare &amp; Review
                                     </a>
+                                    @if(in_array($translation->render_status, ['NEEDS_LANGUAGE_REVIEW','NEEDS_LAYOUT_REVIEW']))
+                                        <button wire:click="retryTranslation({{ $translation->id }})"
+                                                class="inline-flex items-center gap-1 text-xs bg-yellow-500 text-white px-3 py-1.5 rounded-lg hover:bg-yellow-600 transition">
+                                            Retry
+                                        </button>
+                                    @endif
                                     <button wire:click="renderPdf({{ $translation->id }})"
                                             wire:loading.attr="disabled"
                                             wire:target="renderPdf({{ $translation->id }})"
@@ -346,9 +372,14 @@
                             <option value="">Select language...</option>
                             <option value="en">English (Original)</option>
                             @foreach($book->translations as $t)
-                                <option value="{{ $t->language_code }}">{{ $t->language_name }}</option>
+                                @if($t->isApprovedForNarration())
+                                    <option value="{{ $t->language_code }}">{{ $t->language_name }}</option>
+                                @else
+                                    <option value="" disabled>{{ $t->language_name }} — approve translation first</option>
+                                @endif
                             @endforeach
                         </select>
+                        <p class="text-xs text-gray-400 mt-1">English narrates immediately. A translation must be reviewed &amp; approved before it can be narrated.</p>
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Voice</label>

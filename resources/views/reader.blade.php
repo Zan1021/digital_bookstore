@@ -8,6 +8,7 @@
     <style>
         /* ===== RESET & BASE ===== */
         *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { overflow: hidden; } /* Prevent scrollbar jump during page-curl */
         [x-cloak] { display: none !important; }
         
         :root {
@@ -441,6 +442,23 @@
            see _snapshotStage()/_runTurn(). The old per-surface CSS flip/slide classes
            were removed because they raced the PDF.js re-render and never showed. */
 
+        /* ===== STPAGEFLIP PAGE-CURL PAGES ===== */
+        .stflip-page {
+            background: #fff; overflow: hidden; position: relative;
+        }
+        .stflip-page canvas { width: 100%; height: 100%; display: block; }
+        /* Soft gutter shadow at the binding edge (approved prototype). */
+        .stflip-page::before {
+            content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 22px;
+            background: linear-gradient(to right, rgba(0,0,0,0.16), rgba(0,0,0,0));
+            pointer-events: none; z-index: 2;
+        }
+        .stflip-page::after {
+            content: ""; position: absolute; top: 0; bottom: 0; right: 0; width: 22px;
+            background: linear-gradient(to left, rgba(0,0,0,0.16), rgba(0,0,0,0));
+            pointer-events: none; z-index: 2;
+        }
+
         /* ===== ENHANCED BOOK DEPTH ===== */
         .book-container {
             position: relative;
@@ -736,20 +754,8 @@
                 &#10094;
             </button>
 
-            <!-- Book container (flex; CSS sizes the pages — no JS pixel math) -->
-            <div class="book-container" :class="displayMode === 'spread' ? 'spread-mode' : 'single-mode'">
-                <!-- Left page (or single page) -->
-                <div class="page-surface"
-                     :class="displayMode === 'spread' ? 'left-page' : 'single-page'">
-                    <canvas id="canvas-left"></canvas>
-                </div>
-
-                <!-- Right page (spread only, and only when a right page exists) -->
-                <div class="page-surface right-page"
-                     x-show="displayMode === 'spread' && hasRightPage">
-                    <canvas id="canvas-right"></canvas>
-                </div>
-            </div>
+            <!-- Book container — StPageFlip mount (page-curl prototype approved) -->
+            <div id="stpageflip-mount" style="touch-action:none;"></div>
 
             <button class="nav-arrow next" @click.stop="nextPage()" :disabled="currentPage >= totalPages" aria-label="Next page">
                 &#10095;
@@ -903,6 +909,8 @@
 
     <!-- PDF.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <!-- StPageFlip 2.0.7 (pinned) — page-curl turn effect -->
+    <script src="https://cdn.jsdelivr.net/npm/page-flip@2.0.7/dist/js/page-flip.browser.min.js"></script>
     <script>
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
@@ -923,6 +931,7 @@
             pdfDoc: null,  // Don't use this for PDF.js calls — use _pdfDoc instead
             totalPages: {{ $book->page_count }},
             currentPage: 1,
+            bookId: {{ $book->id }},
             viewMode: 'auto',      // 'auto', 'single', 'spread'
             displayMode: 'single', // actual current mode: 'single' or 'spread'
             hasRightPage: false,   // whether the current spread has a right page to show
@@ -1075,39 +1084,36 @@
 
                     // Calculate layout
                     this.calculateLayout();
-                    // Debounced resize: recompute layout + re-render once things settle.
-                    // Avoids the render storm (1x1 layouts, concurrent canvas renders).
+
+                    // === StPageFlip integration (approved prototype, task 6) ===
+                    // Build the page-curl flipbook. All pages rendered up front (small book).
+                    await this._buildPageFlip();
+
+                    // Debounced resize: StPageFlip is fixed-size so we don't re-layout, but
+                    // we keep the handler alive so thumbnails/search/narration that depend on
+                    // Alpine's layout flag still work.
                     window.addEventListener('resize', () => {
                         clearTimeout(this._resizeTimer);
                         this._resizeTimer = setTimeout(() => {
                             this.calculateLayout();
-                            this.renderCurrentView();
                         }, 150);
                     });
-
-                    // Re-measure whenever fullscreen state changes (including Esc-to-exit),
-                    // so the spread/scale recomputes for the new viewport size.
                     document.addEventListener('fullscreenchange', () => {
                         clearTimeout(this._resizeTimer);
                         this._resizeTimer = setTimeout(() => {
                             this.calculateLayout();
-                            this.renderCurrentView();
                         }, 120);
                     });
 
-                    // Render initial page
-                    await this.renderCurrentView();
+                    // Restore starting page (deep-link / saved position).
+                    this.currentPage = this.resolveInitialPage();
+                    if (this.currentPage > 1 && this._pageFlip) {
+                        this._pageFlip.turnToPage(this.currentPage - 1); // 0-indexed
+                    }
+
                     this.loading = false;
                     this.initialized = true;
-                    console.log('[Reader] Ready. Rendered page width:', this.renderedPageWidth);
-
-                    // IMPORTANT (windowed-spread fix): Alpine's init() runs before the CSS
-                    // grid has finished sizing the .reading-stage, so the first
-                    // calculateLayout() can measure a stale/too-small stage. Re-measure once
-                    // the layout + loading transition have settled (the guard in
-                    // calculateLayout rejects any collapsed/near-zero measurement and retries),
-                    // so the spread appears on load in normal windowed view too.
-                    setTimeout(() => { this.calculateLayout(); this.renderCurrentView(); }, 250);
+                    console.log('[Reader] Ready with StPageFlip curl.');
 
                     // Start auto-hide timer (longer on first load)
                     this.startControlsTimer(8000);
@@ -1115,6 +1121,84 @@
                     console.error('[Reader] Init failed:', e);
                     this.loading = false;
                 }
+            },
+
+            // === STPAGEFLIP INTEGRATION (approved prototype, ported task 6) ===
+            _pageFlip: null,
+
+            async _buildPageFlip() {
+                const mount = document.getElementById('stpageflip-mount');
+                if (!mount || !_pdfDoc) return;
+
+                const DPR = Math.min(window.devicePixelRatio || 1, 2);
+                const cb = this.cropBox;
+                const ratio = this.pageWidth / this.pageHeight;
+
+                // Size the page so a two-up spread fits the viewport.
+                const maxH = Math.min(window.innerHeight - 140, 900);
+                const maxW = Math.min(window.innerWidth - 80, 1400);
+                const pageFromH = Math.round(maxH);
+                const pageFromW = Math.round(maxH * ratio);
+                const spreadW = pageFromW * 2;
+                let pageW, pageH;
+                if (spreadW > maxW) {
+                    pageW = Math.round(maxW / 2);
+                    pageH = Math.round(pageW / ratio);
+                } else {
+                    pageH = pageFromH;
+                    pageW = pageFromW;
+                }
+
+                // Build one .stflip-page per PDF page with a DPR-crisp canvas.
+                for (let i = 1; i <= this.totalPages; i++) {
+                    const el = document.createElement('div');
+                    el.className = 'stflip-page';
+                    el.setAttribute('data-density', (i === 1 || i === this.totalPages) ? 'hard' : 'soft');
+                    const cvs = document.createElement('canvas');
+                    cvs.id = 'stflip-canvas-' + i;
+                    el.appendChild(cvs);
+                    mount.appendChild(el);
+                }
+
+                // Render all pages (cropped, DPR-crisp).
+                for (let i = 1; i <= this.totalPages; i++) {
+                    const page = await _pdfDoc.getPage(i);
+                    const baseVp = page.getViewport({ scale: 1 });
+                    const scale = (pageW * DPR) / (baseVp.width * (1 - cb.left - cb.right));
+                    const vp = page.getViewport({ scale });
+                    const cvs = document.getElementById('stflip-canvas-' + i);
+                    const ctx = cvs.getContext('2d');
+                    cvs.width = Math.round(vp.width * (1 - cb.left - cb.right));
+                    cvs.height = Math.round(vp.height * (1 - cb.top - cb.bottom));
+                    ctx.save();
+                    ctx.translate(-vp.width * cb.left, -vp.height * cb.top);
+                    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+                    ctx.restore();
+                }
+
+                // Init StPageFlip (approved settings from prototype).
+                this._pageFlip = new St.PageFlip(mount, {
+                    width: pageW,
+                    height: pageH,
+                    size: 'fixed',
+                    usePortrait: false,
+                    showCover: true,
+                    maxShadowOpacity: 0.5,
+                    drawShadow: true,
+                    flippingTime: 700,
+                    useMouseEvents: true,
+                    disableFlipByClick: true,
+                });
+
+                const self = this;
+                this._pageFlip.on('flip', (e) => {
+                    // StPageFlip page index is 0-based; our currentPage is 1-based.
+                    self.currentPage = e.data + 1;
+                    self.persistPosition();
+                });
+
+                this._pageFlip.loadFromHTML(mount.querySelectorAll('.stflip-page'));
+                console.log('[Reader] StPageFlip initialized, pages:', this.totalPages);
             },
 
             // === LAYOUT (CSS-sized flex model — no stage measurement, no pixel math) ===
@@ -1287,34 +1371,16 @@
                 ctx.setTransform(1, 0, 0, 1, 0, 0);
             },
 
-            // === NAVIGATION (spread-aware, FlipHTML5 pairing) ===
+            // === NAVIGATION (StPageFlip-driven page-curl) ===
             async nextPage() {
-                if (this.isAnimating) return;
-                const target = this._nextAnchor();
-                if (target !== this.currentPage) {
-                    // If zoomed in, snap back to fit so the new page starts at default size.
-                    if (this.zoom > 1) this.resetZoom();
-                    // Snapshot the current page BEFORE it changes, so the outgoing
-                    // animation shows the old content while the new page renders underneath.
-                    const snap = this._snapshotStage('next');
-                    this.currentPage = target;
-                    this.calculateLayout();
-                    await this.renderCurrentView();
-                    await this._runTurn(snap);
+                if (this._pageFlip) {
+                    this._pageFlip.flipNext('top');
                 }
             },
 
             async prevPage() {
-                if (this.isAnimating) return;
-                const target = this._prevAnchor();
-                if (target !== this.currentPage) {
-                    // If zoomed in, snap back to fit so the new page starts at default size.
-                    if (this.zoom > 1) this.resetZoom();
-                    const snap = this._snapshotStage('prev');
-                    this.currentPage = target;
-                    this.calculateLayout();
-                    await this.renderCurrentView();
-                    await this._runTurn(snap);
+                if (this._pageFlip) {
+                    this._pageFlip.flipPrev('top');
                 }
             },
 
@@ -1410,11 +1476,47 @@
                 this.isAnimating = false;
             },
 
+            // === DEEP-LINK + SAVED READING POSITION (premium brief) ===
+            _positionKey() {
+                return `reader:pos:${this.bookId}:${this.language}`;
+            },
+
+            resolveInitialPage() {
+                // 1) Explicit deep-link: #page=N (preferred) or ?page=N.
+                const fromHash = (location.hash.match(/page=(\d+)/) || [])[1];
+                const fromQuery = new URLSearchParams(location.search).get('page');
+                const deep = parseInt(fromHash || fromQuery || '', 10);
+                if (!Number.isNaN(deep)) {
+                    return Math.max(1, Math.min(deep, this.totalPages));
+                }
+                // 2) Saved last-read position for this book+language.
+                try {
+                    const saved = parseInt(localStorage.getItem(this._positionKey()) || '', 10);
+                    if (!Number.isNaN(saved)) {
+                        return Math.max(1, Math.min(saved, this.totalPages));
+                    }
+                } catch (e) { /* localStorage unavailable — ignore */ }
+                return 1;
+            },
+
+            persistPosition() {
+                // Save last-read page and reflect it in a shareable URL hash (no reload).
+                try { localStorage.setItem(this._positionKey(), String(this.currentPage)); }
+                catch (e) { /* ignore */ }
+                try {
+                    const url = new URL(location.href);
+                    url.hash = `page=${this.currentPage}`;
+                    history.replaceState(null, '', url);
+                } catch (e) { /* ignore */ }
+            },
+
             async goToPage(pageNum) {
                 if (this.zoom > 1) this.resetZoom();
                 this.currentPage = Math.max(1, Math.min(pageNum, this.totalPages));
-                this.calculateLayout();
-                await this.renderCurrentView();
+                if (this._pageFlip) {
+                    this._pageFlip.flip(this.currentPage - 1); // 0-indexed, animated curl
+                }
+                this.persistPosition();
             },
 
             seekToPage(event) {

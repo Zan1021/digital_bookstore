@@ -3,9 +3,7 @@
 namespace App\Livewire\Admin;
 
 use App\Models\Book;
-use App\Services\NarrationService;
 use App\Services\PdfService;
-use App\Services\TranslationService;
 use Livewire\Component;
 use Livewire\WithFileUploads;
 
@@ -18,25 +16,13 @@ class BookUpload extends Component
     public bool $processing = false;
     public int $processed = 0;
     public int $total = 0;
-    public string $currentStep = 'upload'; // upload, crop, languages, voice, processing, done
+    public string $currentStep = 'upload'; // upload, crop, processing, done
 
     // Settings
     public bool $hasCropMarks = false;
     public int $cropPercent = 5;
     public string $previewPdfUrl = '';
     public ?array $detectedCrop = null;
-
-    // Languages
-    public bool $langEnglish = true;
-    public bool $langAfrikaans = true;
-    public bool $langZulu = true;
-
-    // Narration
-    public bool $enableNarration = true;
-    public string $selectedVoice = '';
-    public array $availableVoices = [];
-    public int $dramaLevel = 90; // 0-100 (slider)
-    public int $speedLevel = 30; // 0-100 (0=very slow, 100=fast)
 
     public function updatedFiles()
     {
@@ -56,27 +42,12 @@ class BookUpload extends Component
             }
 
             $this->currentStep = 'crop';
-            $this->loadVoices();
         }
-    }
-
-    public function loadVoices()
-    {
-        try {
-            $service = app(NarrationService::class);
-            $this->availableVoices = $service->getVoices();
-            $george = collect($this->availableVoices)->first(fn($v) => stripos($v['name'], 'george') !== false);
-            if ($george) {
-                $this->selectedVoice = $george['voice_id'];
-            } elseif (!empty($this->availableVoices)) {
-                $this->selectedVoice = $this->availableVoices[0]['voice_id'];
-            }
-        } catch (\Throwable $e) {}
     }
 
     public function nextStep()
     {
-        $steps = ['upload', 'crop', 'languages', 'voice', 'processing', 'done'];
+        $steps = ['upload', 'crop', 'processing', 'done'];
         $currentIdx = array_search($this->currentStep, $steps);
         if ($currentIdx !== false && $currentIdx < count($steps) - 1) {
             $nextStep = $steps[$currentIdx + 1];
@@ -90,7 +61,7 @@ class BookUpload extends Component
 
     public function prevStep()
     {
-        $steps = ['upload', 'crop', 'languages', 'voice', 'processing', 'done'];
+        $steps = ['upload', 'crop', 'processing', 'done'];
         $currentIdx = array_search($this->currentStep, $steps);
         if ($currentIdx !== false && $currentIdx > 0) {
             $this->currentStep = $steps[$currentIdx - 1];
@@ -102,15 +73,17 @@ class BookUpload extends Component
         $this->currentStep = 'upload';
     }
 
+    /**
+     * Upload only creates the ebook + extracts text. Translation and narration are
+     * chosen deliberately afterwards on the book's management page
+     * (gated-translation-narration-flow Req 1). No API calls happen here.
+     */
     public function startProcessing()
     {
         $this->validate([
             'files' => 'required',
             'files.*' => 'file|mimes:pdf|max:102400',
         ]);
-
-        // Extend execution time — narration + translation is slow (API calls)
-        set_time_limit(600); // 10 minutes
 
         $this->currentStep = 'processing';
         $this->processing = true;
@@ -119,8 +92,6 @@ class BookUpload extends Component
         $this->results = [];
 
         $pdfService = app(PdfService::class);
-        $translationService = app(TranslationService::class);
-        $narrationService = app(NarrationService::class);
 
         foreach ($this->files as $file) {
             try {
@@ -141,56 +112,26 @@ class BookUpload extends Component
                     continue;
                 }
 
-                // 1. Upload & extract text
+                // Upload & extract text — creates the draft ebook only.
                 $book = $pdfService->processUpload($file);
 
-                // Apply crop settings
+                // Apply crop settings + default narration page range.
                 $book->update([
                     'crop_enabled' => $this->hasCropMarks,
                     'crop_percent' => $this->cropPercent,
                     'crop_box' => $this->detectedCrop['crop_box'] ?? null,
                     'narration_start_page' => 3,
-                    'narration_end_page' => $book->page_count - 2, // Skip last 2 pages
+                    'narration_end_page' => max(3, $book->page_count - 2), // Skip last 2 pages
+                    'status' => 'draft',
                 ]);
 
-                $result = [
+                $this->results[] = [
                     'success' => true,
                     'filename' => $file->getClientOriginalName(),
                     'book_id' => $book->id,
                     'title' => $book->title,
                     'pages' => $book->page_count,
-                    'translations' => [],
-                    'narration' => null,
                 ];
-
-                // 2. Translate
-                $languages = [];
-                if ($this->langAfrikaans) $languages[] = 'af';
-                if ($this->langZulu) $languages[] = 'zu';
-
-                foreach ($languages as $lang) {
-                    try {
-                        $translationService->translate($book, $lang);
-                        $result['translations'][] = $lang;
-                    } catch (\Throwable $e) {
-                        // Translation failed but continue
-                    }
-                }
-
-                // 3. Narrate (DISABLED — testing font placement only)
-                // if ($this->enableNarration && !empty($this->selectedVoice)) {
-                //     try {
-                //         $voice = collect($this->availableVoices)->firstWhere('voice_id', $this->selectedVoice);
-                //         $voiceName = $voice['name'] ?? 'Unknown';
-                //         $narrationService->narrate($book, 'en', $this->selectedVoice, $voiceName, $this->dramaLevel, $this->speedLevel);
-                //         $result['narration'] = 'completed';
-                //     } catch (\Throwable $e) {
-                //         $result['narration'] = 'failed: ' . $e->getMessage();
-                //     }
-                // }
-                $result['narration'] = 'skipped (disabled for testing)';
-
-                $this->results[] = $result;
             } catch (\Throwable $e) {
                 $this->results[] = [
                     'success' => false,
