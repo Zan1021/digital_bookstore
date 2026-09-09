@@ -974,7 +974,7 @@
             renderedPageHeight: 0,
 
             // Config
-            pdfUrl: '{{ asset("storage/" . str_replace(" ", "%20", $pdfPath)) }}',
+            pdfUrl: '{{ asset("storage/" . str_replace(" ", "%20", $pdfPath)) }}?v={{ $pdfVersion ?? 0 }}',
             minimumRenderedPageWidth: 120,
             controlsTimeout: null,
             // FlipHTML5-style book layout config (book-agnostic — no per-book constants).

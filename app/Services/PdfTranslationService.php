@@ -187,6 +187,74 @@ class PdfTranslationService
             );
         }
 
+        // COVER FLATTEN (front-page fix, config-gated). Some covers draw the subtitle
+        // drop-shadow as a Form XObject through a LUMINOSITY soft mask; our per-span
+        // redaction re-serialises the stream and that backdrop then renders as a dark/
+        // washed box behind the translated subtitle in PDF.js (invisible to a PyMuPDF
+        // pixmap). Flattening page 0 to an opaque raster composites the mask to its
+        // intended (invisible) state and leaves no form/mask for any renderer to
+        // mis-composite — renderer-proof and book-agnostic (works even for text on an
+        // illustration, since the output is pure pixels). Verified via the pdfjs-dist
+        // harness (scripts/render_pdfjs.mjs). Off by default; enable per environment.
+        if (config('bookstore.cover_retypeset.enabled')) {
+            try {
+                $ppi = (int) config('bookstore.cover_retypeset.ppi', 600);
+                $flatten = new Process([
+                    'python',
+                    base_path('scripts/cover_retypeset.py'),
+                    'flatten-cover',
+                    '--input', $outputPath,
+                    '--output', $outputPath,
+                    '--page', '0',
+                    '--ppi', (string) $ppi,
+                ]);
+                $flatten->setTimeout(180);
+                $flatten->run();
+                if ($flatten->isSuccessful()) {
+                    Log::info("Cover flattened (front-page soft-mask fix) for book #{$book->id}"
+                        . " ({$translation->language_code})", [
+                            'report' => json_decode($flatten->getErrorOutput(), true),
+                            'ppi' => $ppi,
+                        ]);
+                } else {
+                    // Non-fatal: keep the un-flattened cover rather than fail the whole render.
+                    Log::warning("Cover flatten failed (non-fatal); keeping un-flattened cover", [
+                        'book' => $book->id,
+                        'language' => $translation->language_code,
+                        'stderr' => $flatten->getErrorOutput(),
+                    ]);
+                }
+            } catch (\Throwable $e) {
+                Log::warning("Cover flatten threw (non-fatal)", [
+                    'book' => $book->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        // ILLUSTRATION-TEXT VISION (config-gated, non-fatal). Some books bake text INTO a
+        // raster illustration, which the contract renderer cannot redact — the English then
+        // survives on the translated page. When enabled, IllustrationTextService locates the
+        // baked-in text with GPT-4o vision, deterministically inpaints it out, overlays the
+        // translated vector text, and verifies with the VisualQa compare gate. Book-agnostic
+        // and fail-closed (uncertain backgrounds route to review). Off by default; when off,
+        // the candidate pre-filter is not even run. Spec: .kiro/specs/illustration-text-vision.
+        $illustrationReview = [];
+        if (config('bookstore.illustration_text.enabled')) {
+            try {
+                $illus = app(IllustrationTextService::class)->process($book, $translation->fresh());
+                if (!empty($illus['modified_pages']) || !empty($illus['review_pages'])) {
+                    Log::info("Illustration-text pass for book #{$book->id} ({$translation->language_code})", $illus);
+                }
+                $illustrationReview = $illus['review_pages'] ?? [];
+            } catch (\Throwable $e) {
+                // Non-fatal: a failure here must not sink the whole render.
+                Log::warning("Illustration-text pass threw (non-fatal)", [
+                    'book' => $book->id, 'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
         // Log the replacement report
         if ($report) {
             $report['render_source'] = $usedContract ? 'contract' : 'flat';
@@ -231,6 +299,23 @@ class PdfTranslationService
                 $report['render_status'] = 'NEEDS_LAYOUT_REVIEW';
                 $report['unresolved_span_ids'] = $unresolvedIds;
                 $report['flags']['UNRESOLVED_TRANSLATION_SPANS'] = $unresolvedIds;
+            }
+        }
+
+        // Illustration-text pages the module could not confidently fix (uncertain
+        // background, overflow, or failed AI verify) must be reviewed — fail closed.
+        if (!empty($illustrationReview)) {
+            $publishable = false;
+            $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+            Log::warning("Illustration-text pages flagged for review — routing to review", [
+                'book' => $book->id,
+                'language' => $translation->language_code,
+                'pages' => $illustrationReview,
+            ]);
+            if (is_array($report)) {
+                $report['publishable'] = false;
+                $report['render_status'] = 'NEEDS_LAYOUT_REVIEW';
+                $report['flags']['ILLUSTRATION_TEXT_REVIEW'] = array_values($illustrationReview);
             }
         }
 

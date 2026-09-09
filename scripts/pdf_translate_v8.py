@@ -289,31 +289,102 @@ def remove_outline_duplicate_vectors(page, band, color_thresh=0.72, max_stroke_w
     if not victims:
         return 0
 
-    # Determine the LOCAL background colour + how uniform the band is. We sample
-    # the band and take the dominant colour; if it doesn't dominate, the field is
-    # not flat and a cover-up would be visible -> bail out (fail safe).
-    bg_rgb, dom_frac = _dominant_color_in_rect(page, band)
+    # Determine the LOCAL background colour + how uniform the band is. Sample from
+    # a FRAME just OUTSIDE the ghost victims (the margin around the subtitle),
+    # never through the ghost strokes / translated glyph area — those would drag
+    # the sampled colour off the true flat field. If we can't get a clean sample,
+    # fall back to sampling the whole band. If the field isn't uniform enough, a
+    # cover-up would be visible -> bail out (fail safe).
+    frame = pymupdf.Rect(band.x0 - 12, band.y0 - 12, band.x1 + 12, band.y1 + 12) & page.rect
+    bg_rgb, dom_frac = _dominant_color_in_rect(page, frame)
+    if bg_rgb is None or dom_frac < 0.55:
+        bg_rgb, dom_frac = _dominant_color_in_rect(page, band)
     if bg_rgb is None or dom_frac < 0.55:
         return 0
+
+    # FAIL-SAFE: only paint a cover-up we're confident is invisible. Re-measure the
+    # band's own flat colour; if the frame-derived fill diverges from it beyond a
+    # small perceptual tolerance, the field is not a single flat colour (gradient/
+    # art) and stamping a box would show -> do nothing.
+    band_rgb, band_frac = _dominant_color_in_rect(page, band)
+    if band_rgb is not None and band_frac >= 0.55:
+        if max(abs(bg_rgb[i] - band_rgb[i]) for i in range(3)) > 24:
+            return 0
+
     fill = (bg_rgb[0] / 255.0, bg_rgb[1] / 255.0, bg_rgb[2] / 255.0)
 
-    # Paint each ghost box with the flat background colour. Small inset avoids
-    # nibbling neighbouring art; a hair of overpaint on a uniform field is invisible.
+    # Prefer the page's OWN base-fill vector colour when it matches the sampled
+    # field. A pixmap sample is rounded/anti-aliased and, painted back as a fill,
+    # leaves a faint darker SEAM at the rectangle edge when the viewer (PDF.js)
+    # anti-aliases the boundary against the identical-but-separately-drawn page
+    # fill. Reusing the exact vector colour of the page's background fill makes the
+    # cover-up colour byte-identical to the field, so the seam disappears. Only
+    # adopt it when it agrees with the sampled field (so we never grab an unrelated
+    # shape's colour). Book-agnostic: read from the page's largest area fill.
+    base = _page_base_fill_color(page)
+    if base is not None:
+        b255 = tuple(round(c * 255) for c in base)
+        if max(abs(b255[i] - bg_rgb[i]) for i in range(3)) <= 16:
+            fill = base
+
+    # Cover the ghosts with ONE merged rectangle (their union) rather than a box
+    # per glyph: multiple adjacent boxes create internal seams between them. A
+    # single rect over a uniform field has only its outer edge in already-matching
+    # colour, so it is seam-free. A small bleed pushes that edge past the glyphs.
     covered = 0
+    ux0 = min(r.x0 for r in victims)
+    uy0 = min(r.y0 for r in victims)
+    ux1 = max(r.x1 for r in victims)
+    uy1 = max(r.y1 for r in victims)
+    union = pymupdf.Rect(ux0 - 1.0, uy0 - 1.0, ux1 + 1.0, uy1 + 1.0) & band
     shape = page.new_shape()
-    for r in victims:
-        rr = pymupdf.Rect(r.x0 - 0.5, r.y0 - 0.5, r.x1 + 0.5, r.y1 + 0.5)
-        shape.draw_rect(rr)
-        covered += 1
+    shape.draw_rect(union)
+    covered = len(victims)
     shape.finish(fill=fill, color=fill, width=0)
     shape.commit()
     return covered
 
 
-def _dominant_color_in_rect(page, rect, dpi=150):
-    """Return ((r,g,b) 0-255, dominant_fraction) for the pixels inside `rect`.
-    Used to (a) get the flat background colour and (b) measure how uniform it is.
-    Book-agnostic: no colour is assumed."""
+def _page_base_fill_color(page):
+    """Return the (r,g,b) 0-1 fill colour of the page's largest solid-fill drawing
+    (typically the full-bleed background rectangle), or None. Used so a cover-up
+    reuses the EXACT background vector colour instead of a rounded pixmap sample,
+    eliminating anti-aliased seams. Book-agnostic: picks purely by area, assumes
+    no specific colour."""
+    best = None
+    best_area = 0.0
+    for dr in page.get_drawings():
+        if dr.get("type") != "f" or not dr.get("fill"):
+            continue
+        r = pymupdf.Rect(dr["rect"])
+        if r.is_empty or r.is_infinite:
+            continue
+        area = r.width * r.height
+        if area > best_area:
+            best_area = area
+            best = dr.get("fill")
+    if best is None:
+        return None
+    return (best[0], best[1], best[2])
+
+
+def _dominant_color_in_rect(page, rect, dpi=150, tol=18):
+    """Return ((r,g,b) 0-255, dominant_fraction) for the flat background colour
+    inside `rect`.
+
+    Book-agnostic: no colour is assumed. Instead of returning the single most
+    common EXACT RGB triple (which, on a JPEG-compressed / anti-aliased / lightly
+    textured field, is a noise-shifted value a shade off the true colour and
+    produced visible off-colour cover-up boxes), we:
+      1. find the most common exact triple as a seed, then
+      2. gather every sampled pixel within `tol` per channel of that seed (one
+         perceptual cluster of "the same colour"), and
+      3. return the CLUSTER MEAN as the colour and the cluster's share of all
+         sampled pixels as the dominant fraction.
+
+    This yields the true flat field colour even when no single exact triple
+    dominates, so a cover-up painted with it is invisible.
+    """
     from collections import Counter
     rect = pymupdf.Rect(rect) & page.rect
     if rect.is_empty:
@@ -324,19 +395,32 @@ def _dominant_color_in_rect(page, rect, dpi=150):
         return None, 0.0
     if pix.width < 2 or pix.height < 2:
         return None, 0.0
+    samples = []
     c = Counter()
     step_x = max(1, pix.width // 120)
     step_y = max(1, pix.height // 120)
-    total = 0
     for x in range(0, pix.width, step_x):
         for y in range(0, pix.height, step_y):
             p = pix.pixel(x, y)
-            c[(p[0], p[1], p[2])] += 1
-            total += 1
+            rgb = (p[0], p[1], p[2])
+            samples.append(rgb)
+            c[rgb] += 1
+    total = len(samples)
     if not total:
         return None, 0.0
-    col, n = c.most_common(1)[0]
-    return col, n / total
+    seed = c.most_common(1)[0][0]
+    sr, sg, sb = seed
+    cluster = [s for s in samples
+               if abs(s[0] - sr) <= tol and abs(s[1] - sg) <= tol and abs(s[2] - sb) <= tol]
+    if not cluster:
+        return seed, c[seed] / total
+    n = len(cluster)
+    mean = (
+        round(sum(s[0] for s in cluster) / n),
+        round(sum(s[1] for s in cluster) / n),
+        round(sum(s[2] for s in cluster) / n),
+    )
+    return mean, n / total
 
 
 def _source_text_transform(spans):
@@ -2331,6 +2415,201 @@ def _dominant_span_color(spans, default=(0, 0, 0)):
         return default
 
 
+def _clip_softmasked_forms_out_of_band(page, band, report=None):
+    """
+    Remove the portion of any SOFT-MASKED form XObject that paints inside the
+    subtitle `band`.
+
+    Root cause this addresses: some covers draw the ORIGINAL subtitle's drop
+    shadow / emboss as a form XObject painted through a LUMINOSITY soft mask
+    (`/GSn gs ... /FmX Do`, where GSn has /SMask <ref>). Text redaction and vector
+    outline removal do NOT touch a soft-masked `Do`, so that shadow survives as a
+    darker rectangle behind the translated subtitle. Critically, PyMuPDF's raster
+    (get_pixmap) FLATTENS the luminosity mask and shows the page as clean, while
+    PDF.js in the browser honours the mask and renders the dark box — so this class
+    of defect is invisible to a pixmap check and MUST be fixed structurally.
+
+    Fix: for each `q ... /GSn gs ... /FmX Do ... Q` block whose GSn carries a real
+    (non-/None) SMask AND whose form paint overlaps `band`, inject an EVEN-ODD clip
+    (full page rect + the band as a hole) right after the block's opening `q`, so
+    the shadow still paints everywhere EXCEPT the subtitle band. Book-agnostic and
+    fail-safe: touches nothing when no soft-masked form overlaps the band.
+
+    Returns the number of form paints clipped.
+    """
+    doc = page.parent
+    band = pymupdf.Rect(band)
+
+    # Which ExtGStates on this page carry a real soft mask?
+    egs_entry = doc.xref_get_key(page.xref, "Resources/ExtGState")
+    if not egs_entry or egs_entry[0] != "dict":
+        return 0
+    softmasked = set()
+    for gm in re.finditer(r"/(GS\d+)\s+(\d+)\s+0\s+R", egs_entry[1]):
+        name, ref = gm.group(1), int(gm.group(2))
+        try:
+            smask = doc.xref_get_key(ref, "SMask")
+        except Exception:
+            smask = None
+        # A real mask is an indirect reference (dict/ref), not the name /None.
+        if smask and not (smask[0] == "name" and smask[1] == "/None"):
+            softmasked.add(name)
+    if not softmasked:
+        return 0
+
+    try:
+        page.clean_contents()
+        cont = page.read_contents().decode("latin-1")
+    except Exception:
+        return 0
+
+    # Band expressed in the page's coordinate space. The content stream uses PDF
+    # (bottom-up) coordinates; convert the (top-down) band rect via the page height.
+    ph = page.rect.height
+    by0 = ph - band.y1
+    by1 = ph - band.y0
+    bx0, bx1 = band.x0, band.x1
+    pr = page.rect  # full page rect for the outer clip path
+
+    # Even-odd clip: outer full-page rectangle, then the band as an inner hole.
+    clip_ops = (
+        f" {pr.x0:.3f} {ph - pr.y1:.3f} {pr.width:.3f} {pr.height:.3f} re"
+        f" {bx0:.3f} {by0:.3f} {(bx1 - bx0):.3f} {(by1 - by0):.3f} re W* n "
+    )
+
+    clipped = 0
+    out = []
+    idx = 0
+    # Match each `q ... /FmN Do ... Q` block, clip only soft-masked ones overlapping band.
+    pattern = re.compile(r"q\b([^q]*?/(GS\d+)\s+gs[^q]*?/(Fm\d+)\s+Do[^q]*?)Q", re.DOTALL)
+    for m in pattern.finditer(cont):
+        gs_name = m.group(2)
+        fm_name = m.group(3)
+        if gs_name not in softmasked:
+            continue
+        # Does this form's placed area overlap the band? Use the form BBox mapped
+        # through the current transform if present; else fall back to the form's
+        # own BBox. Overlap check is cheap and conservative.
+        if not _form_overlaps_band(doc, page, fm_name, band):
+            continue
+        # Inject the even-odd clip immediately after the opening `q` of this block.
+        block = m.group(0)
+        new_block = "q" + clip_ops + block[1:]
+        out.append(cont[idx:m.start()])
+        out.append(new_block)
+        idx = m.end()
+        clipped += 1
+
+    if not clipped:
+        return 0
+    out.append(cont[idx:])
+    new_cont = "".join(out)
+    try:
+        page.parent.update_stream(page.get_contents()[0], new_cont.encode("latin-1"))
+    except Exception:
+        # Fallback: write via the first content xref.
+        try:
+            xref = page.get_contents()[0]
+            doc.update_stream(xref, new_cont.encode("latin-1"))
+        except Exception:
+            return 0
+    if report is not None:
+        report.setdefault("cover_softmask_shadow_clipped", 0)
+        report["cover_softmask_shadow_clipped"] += clipped
+    return clipped
+
+
+def _form_overlaps_band(doc, page, fm_name, band):
+    """Best-effort test that form XObject `fm_name` (as referenced in the page
+    resources) paints into `band`. Uses the form's /BBox (PDF coords) mapped to the
+    page's top-down space. Conservative: returns True on any overlap or if the
+    bbox cannot be resolved (so we don't silently skip a real shadow)."""
+    try:
+        xo = doc.xref_get_key(page.xref, f"Resources/XObject/{fm_name}")
+        if not xo or xo[0] != "xref":
+            return True
+        ref = int(xo[1].split()[0])
+        bb = doc.xref_get_key(ref, "BBox")
+        if not bb or bb[0] != "array":
+            return True
+        nums = [float(x) for x in re.findall(r"-?\d+\.?\d*", bb[1])]
+        if len(nums) != 4:
+            return True
+        x0, y0, x1, y1 = nums
+        ph = page.rect.height
+        # Map PDF (bottom-up) bbox to top-down page coords.
+        top = pymupdf.Rect(min(x0, x1), ph - max(y0, y1), max(x0, x1), ph - min(y0, y1))
+        return bool(top & band)
+    except Exception:
+        return True
+
+
+def _stamp_opaque_band(page, band, rgb, pad=2.0):
+    """
+    Stamp an OPAQUE raster image of the flat background colour `rgb` (0-255 tuple)
+    across `band`, as a hard cover that obliterates EVERYTHING beneath it — including
+    soft-masked shadow forms, vector ghosts and residual glyph pixels — in EVERY
+    renderer (PDF.js, PDFium, print), not just a flattening pixmap.
+
+    Why an image and not a vector fill: a vector `re f` composites against whatever
+    is under it and can pick up a blend/soft-mask still active in the graphics state,
+    and its anti-aliased edge can seam. A placed opaque image is a flat pixel block
+    with no path/blend interaction — the definitive "paint over it" primitive. The
+    translated subtitle text is drawn AFTER this, on top of the clean band.
+
+    Book-agnostic: the colour is the page's own flat background; the band is derived
+    from the source subtitle geometry. Returns True on success.
+    """
+    r = pymupdf.Rect(band.x0 - pad, band.y0 - pad, band.x1 + pad, band.y1 + pad) & page.rect
+    if r.is_empty:
+        return False
+    try:
+        # 1x1 pixel of the exact background colour, scaled to fill the band. Opaque
+        # (no alpha), so nothing under it can show through.
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 1, 1), False)
+        pix.set_pixel(0, 0, (int(rgb[0]), int(rgb[1]), int(rgb[2])))
+        page.insert_image(r, pixmap=pix, keep_proportion=False, overlay=True)
+        return True
+    except Exception:
+        return False
+
+
+def _neutralize_page_soft_masks(page, report=None):
+    """
+    Set every page-level ExtGState's /SMask to /None, disabling luminosity/alpha
+    soft masks on the page. This removes soft-masked drop-shadow/emboss layers that
+    PDF.js renders as a washed panel behind replaced text but that a PyMuPDF pixmap
+    silently flattens (so they are invisible to a local raster check).
+
+    Operates purely at the PDF-object level (xref_set_key) — no content-stream
+    parsing — so it cannot corrupt the stream. Book-agnostic and fail-safe: does
+    nothing when no ExtGState carries a real soft mask.
+
+    Returns the number of soft masks neutralised.
+    """
+    doc = page.parent
+    egs_entry = doc.xref_get_key(page.xref, "Resources/ExtGState")
+    if not egs_entry or egs_entry[0] != "dict":
+        return 0
+    n = 0
+    for gm in re.finditer(r"/(GS\w+)\s+(\d+)\s+0\s+R", egs_entry[1]):
+        ref = int(gm.group(2))
+        try:
+            smask = doc.xref_get_key(ref, "SMask")
+        except Exception:
+            continue
+        if smask and not (smask[0] == "name" and smask[1] == "/None"):
+            try:
+                doc.xref_set_key(ref, "SMask", "/None")
+                n += 1
+            except Exception:
+                continue
+    if n and report is not None:
+        report.setdefault("cover_soft_masks_neutralized", 0)
+        report["cover_soft_masks_neutralized"] += n
+    return n
+
+
 def render_cover_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report):
     """
     V8 cover: Find the subtitle span(s) (large text, not symbols),
@@ -2383,6 +2662,32 @@ def render_cover_page_v8(page, page_spans, translations_map, fonts_dir, page_num
     if ghosts:
         report.setdefault("cover_outline_ghosts_removed", 0)
         report["cover_outline_ghosts_removed"] += ghosts
+
+    # Some covers paint the ORIGINAL subtitle's drop shadow / emboss as a form
+    # XObject through a LUMINOSITY soft mask. That survives text + outline removal
+    # and, crucially, is INVISIBLE to a pixmap check (PyMuPDF flattens the mask)
+    # but PDF.js renders it as a dark box behind the translated subtitle. Clip that
+    # soft-masked shadow out of the subtitle band so it can't paint behind the new
+    # text. Book-agnostic and fail-safe: no-op when no soft-masked form overlaps.
+    # Cover the FULL translated-subtitle text box with a flat vector fill in the
+    # page's own background colour, drawn AFTER glyph/outline removal and BEFORE the
+    # text. The source glyph band is narrower/higher than where the wrapped
+    # translation lands, so an exact-colour fill over the true text box guarantees
+    # no residual ghost strip shows around the new subtitle. Vector fill in the
+    # exact page-base colour (not an image, not a blend) = correct colour, no
+    # transparency. Book-agnostic; fail-safe if no colour resolved.
+    base = _page_base_fill_color(page)
+    if base is None:
+        sampled, _frac = _dominant_color_in_rect(page, band)
+        base = tuple(c / 255.0 for c in sampled) if sampled else None
+    if base is not None:
+        cover_box = pymupdf.Rect(40, sub_min_y - 12, page.rect.width - 40, sub_max_y + 16) & page.rect
+        shp = page.new_shape()
+        shp.draw_rect(cover_box)
+        shp.finish(fill=base, color=base, width=0)
+        shp.commit(overlay=True)
+        report.setdefault("cover_subtitle_band_filled", 0)
+        report["cover_subtitle_band_filled"] += 1
 
     # Reliable font path (insert_text + explicit fontfile): htmlbox falls back to
     # CharisSIL and corrupts the text layer on this PyMuPDF. Match the SOURCE

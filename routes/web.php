@@ -161,7 +161,21 @@ Route::get('/read/{book}', function (Book $book) {
         }
     }
 
-    return view('reader', compact('book', 'pdfPath', 'lang', 'pageAudioMap', 'pageTimingMap', 'pageLabels'));
+    // CACHE-BUST: append the rendered PDF's mtime as ?v= so the browser/PDF.js
+    // never serves a stale cached copy after a re-render. Without this, the reader
+    // URL is identical across renders and Chrome/PDF.js keep the FIRST-loaded PDF —
+    // making every re-render invisible in the browser. Book-agnostic.
+    $pdfVersion = 0;
+    try {
+        $absRendered = \Illuminate\Support\Facades\Storage::disk('public')->path($pdfPath);
+        if (is_file($absRendered)) {
+            $pdfVersion = filemtime($absRendered) ?: 0;
+        }
+    } catch (\Throwable $e) {
+        $pdfVersion = 0;
+    }
+
+    return view('reader', compact('book', 'pdfPath', 'lang', 'pageAudioMap', 'pageTimingMap', 'pageLabels', 'pdfVersion'));
 })->name('reader');
 
 // THROWAWAY page-curl prototype (spec: specs/page-curl-reader). Self-contained, does NOT
