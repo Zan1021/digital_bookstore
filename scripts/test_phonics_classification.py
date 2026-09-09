@@ -47,6 +47,11 @@ for t in ["oa  -  f l-oa-t", "ai   -  plain, rain", "ay  -  say, play",
           "Herken wh- aan die begin van woorde:"]:
     check(f"phonics: {t!r}", _is_phonics_span(t))
 
+print("\nPhonics detection — LEADING-DASH form (book #10000 'My House' p15 regression):")
+for t in ["- nd hand, land, sand", "- ee see, feet, bee", "- wh when, wheel",
+          "- st rest, nest, west", "- sk skaap, skool"]:
+    check(f"leading-dash phonics: {t!r}", _is_phonics_span(t))
+
 print("\nPhonics detection — true negatives (ordinary vocabulary):")
 for t in ["house", "meanwhile", "staircase", "always", "when", "where",
           "mother-in-law", "WOORDE"]:

@@ -977,9 +977,13 @@ def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num
     )
 
     # Render with the reliable insert_text path (correct font + correct text layer).
+    # Honour the SOURCE paragraph alignment (detected from glyph geometry) instead of
+    # hardcoding left — a centered source line (e.g. "I am happy.") must render centered,
+    # not left-aligned + wrapped. Book-agnostic: uses the same detector as other pages.
+    prose_align = _infer_source_alignment(story_spans, final_rect.x0, final_rect.x1)
     used = draw_paragraph_text(
         page, final_rect, clean_text, font_file, font_size,
-        color=(0, 0, 0), line_height=1.17, align="left",
+        color=(0, 0, 0), line_height=1.17, align=prose_align,
     )
     if used is not None:
         report["spans_replaced"] += 1
@@ -993,9 +997,18 @@ def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num
         eb = [min(s["bbox"][0] for s in end_spans), min(s["bbox"][1] for s in end_spans),
               max(s["bbox"][2] for s in end_spans), max(s["bbox"][3] for s in end_spans)]
         em_size = max((s["font_size"] for s in end_spans), default=font_size)
-        # Center horizontally on the source end-marker box; keep its source baseline row.
-        em_rect = pymupdf.Rect(min(eb[0], container_rect.x0), eb[1] - 2,
-                               max(eb[2], container_rect.x1), eb[3] + em_size)
+        # COLLISION GUARD: the translated prose may wrap to MORE lines than the source
+        # (e.g. "I am happy." -> "Ek is gelukkig." over two lines), growing DOWN past the
+        # source end-marker's y and overlapping it. Compute the actual rendered prose
+        # bottom and drop the end-marker below it (plus a gap) when needed, so "Die Einde"
+        # never collides with the body text. Book-agnostic: derived from the real wrap.
+        _prose_lines = _wrap_paragraph(clean_text.split(), font_file, font_probe,
+                                       font_size, final_rect.width)
+        prose_bottom = final_rect.y0 + font_size * 1.17 * max(1, len(_prose_lines))
+        em_top = max(eb[1] - 2, prose_bottom + em_size * 0.4)
+        em_rect = pymupdf.Rect(min(eb[0], container_rect.x0), em_top,
+                               max(eb[2], container_rect.x1), em_top + em_size * 1.6)
+        em_rect = em_rect & page.rect
         _emf = _weight_aware_house_font(end_spans, fonts_dir)
         draw_paragraph_text(
             page, em_rect, _apply_source_casing(end_marker_text, end_spans[0]) if end_spans else end_marker_text,
@@ -1592,6 +1605,169 @@ def _vocab_manifest_from_scene(page_scene, page_num):
         "builder": "scene_graph",
         "regions": regions,
     }
+
+
+def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_dir,
+                                   page_num, report, page_spans=None):
+    """
+    BOOK-AGNOSTIC generic scene placer for non-table pages (copyright, and any page
+    whose layout is a set of independently-positioned text lines/blocks).
+
+    Places each renderable scene unit's translation at the unit's OWN detected bbox,
+    honouring the source alignment and shrinking to fit the box. Identity + geometry
+    come from the scene graph (stable ids + bboxes); text comes from the contract by id.
+    NO keyword lists, NO hardcoded columns — a unit lands where the source put it, so it
+    works for any book/language.
+
+    Returns True when it placed the page's units, False if flagged for review, or None
+    when it declines (no units / no contract) so the caller can fall back.
+    """
+    units = [u for u in getattr(page_scene, "text_units", [])
+             if getattr(u, "translation_policy", "") in ("translate", "educational_adaptation")]
+    if not units:
+        return None
+
+    # Skip pure-symbol units (e.g. ®/© replacement glyphs) — they have no meaningful
+    # translation and shouldn't get a text box. Book-agnostic: based on having no
+    # alphanumeric character in the source.
+    def _has_alnum(u):
+        return any(ch.isalnum() for ch in (getattr(u, "source_text", "") or ""))
+    units = [u for u in units if _has_alnum(u)]
+    if not units:
+        return None
+
+    # Resolve translations by id (fail closed — never fall back to source text).
+    resolved = {}
+    unresolved = []
+    for u in units:
+        tr = _lookup_id_translation(id_to_translation, u.id)
+        if tr is not None and str(tr).strip() != "":
+            resolved[u.id] = str(tr)
+        else:
+            unresolved.append(u.id)
+    if not resolved:
+        return None  # nothing resolved → let caller fall back
+
+    # Redact each unit's source bbox: REMOVE text, PRESERVE images + line art.
+    for u in units:
+        rect = pymupdf.Rect(u.bbox)
+        if not (rect.is_empty or rect.is_infinite):
+            page.add_redact_annot(rect, fill=False)
+    try:
+        page.apply_redactions(images=getattr(pymupdf, "PDF_REDACT_IMAGE_NONE", 0),
+                              graphics=getattr(pymupdf, "PDF_REDACT_LINE_ART_NONE", 0),
+                              text=getattr(pymupdf, "PDF_REDACT_TEXT_REMOVE", 0))
+    except TypeError:
+        page.apply_redactions(images=0, graphics=0)
+
+    # Helper: find the SOURCE span matching a unit (by bbox overlap), to recover the
+    # unit's true font size + colour + alignment (the scene TextUnit does not carry these).
+    def _span_for(u):
+        if not page_spans:
+            return None
+        ux0, uy0, ux1, uy1 = u.bbox
+        ucx, ucy = (ux0 + ux1) / 2.0, (uy0 + uy1) / 2.0
+        best, best_d = None, 1e9
+        for s in page_spans:
+            bx = s.get("bbox")
+            if not bx:
+                continue
+            if bx[0] - 2 <= ucx <= bx[2] + 2 and bx[1] - 2 <= ucy <= bx[3] + 2:
+                d = abs(bx[1] - uy0) + abs(bx[0] - ux0)
+                if d < best_d:
+                    best, best_d = s, d
+        return best
+
+    def _hex_to_rgb01(hexstr, default=(0, 0, 0)):
+        if isinstance(hexstr, str) and hexstr.startswith("#") and len(hexstr) == 7:
+            try:
+                return (int(hexstr[1:3], 16) / 255.0, int(hexstr[3:5], 16) / 255.0,
+                        int(hexstr[5:7], 16) / 255.0)
+            except ValueError:
+                return default
+        return default
+
+    placed = 0
+    overflow = []
+    unresolved_ids = list(unresolved)
+
+    # GROUP units into COLUMN BLOCKS by geometry (book-agnostic): units whose left edges
+    # are close share a column; within a column, a large vertical gap starts a new block
+    # (e.g. the bottom-left copyright notice). Each block is rendered line-by-line, each
+    # line using its OWN source span's font size, colour and alignment — so headings stay
+    # big/centred/coloured and body stays small, with paragraph spacing between blocks.
+    placeable = [u for u in units if resolved.get(u.id)]
+    placeable.sort(key=lambda u: (round(u.bbox[0] / 12), u.bbox[1]))
+
+    columns = []
+    for u in placeable:
+        ux0 = u.bbox[0]
+        col = None
+        for c in columns:
+            if abs(c["x0"] - ux0) <= 24:
+                col = c
+                break
+        if col is None:
+            col = {"x0": ux0, "x1": u.bbox[2], "units": []}
+            columns.append(col)
+        col["x0"] = min(col["x0"], ux0)
+        col["x1"] = max(col["x1"], u.bbox[2])
+        col["units"].append(u)
+
+    right_limit = page.rect.width - 30
+    for col in columns:
+        cus = sorted(col["units"], key=lambda u: u.bbox[1])
+        for u in cus:
+            tr = resolved.get(u.id)
+            if not tr or not tr.strip():
+                continue
+            s = _span_for(u)
+            x0, y0, x1, y1 = u.bbox
+            # Size: prefer the source span's real font size; else derive from bbox height.
+            size = float(s.get("font_size")) if (s and s.get("font_size")) else max(7.0, min(y1 - y0, 40.0))
+            size = max(6.0, min(size, 60.0))
+            # Colour + alignment from the source span (falls back to unit align / black).
+            color = _hex_to_rgb01(s.get("color") if s else None, (0, 0, 0))
+            align = {"center": "center", "right": "right"}.get(getattr(u, "align_h", None), None)
+            if align is None and s is not None:
+                align = _infer_source_alignment([s], col["x0"], min(col["x1"], right_limit))
+            align = align or "left"
+            # Box width: a CENTERED heading (subtitle) may span the page to centre like
+            # the source. Every other block is clipped to its OWN detected right edge so it
+            # wraps within its column and cannot run across the page into the other column.
+            if align == "center":
+                box_right = min(page.rect.width - 40, max(x1 + (x1 - x0), col["x1"]))
+                box_left = max(40, x0 - (x1 - x0))
+            else:
+                box_left = x0
+                # Use the widest detected right edge in this column (so all lines share a
+                # consistent wrap width), capped to the page and NEVER past the midline
+                # toward the opposite column.
+                col_right = max((uu.bbox[2] for uu in col["units"]), default=x1)
+                box_right = min(col_right + 4, right_limit)
+            box = pymupdf.Rect(box_left, y0 - 1, box_right,
+                               min(page.rect.height - 20, y0 + size * 1.3 * 10)) & page.rect
+            clip = box  # hard clip so no glyph escapes the column box
+            font_file = _weight_aware_house_font([
+                {"font_size": size, "is_bold": (s.get("is_bold") if s else False),
+                 "font_name": (s.get("font_name") if s else "")}
+            ], fonts_dir)
+            used = draw_paragraph_text(
+                page, box, tr, font_file, round(size),
+                color=color, line_height=1.3, align=align, min_size=6.0, clip=clip,
+            )
+            if used is None:
+                overflow.append(u.id)
+            else:
+                placed += 1
+
+    report.setdefault("scene_generic", {})
+    report["scene_generic"][str(page_num)] = {
+        "units": len(units), "placed": placed,
+        "unresolved": unresolved_ids, "overflow": overflow,
+    }
+    report["spans_replaced"] += placed
+    return not (unresolved_ids or overflow)
 
 
 def render_vocabulary_page_from_scene(page, page_scene, id_to_translation, fonts_dir,
@@ -2681,7 +2857,22 @@ def render_cover_page_v8(page, page_spans, translations_map, fonts_dir, page_num
         sampled, _frac = _dominant_color_in_rect(page, band)
         base = tuple(c / 255.0 for c in sampled) if sampled else None
     if base is not None:
-        cover_box = pymupdf.Rect(40, sub_min_y - 12, page.rect.width - 40, sub_max_y + 16) & page.rect
+        # Clamp the cover-up fill to the SUBTITLE GLYPH bounds (plus a small pad),
+        # NOT the full page width. A full-width band (x=40 .. width-40) overruns the
+        # decorative border, covers the publisher line below, and clips the logo
+        # drop-shadow above — a visible rectangle (correct colour, wrong extent).
+        # The fill only needs to cover the OLD subtitle glyphs so no ghost strip
+        # shows around the replacement; the translated text is centred within the
+        # same horizontal span. Book-agnostic: derived from the source glyph bbox.
+        pad_x = max(6.0, (sub_max_x - sub_min_x) * 0.04)
+        pad_top = 4.0
+        pad_bottom = 6.0
+        cover_box = pymupdf.Rect(
+            sub_min_x - pad_x,
+            sub_min_y - pad_top,
+            sub_max_x + pad_x,
+            sub_max_y + pad_bottom,
+        ) & page.rect
         shp = page.new_shape()
         shp.draw_rect(cover_box)
         shp.finish(fill=base, color=base, width=0)
@@ -2933,7 +3124,69 @@ def render_copyright_page_v8(page, page_spans, translations_map, fonts_dir, page
         if used is not None:
             report["spans_replaced"] += 1
 
-    # --- Info text (two columns) ---
+    # --- Info text: COLUMN-AWARE placement of logical blocks at source positions ---
+    # The translation is a set of LOGICAL blocks (publisher lines; ISBN; ©; www; email;
+    # the whole copyright notice as ONE block; the whole bio as ONE block). The SOURCE
+    # spans are physical wrapped lines, interleaved left(x~64)/right(x~321) by y. We must
+    # place each logical block in its correct COLUMN at its source anchor, wrapping within
+    # the column — NOT index-map 1:1 (counts differ) and NOT merge everything (loses
+    # placement). Left column = publisher/ISBN/©/www/email + copyright notice; right =
+    # the bio. Book-agnostic: columns detected from source span x, blocks matched by content.
+    if info_spans and remaining:
+        left_src = [s for s in info_spans if s["bbox"][0] < 300]
+        right_src = [s for s in info_spans if s["bbox"][0] >= 300]
+
+        for span in info_spans:
+            remove_span(page, span, fill_color=(1, 1, 1))
+        page.apply_redactions()
+
+        info_font = _weight_aware_house_font(info_spans, fonts_dir)
+        info_size = max((s["font_size"] for s in info_spans), default=8)
+
+        # Classify each translated block: BIO (right) vs everything else (left). The BIO is
+        # the character description. The COPYRIGHT NOTICE is long too, so length alone is not
+        # enough — explicitly keep copyright/publisher-legal text in the LEFT column (that is
+        # where the source has it), and only the character bio on the right.
+        bio_markers = ['die naam', 'the name', 'kolulu taktaki', 'uitgedink', 'invented by', 'karakter']
+        left_markers = ['kopiereg', 'copyright', 'gereproduseer', 'reproduced', 'isbn',
+                        'gepubliseer', 'published', 'themba', 'studios']
+        left_blocks, right_blocks = [], []
+        for line in remaining:
+            low = line.lower()
+            if any(m in low for m in left_markers):
+                left_blocks.append(line)              # legal/publisher → left (source position)
+            elif any(m in low for m in bio_markers):
+                right_blocks.append(line)             # character bio → right
+            elif len(line.split()) > 20:
+                right_blocks.append(line)             # long descriptive prose → right (bio cont.)
+            else:
+                left_blocks.append(line)
+
+        # LEFT column: place at the left source spans' top, wrap within left column width.
+        if left_src and left_blocks:
+            lx0 = min(s["bbox"][0] for s in left_src)
+            ly0 = min(s["bbox"][1] for s in left_src)
+            ly1 = max(s["bbox"][3] for s in left_src)
+            rect = pymupdf.Rect(lx0, ly0 - 1, min(lx0 + 240, page.rect.width - 40), ly1 + 40) & page.rect
+            draw_paragraph_text(
+                page, rect, "\n".join(left_blocks), info_font, round(info_size) or 8,
+                color=(0, 0, 0), line_height=1.35, align="left", min_size=6.0, clip=rect,
+            )
+
+        # RIGHT column: place the bio at the right source spans' top, wrap within right width.
+        if right_src and right_blocks:
+            rx0 = min(s["bbox"][0] for s in right_src)
+            ry0 = min(s["bbox"][1] for s in right_src)
+            ry1 = max(s["bbox"][3] for s in right_src)
+            rect = pymupdf.Rect(rx0, ry0 - 1, min(rx0 + 160, page.rect.width - 30), ry1 + 60) & page.rect
+            draw_paragraph_text(
+                page, rect, "\n".join(right_blocks), info_font, round(info_size) or 8,
+                color=(0, 0, 0), line_height=1.35, align="left", min_size=6.0, clip=rect,
+            )
+
+    return  # placement done
+
+    # --- LEGACY (unused): two-column bucket-and-merge, kept for reference ---
     if info_spans and remaining:
         # Detect two columns: left (x < 300) and right (x >= 300)
         left_spans = [s for s in info_spans if s["bbox"][0] < 300]
@@ -2960,7 +3213,7 @@ def render_copyright_page_v8(page, page_spans, translations_map, fonts_dir, page
             left_max_y = max(s["bbox"][3] for s in left_spans)
             rect = pymupdf.Rect(64, left_min_y, 300, left_max_y + 30)
             used = draw_paragraph_text(
-                page, rect, " ".join(publisher_lines), info_font, round(info_size) or 8,
+                page, rect, "\n".join(publisher_lines), info_font, round(info_size) or 8,
                 color=(0, 0, 0), line_height=1.4, align="left",
                 min_size=6.0, clip=rect & page.rect,
             )
@@ -2972,7 +3225,7 @@ def render_copyright_page_v8(page, page_spans, translations_map, fonts_dir, page
             right_max_y = max(s["bbox"][3] for s in right_spans)
             rect = pymupdf.Rect(321, right_min_y, 477, right_max_y + 30)
             used = draw_paragraph_text(
-                page, rect, " ".join(bio_lines), info_font, round(info_size) or 8,
+                page, rect, "\n".join(bio_lines), info_font, round(info_size) or 8,
                 color=(0, 0, 0), line_height=1.4, align="left",
                 min_size=6.0, clip=rect & page.rect,
             )
@@ -4121,7 +4374,24 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None, onl
         elif page_type == 'back_cover':
             render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num, report)
         elif page_type == 'copyright':
-            render_copyright_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report)
+            # BOOK-AGNOSTIC scene-driven placement: the copyright page's scene units each
+            # carry their OWN detected bbox (publisher lines, ISBN, ©, www, email at their
+            # x/y; the character bio in its column; the copyright notice at its position).
+            # Placing each unit at its detected bbox by stable id reproduces the source
+            # layout with ZERO keyword/column heuristics — the same engine the vocabulary
+            # page uses. Falls back to the legacy per-type renderer only when no scene /
+            # contract is available for the page.
+            _handled = None
+            report.setdefault("copyright_debug", {})[str(page_num)] = {
+                "has_scene": page_scene_obj is not None,
+                "has_contract": bool(id_to_translation),
+            }
+            if page_scene_obj is not None and id_to_translation:
+                _handled = render_page_from_scene_generic(
+                    page, page_scene_obj, id_to_translation, fonts_dir, page_num, report,
+                    page_spans=page_spans)
+            if _handled is None:
+                render_copyright_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report)
 
         # Track coverage per page (DIAGNOSTIC ONLY). The raw source-span vs replace-
         # call ratio is NOT a reliable defect signal — a structure-aware renderer

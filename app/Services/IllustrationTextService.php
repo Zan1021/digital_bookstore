@@ -69,8 +69,24 @@ class IllustrationTextService
             return $result; // nothing to do — no vision spend
         }
 
+        // CRITICAL GUARD: the V8 contract renderer already lays out every page it has a
+        // manifest region for (story/vocabulary/table/cover) applying ALL typography, font,
+        // case, alignment and table rules. This module must NEVER re-process those pages —
+        // doing so re-rasters and destroys correctly-rendered text. It runs ONLY on pages
+        // the contract does NOT own (genuinely baked-in illustration text with no manifest
+        // coverage). Build the set of contract-owned page numbers (1-based) and skip them.
+        $contractPages = $this->contractOwnedPages($book);
+
         foreach ($candidates as $cand) {
             $pageIndex = (int) $cand['page']; // 0-based
+            $pageNumber = $pageIndex + 1;     // 1-based (manifest/page_number space)
+
+            // Skip any page the V8 contract already rendered. This is the fix for the
+            // regression where story pages got re-rastered and corrupted.
+            if (in_array($pageNumber, $contractPages, true)) {
+                $result['skipped'][] = ['page' => $pageNumber, 'reason' => 'contract-owned (V8 rendered)'];
+                continue;
+            }
 
             // PREFER GROUND TRUTH: if the page has a real text layer over the artwork, use
             // the PDF's own line boxes for exact placement (the correct, book-agnostic path
@@ -129,6 +145,47 @@ class IllustrationTextService
         }
 
         return $result;
+    }
+
+    /**
+     * Page numbers (1-based) the V8 CONTRACT renderer already owns — any manifest page that
+     * has at least one translatable (non-preserve) region. This module must skip these so it
+     * never re-rasters correctly-rendered story/vocab/table pages. Returns [] if no manifest
+     * (then the module may run everywhere, e.g. genuinely baked-in books).
+     */
+    private function contractOwnedPages(Book $book): array
+    {
+        try {
+            $disk = Storage::disk('public');
+            if (!$book->manifest_path || !$disk->exists($book->manifest_path)) {
+                return [];
+            }
+            $manifest = json_decode($disk->get($book->manifest_path), true) ?: [];
+            $owned = [];
+            foreach (($manifest['pages'] ?? []) as $pg) {
+                $pageNum = $pg['page_number'] ?? null;
+                if ($pageNum === null) {
+                    continue;
+                }
+                foreach (($pg['regions'] ?? []) as $region) {
+                    $policy = $region['translation_policy'] ?? 'preserve';
+                    $hasItems = !empty($region['items']);
+                    if ($policy !== 'preserve' && $hasItems) {
+                        $owned[] = (int) $pageNum;
+                        break;
+                    }
+                }
+            }
+            return array_values(array_unique($owned));
+        } catch (\Throwable $e) {
+            // On any doubt, be conservative: treat NOTHING as safe to touch by returning a
+            // sentinel that the caller interprets as "skip all" would be wrong; instead we
+            // return [] and rely on the (now separate) cover-only default. Log it.
+            Log::warning('IllustrationText: contractOwnedPages failed; treating none as owned', [
+                'error' => $e->getMessage(),
+            ]);
+            return [];
+        }
     }
 
     /**

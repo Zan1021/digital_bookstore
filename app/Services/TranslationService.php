@@ -35,6 +35,9 @@ class TranslationService
      */
     private array $glossary = [];
 
+    /** Page numbers whose phonics regeneration failed validation (need review). */
+    private array $phonicsNeedsReview = [];
+
     /** Primary and fallback models for API resilience */
     private const PRIMARY_MODEL = 'gpt-4o';
     private const FALLBACK_MODEL = 'gpt-4o-mini';
@@ -876,6 +879,35 @@ PROMPT;
                 $translatableItems, $pageType, $languageCode, $languageName, $pageNum
             );
 
+            // PHONICS REGENERATION (educational_adaptation): the general translate call tends
+            // to echo/literally translate phonics rows (e.g. "ee see,feet,bee" -> "ee sien,
+            // voete,by" where the examples no longer contain the pattern). Re-do phonics items
+            // with a dedicated, few-shot, higher-temperature call, then VALIDATE that each
+            // example word actually contains the sound pattern. Invalid results flag the page
+            // for review instead of shipping wrong phonics. Book/language-agnostic.
+            $phonicsItems = array_values(array_filter(
+                $translatableItems,
+                fn ($it) => ($it['policy'] ?? '') === 'educational_adaptation'
+                    || ($it['role'] ?? '') === 'phonics'
+            ));
+            if (!empty($phonicsItems)) {
+                $regen = $this->regeneratePhonics($phonicsItems, $languageCode, $languageName, $pageNum);
+                // Merge regenerated phonics over the general result (keyed by id).
+                $byId = [];
+                foreach ($translatedItems as $ti) {
+                    if (isset($ti['id'])) $byId[$ti['id']] = $ti;
+                }
+                foreach ($regen as $rid => $rtext) {
+                    $byId[$rid] = ['id' => $rid, 'translation' => $rtext];
+                }
+                $translatedItems = array_values($byId);
+                if (!empty($this->phonicsNeedsReview)) {
+                    Log::warning("Phonics regeneration flagged pages for review", [
+                        'page' => $pageNum, 'invalid' => $this->phonicsNeedsReview,
+                    ]);
+                }
+            }
+
             // FIX B (durable): keep the per-ID translations so the render resolver can
             // place each element from its OWN translation instead of re-splitting a flat
             // blob. This is what stops the English leak at the source rather than masking
@@ -895,9 +927,15 @@ PROMPT;
             $coverage = count($translatedItems) / max(count($translatableItems), 1);
             $flag = $coverage >= 0.95 ? 'green' : ($coverage >= 0.7 ? 'yellow' : 'red');
 
+            // Resolve the BookPage FK (translated_pages.book_page_id is NOT NULL). The
+            // manifest is keyed by page_number; map it back to this book's BookPage row.
+            $bookPage = \App\Models\BookPage::where('book_id', $book->id)
+                ->where('page_number', $pageNum)->first();
+
             TranslatedPage::updateOrCreate(
                 ['translation_id' => $translation->id, 'page_number' => $pageNum],
                 [
+                    'book_page_id' => $bookPage?->id,
                     'translated_text' => $translatedText,
                     'confidence_score' => $coverage * 10,
                     'quality_flag' => $flag,
@@ -1037,6 +1075,115 @@ PROMPT;
         }
 
         return $parsed;
+    }
+
+    /**
+     * Regenerate phonics rows as VALID target-language sound-pattern exercises, then
+     * validate them deterministically. Each phonics row has the shape
+     * "[- ] pattern example1, example2, ..." (leading dash optional). We ask the model
+     * to keep the same shape but choose a real {lang} pattern with real {lang} example
+     * words, then we CHECK that every example word actually contains the chosen pattern.
+     * Rows that fail validation are kept but the page is flagged for review.
+     *
+     * @param array<int,array{id:string,text:string}> $items
+     * @return array<string,string> id => regenerated text
+     */
+    private function regeneratePhonics(array $items, string $langCode, string $langName, int $pageNumber): array
+    {
+        $system = <<<PROMPT
+You create phonics (sound-to-spelling) exercises for a Grade 1-2 {$langName} children's book.
+You receive a JSON array of items: {"id","text"}. Each text is an English phonics row like
+"- ee see, feet, bee" or "st rest, nest, west" — a short SOUND PATTERN followed by example
+words that CONTAIN that pattern.
+
+Your job: for each item, produce an EQUIVALENT {$langName} phonics row.
+HARD REQUIREMENTS:
+- Choose a spelling pattern that genuinely exists in {$langName}.
+- Give 2-4 REAL {$langName} words that ACTUALLY CONTAIN that exact pattern (letters in that order).
+- Keep the same visual shape: preserve a leading "- " if the source had one, then
+  "<pattern> <word1>, <word2>, <word3>".
+- NEVER keep English example words. NEVER output a word that does not contain the pattern.
+- If a heading/instruction line (e.g. "Blends"/"Kombinasies"), translate it to {$langName}.
+
+Examples of CORRECT {$langName} (Afrikaans) rows:
+  "- oe boek, koek, soek"        (all contain "oe")
+  "- aa maan, kaas, slaap"       (all contain "aa")
+  "- sk skaap, skool, skil"      (all contain "sk")
+
+Return ONLY a JSON array: [{"id":"...","translation":"..."}]. Every input id appears once.
+PROMPT;
+
+        $req = array_map(fn ($it) => ['id' => $it['id'], 'text' => $it['text']], $items);
+
+        try {
+            $response = $this->chatWithRetry([
+                'messages' => [
+                    ['role' => 'system', 'content' => $system],
+                    ['role' => 'user', 'content' => json_encode($req, JSON_UNESCAPED_UNICODE)],
+                ],
+                'temperature' => 0.5,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning("Phonics regeneration call failed for page {$pageNumber}", ['error' => $e->getMessage()]);
+            return [];
+        }
+
+        $parsed = json_decode($response, true);
+        if (!is_array($parsed) && preg_match('/\[.*\]/s', $response, $m)) {
+            $parsed = json_decode($m[0], true);
+        }
+        if (!is_array($parsed)) {
+            $this->phonicsNeedsReview[] = $pageNumber;
+            return [];
+        }
+
+        $out = [];
+        foreach ($parsed as $row) {
+            $id = $row['id'] ?? null;
+            $text = trim((string) ($row['translation'] ?? ''));
+            if ($id === null || $text === '') {
+                continue;
+            }
+            // Validate: if this looks like a pattern row, every example word must contain the pattern.
+            if (!$this->phonicsRowIsValid($text)) {
+                $this->phonicsNeedsReview[] = $pageNumber;
+            }
+            $out[$id] = $text;
+        }
+        return $out;
+    }
+
+    /**
+     * A phonics row "[- ] pattern w1, w2, ..." is valid when every example word contains
+     * the pattern (case-insensitive). Non-pattern rows (headings/instructions with no
+     * comma-separated example list) are accepted as-is. Deterministic, language-agnostic.
+     */
+    private function phonicsRowIsValid(string $text): bool
+    {
+        $t = trim($text);
+        // strip a leading bullet dash
+        $t = preg_replace('/^\s*[-–—]\s*/u', '', $t);
+        // Expect "pattern examples" where examples contain a comma OR multiple words.
+        if (!preg_match('/^(\S{1,5})\s+(.+)$/u', $t, $m)) {
+            return true; // heading/instruction — not a pattern row, don't fail it
+        }
+        $pattern = mb_strtolower($m[1]);
+        $rest = $m[2];
+        // Only enforce on rows that actually list example words (comma or >=2 words).
+        $words = preg_split('/[,\s]+/u', mb_strtolower($rest), -1, PREG_SPLIT_NO_EMPTY);
+        if (count($words) < 1) {
+            return true;
+        }
+        foreach ($words as $w) {
+            $w = preg_replace('/[^\p{L}]/u', '', $w);
+            if ($w === '') {
+                continue;
+            }
+            if (mb_strpos($w, $pattern) === false) {
+                return false; // an example word that doesn't contain the pattern = invalid
+            }
+        }
+        return true;
     }
 
     /**

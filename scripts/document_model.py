@@ -1033,6 +1033,12 @@ import re as _re
 _PHONICS_PATTERN_RE = _re.compile(
     r"^[a-z][a-z\-]{0,4}\s*[-–—]\s*\S", _re.IGNORECASE
 )
+# LEADING-DASH form used by some books: "- nd hand, land, sand" / "- ee see, feet, bee"
+# i.e. a bullet dash, then a SHORT sound pattern (<=4 letters), then example word(s).
+# This is the shape that previously slipped through and got mis-translated literally.
+_PHONICS_LEADING_DASH_RE = _re.compile(
+    r"^\s*[-–—]\s*[a-z]{1,4}\s+\S", _re.IGNORECASE
+)
 # Instructional phonics lead-ins, kept language-neutral where practical. The
 # English/Afrikaans forms cover the current corpus; the pattern rule above catches
 # the actual exercise rows regardless of the instruction language.
@@ -1049,6 +1055,9 @@ def _is_phonics_span(text: str) -> bool:
         return False
     # A single ordinary word (no dash separator, no instruction) is NOT phonics.
     if _PHONICS_INSTRUCTION_RE.search(t):
+        return True
+    # Leading-dash exercise form: "- nd hand, land, sand" (bullet, short pattern, examples).
+    if _PHONICS_LEADING_DASH_RE.match(t):
         return True
     if _PHONICS_PATTERN_RE.match(t):
         # Guard: require a dash that separates a SHORT pattern token from examples,
