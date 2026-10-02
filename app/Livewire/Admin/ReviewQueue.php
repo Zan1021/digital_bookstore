@@ -403,7 +403,12 @@ class ReviewQueue extends Component
             return ['ready' => false, 'checks' => [], 'issues' => [], 'coverage' => null];
         }
         $qa = $this->translation->decodeQaReport() ?? [];
-        $checks = (isset($qa['checks']) && is_array($qa['checks'])) ? $qa['checks'] : [];
+        $checks = [];
+        if (isset($qa['qa']['checks']) && is_array($qa['qa']['checks'])) {
+            $checks = $qa['qa']['checks'];
+        } elseif (isset($qa['checks']) && is_array($qa['checks'])) {
+            $checks = $qa['checks'];
+        }
 
         // Coverage count, if the whole-book coverage gate recorded one (e.g. "16/16").
         $coverage = null;

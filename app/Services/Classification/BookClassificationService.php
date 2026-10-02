@@ -113,7 +113,24 @@ class BookClassificationService
         if (!$book->descriptions()->where('status', 'approved')->exists()) {
             $missing[] = 'description';
         }
+        // R1 (unified-rendering-and-testing): a book with translated editions must have at
+        // least ONE render-ready edition before it can be published, so a failed edition can
+        // never reach the public store. The trusted English source counts as render-ready.
+        if ($book->translations()->exists() && ! $this->hasPublishableEdition($book)) {
+            $missing[] = 'publishable_edition';
+        }
         return $missing;
+    }
+
+    /** True when the book has at least one edition that passes render readiness (R1). */
+    private function hasPublishableEdition(Book $book): bool
+    {
+        foreach ($book->translations as $edition) {
+            if ($edition->isStoreVisible()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public function canPublish(Book $book): bool

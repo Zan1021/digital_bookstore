@@ -96,4 +96,76 @@ class PublishGateTest extends TestCase
         $this->assertDatabaseHas('classification_reviews',
             ['book_id' => $book->id, 'field' => 'age_range', 'decision' => 'accepted']);
     }
+
+    /** Make a book pass all the metadata requirements (category/type/age/description). */
+    private function completeMetadata(Book $book): void
+    {
+        $this->svc->setBookType($book, 'picture_book', 1);
+        $this->svc->setCategory($book, 'picture-books', true, 'administrator', 1);
+        $this->svc->setAgeRange($book, 4, 6, 1);
+        $desc = \App\Models\BookDescription::create(['book_id' => $book->id, 'language_code' => 'en',
+            'short_text' => 'A lovely tale.', 'status' => 'suggested', 'source' => 'ai']);
+        $this->svc->approveDescription($desc, 1);
+    }
+
+    // ---- R1 (unified-rendering-and-testing): publish requires a render-ready edition ----
+
+    public function test_book_with_only_a_failed_edition_cannot_publish(): void
+    {
+        $book = $this->book();
+        $this->completeMetadata($book);
+        // A translated edition that FAILED layout QA (blocking render state, no identity).
+        \App\Models\Translation::create([
+            'book_id' => $book->id, 'language_code' => 'af', 'language_name' => 'AF',
+            'status' => 'draft', 'render_status' => \App\Models\Translation::STATE_NEEDS_LAYOUT_REVIEW,
+        ]);
+
+        $missing = $this->svc->missingRequirements($book->refresh());
+        $this->assertContains('publishable_edition', $missing,
+            'a book whose only edition failed QA must not be publishable');
+        $this->assertFalse($this->svc->publish($book));
+        $this->assertNotSame('published', $book->refresh()->status);
+    }
+
+    public function test_book_with_a_render_ready_edition_can_publish(): void
+    {
+        $book = $this->book();
+        $this->completeMetadata($book);
+        // A render-ready edition: required QA checks passed + bound to fingerprint + hash.
+        \App\Models\Translation::create([
+            'book_id' => $book->id, 'language_code' => 'af', 'language_name' => 'AF',
+            'status' => 'draft', 'render_status' => \App\Models\Translation::STATE_READY_FOR_REVIEW,
+            'qa_report' => (new \App\Services\Qa\QaReport())
+                ->pass('structure')->pass('fit')->pass('target_mapping')->toArray(),
+            'render_fingerprint' => str_repeat('a', 16),
+            'output_sha256' => str_repeat('b', 16),
+        ]);
+
+        $this->assertNotContains('publishable_edition', $this->svc->missingRequirements($book->refresh()));
+        $this->assertTrue($this->svc->publish($book->refresh()));
+        $this->assertSame('published', $book->refresh()->status);
+    }
+
+    public function test_source_english_edition_counts_as_render_ready(): void
+    {
+        // The trusted English source edition should satisfy the gate without a render.
+        $book = $this->book();
+        $this->completeMetadata($book);
+        \App\Models\Translation::create([
+            'book_id' => $book->id, 'language_code' => 'en', 'language_name' => 'English',
+            'status' => 'draft', 'render_status' => \App\Models\Translation::STATE_TRANSLATING,
+        ]);
+        $this->assertNotContains('publishable_edition', $this->svc->missingRequirements($book->refresh()));
+    }
+
+    public function test_publish_edition_guard_blocks_failed_edition(): void
+    {
+        $book = $this->book();
+        $t = \App\Models\Translation::create([
+            'book_id' => $book->id, 'language_code' => 'af', 'language_name' => 'AF',
+            'status' => 'draft', 'render_status' => \App\Models\Translation::STATE_NEEDS_LAYOUT_REVIEW,
+        ]);
+        $this->assertFalse($t->publishEdition(), 'a failed edition cannot be marked published');
+        $this->assertNotSame('published', $t->fresh()->publication_status);
+    }
 }

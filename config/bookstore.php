@@ -45,6 +45,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Independent PDF.js visual check (spec R8.6)
+    |--------------------------------------------------------------------------
+    | Renders cover + flagged pages through the SAME engine the reader uses
+    | (scripts/render_pdfjs.mjs) and flags blank/washed output PyMuPDF can't see.
+    | Off by default; needs node. Recorded not_run when unavailable (never a false pass).
+    */
+    'pdfjs_check' => [
+        'enabled' => env('PDFJS_CHECK_ENABLED', false),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Cover re-typeset / flatten (front-page fix)
     |--------------------------------------------------------------------------
     | Some covers draw the subtitle drop-shadow via a Form XObject through a

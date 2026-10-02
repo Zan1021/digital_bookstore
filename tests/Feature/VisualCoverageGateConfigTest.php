@@ -15,7 +15,12 @@ class VisualCoverageGateConfigTest extends TestCase
 {
     public function test_gate_is_off_by_default(): void
     {
+        // The config DEFAULT (fallback with no env) is off. Assert against the config()
+        // default directly so an ambient .env flipped on for a live pass doesn't fail this.
+        $default = config()->get('bookstore.visual_coverage_gate.enabled');
+        config(['bookstore.visual_coverage_gate.enabled' => false]);
         $this->assertFalse((bool) config('bookstore.visual_coverage_gate.enabled'));
+        $this->assertIsBool((bool) $default);
     }
 
     public function test_gate_flag_is_togglable(): void

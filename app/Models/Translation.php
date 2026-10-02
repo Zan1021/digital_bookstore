@@ -143,7 +143,17 @@ class Translation extends Model
         }
 
         $qa = $this->decodeQaReport();
-        $qaChecks = is_array($qa) && isset($qa['checks']) && is_array($qa['checks']) ? $qa['checks'] : [];
+        // The structured QaReport is embedded under qa_report['qa'] by the render path
+        // (QaReport::toArray()), so its checks live at qa_report['qa']['checks']. Older/other
+        // shapes may put checks at the top level — accept either (fail-safe lookup).
+        $qaChecks = [];
+        if (is_array($qa)) {
+            if (isset($qa['qa']['checks']) && is_array($qa['qa']['checks'])) {
+                $qaChecks = $qa['qa']['checks'];
+            } elseif (isset($qa['checks']) && is_array($qa['checks'])) {
+                $qaChecks = $qa['checks'];
+            }
+        }
 
         // Build CandidateReadiness-shaped check records from the QA report, binding the
         // edition's current identities. A check absent/!passed in the report → not bound →
@@ -304,6 +314,34 @@ class Translation extends Model
             return true;
         }
         return $this->render_status === self::STATE_APPROVED;
+    }
+
+    /**
+     * Guarded edition publish (unified-rendering-and-testing R1). An edition may only be
+     * marked publication_status=published when it is render-ready — i.e. it passes the
+     * single readiness authority (canBePublished()). The source English edition is trusted
+     * (publisher-proofed) and may publish without the render gate. Returns true when the
+     * transition happened. This closes the hole where a book could be published (and reach
+     * the store/reader) while its translated edition failed layout/visual/educational QA.
+     */
+    public function publishEdition(): bool
+    {
+        if (! $this->isSourceLanguage() && ! $this->canBePublished()) {
+            return false;
+        }
+        $this->publication_status = 'published';
+        $this->save();
+        return true;
+    }
+
+    /**
+     * Whether this edition is render-ready to be surfaced in the public store. Source
+     * language is always eligible; a translated edition must pass readiness. Used to keep
+     * a failed edition out of the catalogue even if a stale publication_status lingers.
+     */
+    public function isStoreVisible(): bool
+    {
+        return $this->isSourceLanguage() || $this->canBePublished();
     }
 
     // ---- Separate approval TRACKS (spec R10.4/R10.5, Phase 7.4) ------------

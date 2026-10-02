@@ -47,6 +47,58 @@ class PdfTranslationService
     }
 
     /**
+     * Robustly parse the engine's JSON report from a (possibly noisy) stderr stream.
+     * The engine prints one JSON object, but real runs can wrap it in warnings / progress
+     * lines / a UTF-8 BOM / a trailing object. A naive json_decode of the whole string then
+     * returns null and the whole structured QA is lost. We: (1) try the trimmed whole
+     * string; (2) fall back to the LAST balanced top-level {...} block in the output.
+     * Returns an array (empty on total failure) — never null, so callers can always embed
+     * the structured QaReport.
+     *
+     * @return array<string,mixed>
+     */
+    private function parseEngineReport(?string $stderr): array
+    {
+        $stderr = (string) $stderr;
+        // Strip a leading UTF-8 BOM if present.
+        $stderr = preg_replace('/^\xEF\xBB\xBF/', '', $stderr);
+
+        $whole = json_decode(trim($stderr), true);
+        if (is_array($whole)) {
+            return $whole;
+        }
+
+        // Scan for the last balanced {...} object (handles noise before/after + multiple).
+        $best = null;
+        $depth = 0;
+        $start = -1;
+        $len = strlen($stderr);
+        for ($i = 0; $i < $len; $i++) {
+            $ch = $stderr[$i];
+            if ($ch === '{') {
+                if ($depth === 0) {
+                    $start = $i;
+                }
+                $depth++;
+            } elseif ($ch === '}') {
+                if ($depth > 0) {
+                    $depth--;
+                    if ($depth === 0 && $start >= 0) {
+                        $candidate = substr($stderr, $start, $i - $start + 1);
+                        $decoded = json_decode($candidate, true);
+                        if (is_array($decoded)) {
+                            $best = $decoded; // keep the last valid one
+                        }
+                        $start = -1;
+                    }
+                }
+            }
+        }
+
+        return is_array($best) ? $best : [];
+    }
+
+    /**
      * Extract text metadata from a PDF file.
      * Returns structured data with positions, fonts, sizes for every text span.
      */
@@ -261,8 +313,12 @@ class PdfTranslationService
         $process->setTimeout(300);
         $process->run();
 
-        // Capture the report from stderr
-        $report = json_decode($process->getErrorOutput(), true);
+        // Capture the report from stderr. The engine prints a JSON object on stderr, but
+        // real runs can surround it with non-JSON noise (warnings, progress, a BOM, or a
+        // second object) — a naive json_decode then returns NULL and the structured QA is
+        // silently lost (empty qa_report → readiness can never pass). Parse robustly:
+        // try whole-string first, then extract the LAST balanced {...} block.
+        $report = $this->parseEngineReport($process->getErrorOutput());
 
         if (!$process->isSuccessful()) {
             @unlink($translationsPath);
@@ -435,7 +491,10 @@ class PdfTranslationService
         // defects the structural gate can't see (clipping, inconsistent sizes, overlap,
         // garbled/missing text). Flagged pages force NEEDS_LAYOUT_REVIEW. Off by default
         // (costs one vision call per reviewed page). Never blocks on its own failure.
-        if (config('bookstore.visual_qa_enabled')) {
+        // De-dup (audit (b)2): SKIP this subset check when the whole-book visual coverage
+        // gate is enabled — coverage runs VisualQA over EVERY page and subsumes the subset,
+        // so running both would double-spend the vision model.
+        if (config('bookstore.visual_qa_enabled') && ! config('bookstore.visual_coverage_gate.enabled', false)) {
             try {
                 $scope = config('bookstore.visual_qa_scope', 'structured');
                 $qaPages = null; // null = all
@@ -1178,10 +1237,29 @@ class PdfTranslationService
 
         $publishable = $report['publishable'] ?? true;
         $renderStatus = $report['render_status'] ?? ($publishable ? 'READY_FOR_REVIEW' : 'NEEDS_LAYOUT_REVIEW');
+
+        // Refresh render identity (unified-rendering-and-testing R2 / audit (b)1): a per-item
+        // re-render produces a NEW output file, so it must recompute the fingerprint +
+        // output_sha256 exactly like the full render — otherwise readiness() reads the edition
+        // as stale (INVALID_GATE_INPUT) until a full render runs. Prior approvals are
+        // invalidated when the fingerprint changes (same rule as the full path).
+        $fingerprint = \App\Services\Qa\RenderFingerprint::compute([
+            'source_version' => $book->updated_at?->timestamp,
+            'manifest_version' => $book->manifest_path,
+            'engine_version' => (string) config('bookstore.engine_version', 'v8'),
+            'item_translations' => $translation->item_translations ?? [],
+        ]);
+        $outputSha256 = is_file($outputPath) ? hash_file('sha256', $outputPath) : null;
+        $priorFingerprint = $translation->getAttribute('render_fingerprint');
+        if ($priorFingerprint !== null && $priorFingerprint !== $fingerprint) {
+            $translation->forceFill(['page_approvals' => []]);
+        }
         // Array-cast persistence (R8.5, Phase 6.3) — not json_encode (avoids double-encode).
         $translation->forceFill([
             'render_status' => $renderStatus,
             'qa_report' => is_array($report) ? $report : null,
+            'render_fingerprint' => $fingerprint,
+            'output_sha256' => $outputSha256,
         ])->save();
 
         return [
