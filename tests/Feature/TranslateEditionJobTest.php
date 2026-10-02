@@ -41,6 +41,7 @@ class TranslateEditionJobTest extends TestCase
         $translator->shouldReceive('translateWithManifest')->once();
 
         $renderer = Mockery::mock(PdfTranslationService::class);
+        $renderer->shouldReceive('setRenderLockOwner')->andReturnNull();
         $renderer->shouldReceive('createTranslatedPdf')->once()
             ->andReturnUsing(function () use ($edition) {
                 // Simulate the render step persisting a passing gate verdict.
@@ -69,6 +70,7 @@ class TranslateEditionJobTest extends TestCase
         $translator->shouldReceive('translateWithManifest')->once()->andThrow(new \RuntimeException('OpenAI down'));
 
         $renderer = Mockery::mock(PdfTranslationService::class);
+        $renderer->shouldReceive('setRenderLockOwner')->andReturnNull();
         $renderer->shouldNotReceive('createTranslatedPdf');
 
         try {

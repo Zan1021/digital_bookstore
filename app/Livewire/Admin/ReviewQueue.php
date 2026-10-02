@@ -389,6 +389,44 @@ class ReviewQueue extends Component
         $this->loadTranslation();
     }
 
+    /**
+     * Readiness summary for the UI (unified-rendering-and-testing D3). Surfaces the per-check
+     * QA statuses, the coverage count, and the single readiness decision so the reviewer sees
+     * exactly WHY an edition is ready or blocked — distinct from the human page approvals.
+     * Read-only: computes nothing that changes the gate.
+     *
+     * @return array<string,mixed>
+     */
+    private function readinessReport(): array
+    {
+        if (! $this->translation) {
+            return ['ready' => false, 'checks' => [], 'issues' => [], 'coverage' => null];
+        }
+        $qa = $this->translation->decodeQaReport() ?? [];
+        $checks = (isset($qa['checks']) && is_array($qa['checks'])) ? $qa['checks'] : [];
+
+        // Coverage count, if the whole-book coverage gate recorded one (e.g. "16/16").
+        $coverage = null;
+        if (isset($qa['visual_coverage']) && is_array($qa['visual_coverage'])) {
+            $vc = $qa['visual_coverage'];
+            $expected = is_array($vc['expected_pages'] ?? null) ? count($vc['expected_pages']) : 0;
+            $issueCount = is_array($vc['issues'] ?? null) ? count($vc['issues']) : 0;
+            $coverage = [
+                'covered' => (bool) ($vc['covered'] ?? false),
+                'expected' => $expected,
+                'checked' => max(0, $expected - $issueCount),
+            ];
+        }
+
+        $readiness = $this->translation->readiness();
+        return [
+            'ready' => $readiness['ready'],
+            'issues' => $readiness['issues'],
+            'checks' => $checks,
+            'coverage' => $coverage,
+        ];
+    }
+
     public function render()
     {
         $currentPageData = null;
@@ -406,6 +444,7 @@ class ReviewQueue extends Component
             'editionTotalPages' => $editionTotal,
             'editionCanApprove' => $this->translation?->allPagesApproved() && $this->translation?->canBePublished(),
             'editionRenderStatus' => $this->translation?->render_status,
+            'readinessReport' => $this->readinessReport(),
             'overlay' => $this->overlay,
             'overlayToggles' => $this->overlayToggles,
             'showOverlay' => $this->showOverlay,

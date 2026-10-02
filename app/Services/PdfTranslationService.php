@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Book;
 use App\Models\Translation;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Symfony\Component\Process\Exception\ProcessFailedException;
@@ -100,6 +101,51 @@ class PdfTranslationService
      * engine cannot produce a contract for a source (no structural manifest).
      */
     public function createTranslatedPdf(Book $book, Translation $translation): string
+    {
+        // Per-edition serialization (unified-rendering-and-testing D1). Concurrent renders of
+        // the SAME edition must not race on the staging/public artifacts — whether triggered
+        // by the async TranslateEditionJob OR a synchronous admin action (BookReviewer,
+        // EngineCompare, ReviewQueue, console commands). The lock is REENTRANT by owner: when
+        // the caller already holds this edition's lock (the Job passes its owner token via
+        // setRenderLockOwner()), we do NOT re-acquire and run inline — avoiding a self-
+        // deadlock on the same key. Otherwise we acquire here and release in finally.
+        $key = "translate-edition-{$translation->id}";
+        $alreadyHeld = $this->renderLockOwner !== null
+            && Cache::restoreLock($key, $this->renderLockOwner)->isOwnedByCurrentProcess();
+
+        if ($alreadyHeld) {
+            return $this->createTranslatedPdfInner($book, $translation);
+        }
+
+        $lock = Cache::lock($key, 900);
+        if (! $lock->get()) {
+            // Another process is already rendering this exact edition. Fail closed rather
+            // than racing — the in-flight render will produce the authoritative artifact.
+            throw new \RuntimeException(
+                "Edition #{$translation->id} is already being rendered; try again shortly."
+            );
+        }
+        try {
+            return $this->createTranslatedPdfInner($book, $translation);
+        } finally {
+            optional($lock)->release();
+        }
+    }
+
+    /**
+     * Set the owner token of a per-edition render lock already held by the caller, so a
+     * nested createTranslatedPdf() call recognises it and runs reentrantly instead of
+     * deadlocking (D1). TranslateEditionJob sets this before invoking the render.
+     */
+    public function setRenderLockOwner(?string $owner): void
+    {
+        $this->renderLockOwner = $owner;
+    }
+
+    /** Owner token of an outer per-edition lock, when the caller already holds one. */
+    private ?string $renderLockOwner = null;
+
+    private function createTranslatedPdfInner(Book $book, Translation $translation): string
     {
         $originalPath = Storage::disk('public')->path($book->pdf_path);
         $translatedPages = $translation->translatedPages()->orderBy('page_number')->get();
@@ -458,6 +504,38 @@ class PdfTranslationService
                 // not ran => leave the check not_run on the QaReport (fail-closed aware)
             } catch (\Throwable $e) {
                 Log::warning('PDF.js visual check errored (non-blocking)', ['error' => $e->getMessage()]);
+            }
+        }
+
+        // WHOLE-BOOK VISUAL COVERAGE GATE (unified-rendering-and-testing Req 4, D2). The
+        // subset visual QA above samples pages; this gate proves EVERY page of the final PDF
+        // has a passing visual record bound to this candidate (blank/image-only pages too).
+        // Config-gated (full-book vision spend); when enabled, any coverage issue routes the
+        // edition to review — missing/unchecked/stale pages can never masquerade as clean.
+        if (config('bookstore.visual_coverage_gate.enabled', false)) {
+            try {
+                $coverage = app(\App\Services\Qa\BookTestingService::class)
+                    ->visualCoverage($book, $translation->fresh());
+                if (is_array($report)) {
+                    $report['visual_coverage'] = [
+                        'covered' => $coverage['covered'],
+                        'expected_pages' => $coverage['expected_pages'],
+                        'issues' => $coverage['issues'],
+                    ];
+                }
+                if ($coverage['covered'] === true) {
+                    $qaReport->pass('visual_coverage');
+                } else {
+                    $publishable = false;
+                    $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+                    $qaReport->fail('visual_coverage', 'VISUAL_COVERAGE_INCOMPLETE', 'visual_coverage',
+                        ['issues' => $coverage['issues']]);
+                    Log::warning('Whole-book visual coverage incomplete — routing to review', [
+                        'book' => $book->id, 'language' => $translation->language_code,
+                    ]);
+                }
+            } catch (\Throwable $e) {
+                Log::warning('Visual coverage gate errored (non-blocking)', ['error' => $e->getMessage()]);
             }
         }
 

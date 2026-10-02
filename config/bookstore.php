@@ -31,6 +31,20 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Whole-book visual coverage gate (unified-rendering-and-testing Req 4)
+    |--------------------------------------------------------------------------
+    | When enabled, BookTestingService runs visual QA over EVERY page of the final
+    | PDF (including blank/preserved/image-only pages) and makes all-page coverage a
+    | REQUIRED gate: any unchecked, stale or unresolved page routes the edition to
+    | review. Off by default because full-book coverage spends one vision call per
+    | page; the subset visual_qa above remains the cheaper draft check.
+    */
+    'visual_coverage_gate' => [
+        'enabled' => env('VISUAL_COVERAGE_GATE_ENABLED', false),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Cover re-typeset / flatten (front-page fix)
     |--------------------------------------------------------------------------
     | Some covers draw the subtitle drop-shadow via a Form XObject through a

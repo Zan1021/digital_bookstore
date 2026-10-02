@@ -56,9 +56,15 @@ class TranslateEditionJob implements ShouldQueue
             return;
         }
 
+        // Hand the renderer our lock owner so its own per-edition lock acquisition recognises
+        // this as a REENTRANT call (same key, same owner) and runs inline instead of
+        // deadlocking against this outer lock (unified-rendering-and-testing D1).
+        $renderer->setRenderLockOwner($lock->owner());
+
         try {
             $this->runRender($translator, $renderer, $edition, $book);
         } finally {
+            $renderer->setRenderLockOwner(null);
             optional($lock)->release();
         }
     }

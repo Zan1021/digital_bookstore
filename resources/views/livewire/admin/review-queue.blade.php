@@ -108,6 +108,39 @@
                     </div>
                 @endif
 
+                {{-- Readiness summary (D3): AUTOMATED check status + coverage, distinct from
+                     the human approvals below. Read-only — shows WHY the edition is ready or
+                     blocked. --}}
+                <div class="mb-4 p-3 rounded-lg border {{ ($readinessReport['ready'] ?? false) ? 'border-green-300 bg-green-50' : 'border-amber-300 bg-amber-50' }}">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="font-semibold text-sm">Automated readiness</span>
+                        <span class="text-sm {{ ($readinessReport['ready'] ?? false) ? 'text-green-700' : 'text-amber-700' }}">
+                            {{ ($readinessReport['ready'] ?? false) ? '✅ Ready (all required checks passed)' : '⏳ Not ready' }}
+                        </span>
+                    </div>
+                    @if(!empty($readinessReport['checks']))
+                        <div class="flex flex-wrap gap-1 mb-2">
+                            @foreach($readinessReport['checks'] as $name => $status)
+                                <span class="inline-block px-2 py-0.5 rounded text-xs {{ $status === 'passed' ? 'bg-green-100 text-green-800' : ($status === 'failed' ? 'bg-red-100 text-red-800' : 'bg-gray-100 text-gray-700') }}">
+                                    {{ $name }}: {{ $status }}
+                                </span>
+                            @endforeach
+                        </div>
+                    @endif
+                    @if($readinessReport['coverage'] ?? null)
+                        <p class="text-xs text-gray-600">
+                            Visual coverage: {{ $readinessReport['coverage']['checked'] }}/{{ $readinessReport['coverage']['expected'] }} pages checked
+                            {{ ($readinessReport['coverage']['covered'] ?? false) ? '✓' : '— incomplete' }}
+                        </p>
+                    @endif
+                    @if(!empty($readinessReport['issues']))
+                        <p class="text-xs text-amber-700 mt-1">
+                            Blocking: {{ collect($readinessReport['issues'])->map(fn($i) => $i['code'] ?? '?')->unique()->implode(', ') }}
+                        </p>
+                    @endif
+                    <p class="text-[11px] text-gray-500 mt-1 italic">Automated findings remain visible after approval; a human approval cannot clear a failed automated check.</p>
+                </div>
+
                 {{-- Approval tracks (R10.4) + overlay toggle --}}
                 <div class="flex items-center gap-2 mb-4 flex-wrap">
                     @foreach(['language' => 'Language', 'layout' => 'Layout', 'artwork' => 'Artwork'] as $tk => $lbl)
