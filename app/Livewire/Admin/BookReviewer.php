@@ -217,12 +217,33 @@ class BookReviewer extends Component
     {
         if ($this->editingPageId) {
             $tp = TranslatedPage::find($this->editingPageId);
-            if ($tp) {
+            if ($tp && $this->translation) {
+                // An edit CHANGES content — it must never silently approve the page
+                // (unified-rendering-and-testing A3.2). Mark it edited, UN-approve it, and
+                // re-render through the single production path so the rendered PDF, QA gate,
+                // fingerprint + output hash all update. Readiness then re-evaluates against
+                // the new candidate; any prior sign-off is invalidated by the fingerprint
+                // change (A3.4).
                 $tp->update([
                     'translated_text' => $this->editingText,
-                    'review_status' => 'approved',
+                    'review_status' => 'edited',
                     'reviewer_notes' => 'Manually edited by admin',
                 ]);
+
+                // Un-approve this page + invalidate any completed narration for the edition.
+                $this->translation->setPageApproval($tp->page_number, false);
+                $this->translation->editionNarrations()
+                    ->where('status', 'completed')
+                    ->update(['is_outdated' => true]);
+
+                // Re-render the edition through the production path (re-runs the gate).
+                try {
+                    app(PdfTranslationService::class)
+                        ->createTranslatedPdf($this->book, $this->translation->fresh());
+                    $this->translation = $this->translation->fresh();
+                } catch (\Throwable $e) {
+                    session()->flash('error', 'Re-render after edit failed: ' . $e->getMessage());
+                }
             }
             $this->editingPageId = null;
             $this->editingText = '';

@@ -40,7 +40,11 @@ class ReviewQueueFlowTest extends TestCase
         $this->edition = Translation::create([
             'book_id' => $this->book->id, 'language_code' => 'af', 'language_name' => 'Afrikaans',
             'status' => 'draft', 'render_status' => Translation::STATE_READY_FOR_REVIEW,
-            'qa_report' => ['publishable' => true],
+            // Tested candidate bound to its render identity (unified-rendering-and-testing Req 2).
+            'qa_report' => (new \App\Services\Qa\QaReport())
+                ->pass('structure')->pass('fit')->pass('target_mapping')->toArray(),
+            'render_fingerprint' => str_repeat('a', 16),
+            'output_sha256' => str_repeat('b', 16),
         ]);
         foreach (range(1, 2) as $n) {
             $page = BookPage::create(['book_id' => $this->book->id, 'page_number' => $n, 'extracted_text' => "EN {$n}"]);

@@ -16,6 +16,11 @@ use Illuminate\Support\Facades\Storage;
  * - Per-page quality flags (green/yellow/red)
  * - Issue detection (overflow, missing text, formatting problems)
  * - Review queue for flagged pages
+ *
+ * ADVISORY ONLY (unified-rendering-and-testing Req 6.6 / C2.3): the length-ratio and
+ * English-substring heuristics here are diagnostic hints for reviewers, NOT a readiness
+ * authority. Edition readiness flows exclusively through CandidateReadiness + the
+ * BookTestingService check layers; nothing in this class may clear or grant a gate.
  */
 class QualityReportService
 {

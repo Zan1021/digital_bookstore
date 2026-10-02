@@ -461,10 +461,37 @@ class PdfTranslationService
             }
         }
 
+        // INDEPENDENT EDUCATIONAL CHECK (unified-rendering-and-testing Req 6, D2). When the
+        // edition carries a structured exercise contract, its educational validity is gated
+        // HERE as its own layer — a failure routes to review regardless of a clean layout,
+        // and a layout pass can never clear it. Editions with no exercises are not_applicable
+        // (a no-op), so this is safe for every current book.
+        try {
+            $edu = app(\App\Services\Qa\BookTestingService::class)->educationalCheck($book, $translation);
+            if (is_array($report)) {
+                $report['educational'] = $edu;
+            }
+            if (($edu['applicable'] ?? false) === true) {
+                if (($edu['status'] ?? null) === 'passed') {
+                    $qaReport->pass('educational');
+                } else {
+                    $publishable = false;
+                    $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+                    $qaReport->fail('educational', 'EDUCATIONAL_INVALID', 'educational',
+                        ['issues' => $edu['issues'] ?? []]);
+                    Log::warning('Educational check failed — routing edition to review', [
+                        'book' => $book->id, 'language' => $translation->language_code,
+                    ]);
+                }
+            }
+            // not_applicable => leave 'educational' off the required gate (noneducational book)
+        } catch (\Throwable $e) {
+            Log::warning('Educational check errored (non-blocking)', ['error' => $e->getMessage()]);
+        }
+
         // FINAL QA CROSS-CHECK (spec R8.4, Phase 6.2): compute publish eligibility from the
         // merged QaReport LAST. The machine-readable result is embedded in the persisted
-        // report. If the QaReport says not-publishable but the legacy flag somehow still
-        // reads true, the QaReport WINS — fail closed. (The reverse never relaxes a block.)
+        // report.
         if (is_array($report)) {
             $report['qa'] = $qaReport->toArray();
         }
@@ -532,6 +559,22 @@ class PdfTranslationService
             ]);
         }
 
+        // Hash the EXACT output file on disk (unified-rendering-and-testing Req 2, A1.4).
+        // CandidateReadiness binds every check + approval to this hash so a stale PDF is
+        // detected even when the input fingerprint matches. Null when the file is absent
+        // (e.g. staging promotion failed) — readiness then fails closed (INVALID_GATE_INPUT).
+        $outputSha256 = null;
+        try {
+            $finalAbs = Storage::disk('public')->path($finalRel);
+            if (is_file($finalAbs)) {
+                $outputSha256 = hash_file('sha256', $finalAbs);
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Could not hash rendered output', [
+                'book' => $book->id, 'language' => $translation->language_code, 'error' => $e->getMessage(),
+            ]);
+        }
+
         // Persist qa_report via the ARRAY CAST (spec R8.5, Phase 6.3) — NOT json_encode().
         // Writing json_encode() into an `array`-cast column double-encodes it, which made
         // every is_array($qa) check silently fail and lost all diagnostics. Pass the array;
@@ -542,6 +585,7 @@ class PdfTranslationService
             'qa_report' => is_array($report) ? $report : null,
             'render_fingerprint' => $fingerprint,
             'narration_fingerprint' => $narrationFp,
+            'output_sha256' => $outputSha256,
             'rendered_pdf_path' => $finalRel,
         ])->save();
 

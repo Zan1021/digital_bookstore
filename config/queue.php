@@ -40,7 +40,10 @@ return [
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
-            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 90),
+            // retry_after MUST exceed the longest job timeout or Laravel re-dispatches a job
+            // that is still running (unified-rendering-and-testing A2.6). TranslateEditionJob
+            // has timeout=900s; default 960s keeps retry_after > timeout even without the env.
+            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 960),
             'after_commit' => false,
         ],
 

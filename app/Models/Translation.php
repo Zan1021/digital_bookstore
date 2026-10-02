@@ -72,10 +72,12 @@ class Translation extends Model
         'qa_report',
         'render_fingerprint',
         'narration_fingerprint',
+        'output_sha256',
         'approval_tracks',
         'layout_overrides',
         'translation_contract',
         'item_translations',
+        'exercise_contract',
         'page_approvals',
         'approved_at',
         // Edition-level classification/discovery fields
@@ -92,6 +94,7 @@ class Translation extends Model
         'layout_overrides' => 'array',
         'translation_contract' => 'array',
         'item_translations' => 'array',
+        'exercise_contract' => 'array',
         'page_approvals' => 'array',
         'approved_at' => 'datetime',
     ];
@@ -115,6 +118,66 @@ class Translation extends Model
     public const STATE_PUBLISHABLE = 'PUBLISHABLE';
 
     /**
+     * The SINGLE readiness decision for this edition (unified-rendering-and-testing Req 2,
+     * A1.5). Delegates to App\Services\Qa\CandidateReadiness — the one authority — binding
+     * every required check and approval to the CURRENT render_fingerprint + output_sha256.
+     *
+     * Required checks are derived from the persisted QA report: a required QA check counts
+     * as `passed` only when the report records it passed AND the edition carries a
+     * fingerprint + output hash (so a stale/absent render fails closed). Required approval
+     * tracks come from server policy ($requiredApprovals); each is bound through the same
+     * identities as approveTrack() stores.
+     *
+     * @param list<string> $requiredApprovals approval-track keys policy requires (default none)
+     * @return array{ready: bool, issues: list<array<string,string>>}
+     */
+    public function readiness(array $requiredApprovals = []): array
+    {
+        $fingerprint = (string) ($this->render_fingerprint ?? '');
+        $outputSha256 = (string) ($this->output_sha256 ?? '');
+
+        // Blocking render state is an immediate, explicit fail (keeps the fail-closed
+        // contract even before per-check binding).
+        if (in_array($this->render_status, self::BLOCKING_RENDER_STATES, true)) {
+            return ['ready' => false, 'issues' => [['code' => 'BLOCKING_RENDER_STATE', 'check' => $this->render_status]]];
+        }
+
+        $qa = $this->decodeQaReport();
+        $qaChecks = is_array($qa) && isset($qa['checks']) && is_array($qa['checks']) ? $qa['checks'] : [];
+
+        // Build CandidateReadiness-shaped check records from the QA report, binding the
+        // edition's current identities. A check absent/!passed in the report → not bound →
+        // stale.
+        $required = \App\Services\Qa\QaReport::REQUIRED_CHECKS;
+        $checks = [];
+        foreach ($required as $key) {
+            if (($qaChecks[$key] ?? null) === \App\Services\Qa\QaReport::CHECK_PASSED) {
+                $checks[$key] = [
+                    'status' => \App\Services\Qa\CandidateReadiness::STATUS_PASSED,
+                    'candidate_fingerprint' => $fingerprint,
+                    'output_sha256' => $outputSha256,
+                ];
+            }
+        }
+
+        // Build approval records from the stored tracks, carrying their bound identities.
+        $approvals = [];
+        foreach ($this->approval_tracks ?? [] as $name => $entry) {
+            if (is_array($entry) && ($entry['approved'] ?? false)) {
+                $approvals[$name] = [
+                    'status' => \App\Services\Qa\CandidateReadiness::STATUS_APPROVED,
+                    'candidate_fingerprint' => $entry['fingerprint'] ?? null,
+                    'output_sha256' => $entry['output_sha256'] ?? null,
+                ];
+            }
+        }
+
+        return \App\Services\Qa\CandidateReadiness::evaluate(
+            $required, $checks, $requiredApprovals, $approvals, $fingerprint, $outputSha256
+        );
+    }
+
+    /**
      * Whether this translation may be approved/published. A render flagged for
      * layout review must never proceed silently (overflow-fix brief central rule).
      */
@@ -124,23 +187,15 @@ class Translation extends Model
     }
 
     /**
-     * Independent publish-gate check (§13): the publish API must verify state
-     * itself, not rely on a disabled UI button. Returns true only when layout QA
-     * passed and the edition reached a publish-eligible state.
+     * Independent publish-gate check (§13): the publish API must verify state itself,
+     * not rely on a disabled UI button. Now delegates to the single CandidateReadiness
+     * authority via readiness() (A1.5), so a check or approval bound to a stale
+     * fingerprint/output hash can never pass. Policy-required approval tracks default to
+     * none here; callers enforcing track approval pass them to readiness() directly.
      */
     public function canBePublished(): bool
     {
-        if (in_array($this->render_status, self::BLOCKING_RENDER_STATES, true)) {
-            return false;
-        }
-        // qa_report must exist and report the render as publishable.
-        $qa = $this->decodeQaReport();
-        if (is_array($qa) && array_key_exists('publishable', $qa)) {
-            return (bool) $qa['publishable'];
-        }
-        return in_array($this->render_status, [
-            self::STATE_READY_FOR_REVIEW, self::STATE_APPROVED, self::STATE_PUBLISHABLE,
-        ], true);
+        return $this->readiness()['ready'];
     }
 
     /**
@@ -269,6 +324,7 @@ class Translation extends Model
             'approved' => true,
             'approved_at' => now()->toIso8601String(),
             'fingerprint' => $this->render_fingerprint, // the content this approval covers
+            'output_sha256' => $this->output_sha256,    // the exact file this approval covers (A1.4)
         ];
         $this->approval_tracks = $tracks;
         $this->save();
@@ -281,8 +337,10 @@ class Translation extends Model
         if (!is_array($entry) || !($entry['approved'] ?? false)) {
             return false;
         }
-        // Fingerprint must still match the current render — a content change invalidates it.
-        return ($entry['fingerprint'] ?? null) === $this->render_fingerprint;
+        // Fingerprint AND output hash must still match the current render — any content or
+        // file change invalidates the sign-off (unified-rendering-and-testing Req 2).
+        return ($entry['fingerprint'] ?? null) === $this->render_fingerprint
+            && ($entry['output_sha256'] ?? null) === $this->output_sha256;
     }
 
     /** Explicitly clear a track (e.g. on a reviewer edit). */
@@ -294,12 +352,14 @@ class Translation extends Model
         $this->save();
     }
 
-    /** Clear ALL tracks whose stored fingerprint no longer matches (R10.5 sweep). */
+    /** Clear ALL tracks whose stored fingerprint OR output hash no longer matches (R10.5 sweep). */
     public function invalidateStaleApprovalTracks(): void
     {
         $tracks = $this->approval_tracks ?? [];
         foreach ($tracks as $name => $entry) {
-            if (($entry['fingerprint'] ?? null) !== $this->render_fingerprint) {
+            $staleFingerprint = ($entry['fingerprint'] ?? null) !== $this->render_fingerprint;
+            $staleOutput = ($entry['output_sha256'] ?? null) !== $this->output_sha256;
+            if ($staleFingerprint || $staleOutput) {
                 unset($tracks[$name]);
             }
         }

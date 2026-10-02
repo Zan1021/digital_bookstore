@@ -94,6 +94,10 @@ class RenderVersioningTest extends TestCase
         $t = $this->edition([
             'render_status' => Translation::STATE_READY_FOR_REVIEW,
             'qa_report' => $qa->toArray(),
+            // A publishable candidate must be bound to its render identity + output file
+            // (unified-rendering-and-testing Req 2) — passed checks alone no longer suffice.
+            'render_fingerprint' => str_repeat('a', 16),
+            'output_sha256' => str_repeat('b', 16),
         ]);
         $this->assertTrue($t->fresh()->canBePublished());
     }

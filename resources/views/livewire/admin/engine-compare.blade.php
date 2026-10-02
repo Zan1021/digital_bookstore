@@ -35,7 +35,11 @@
         <div class="border rounded-lg p-4 {{ $v8Status === 'ready' ? 'border-green-300 bg-green-50' : 'border-gray-200' }}">
             <h3 class="font-bold text-lg mb-2">V8 Engine Output</h3>
             @if($v8Status === 'ready')
-                <span class="inline-block px-2 py-1 bg-green-100 text-green-800 text-sm rounded">✅ Ready</span>
+                <span class="inline-block px-2 py-1 bg-green-100 text-green-800 text-sm rounded">✅ Ready (passed checks)</span>
+            @elseif($v8Status === 'testing-pending')
+                <span class="inline-block px-2 py-1 bg-blue-100 text-blue-800 text-sm rounded">🧪 Rendered — testing pending</span>
+            @elseif($v8Status === 'needs-review')
+                <span class="inline-block px-2 py-1 bg-red-100 text-red-800 text-sm rounded">⚠️ Needs review</span>
             @elseif($v8Status)
                 <span class="inline-block px-2 py-1 bg-yellow-100 text-yellow-800 text-sm rounded">{{ $v8Status }}</span>
             @else
@@ -44,15 +48,18 @@
 
             @if($v8Report)
                 <div class="mt-3 text-sm text-gray-600">
-                    <p>Pages: {{ $v8Report['pages_processed'] ?? 0 }} | Spans replaced: {{ $v8Report['spans_replaced'] ?? 0 }}</p>
-                    @if(!empty($v8Report['coverage']))
-                        <p>Coverage: {{ $v8Report['coverage']['total_translated'] ?? 0 }}/{{ $v8Report['coverage']['total_source_spans'] ?? 0 }} spans</p>
+                    @if(!empty($v8Report['checks']))
+                        <p><strong>Checks:</strong>
+                            @foreach($v8Report['checks'] as $name => $status)
+                                <span class="inline-block px-2 py-0.5 mr-1 rounded text-xs {{ $status === 'passed' ? 'bg-green-100 text-green-800' : ($status === 'failed' ? 'bg-red-100 text-red-800' : 'bg-gray-100 text-gray-700') }}">{{ $name }}: {{ $status }}</span>
+                            @endforeach
+                        </p>
                     @endif
-                    @if(!empty($v8Report['errors']))
-                        <p class="text-red-600">Errors: {{ count($v8Report['errors']) }}</p>
+                    @if(!empty($v8Report['issues']))
+                        <p class="text-red-600">Issues: {{ count($v8Report['issues']) }}</p>
                     @endif
-                    @if(!empty($v8Report['overflow_warnings']))
-                        <p class="text-yellow-600">Warnings: {{ count($v8Report['overflow_warnings']) }}</p>
+                    @if(!empty($v8Report['review_pages']))
+                        <p class="text-yellow-600">Pages needing review: {{ implode(', ', $v8Report['review_pages']) }}</p>
                     @endif
                 </div>
             @endif

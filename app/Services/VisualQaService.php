@@ -28,58 +28,142 @@ class VisualQaService
 {
     private const MODEL = 'gpt-4o';
     private const DPI = 120;
+    private const MAX_API_ATTEMPTS = 2;
+
+    // Per-page statuses consumed by the whole-book coverage gate (visual_coverage.py).
+    // Only PASSED clears a page; everything else is unresolved and blocks approval.
+    public const STATUS_PASSED = 'passed';
+    public const STATUS_REVIEW = 'review';
+    public const STATUS_FAILED = 'failed';
+    public const STATUS_NOT_RUN = 'not_run';
 
     /**
      * Run the visual QA gate over the given 1-based page numbers (or all pages when
      * null). Returns:
      *   [
-     *     'ok' => bool,                 // true when no page was flagged
+     *     'ok' => bool,                 // true when every expected page PASSED (fail-closed)
      *     'flagged_pages' => int[],     // 1-based page numbers with defects
-     *     'pages' => [ n => ['ok'=>bool, 'issues'=>[...], 'severity'=>'minor|major'] ],
+     *     'records' => [ ['page_number'=>n, 'status'=>'passed|review|failed|not_run',
+     *                     'candidate_fingerprint'=>..., 'issues'=>[...], 'severity'=>...], ],
+     *     'pages' => [ n => record ],   // same records keyed by page (back-compat)
      *   ]
+     *
+     * Statuses map to the coverage gate (visual_coverage.py): only 'passed' clears a page.
+     * A missing PDF, a page that will not render, an API failure, or malformed JSON each
+     * produce an explicit NON-passing record — never a silent skip or a fail-open pass
+     * (unified-rendering-and-testing Req 4.3).
      *
      * @param int[]|null $pageNumbers
      */
     public function review(Book $book, Translation $translation, ?array $pageNumbers = null): array
     {
+        $fingerprint = (string) ($translation->render_fingerprint ?? '');
         $sourcePath = Storage::disk('public')->path($book->pdf_path);
         $translatedRel = $translation->rendered_pdf_path
             ?? "books/translated/{$book->id}_{$translation->language_code}.pdf";
         $translatedPath = Storage::disk('public')->path($translatedRel);
 
+        $pages = $pageNumbers ?: ($this->allPageNumbers($sourcePath) ?: $this->allPageNumbers($translatedPath));
+
+        // Missing input is NOT a pass. Every expected page is recorded not_run so the
+        // coverage gate reports the whole book unchecked (fail closed).
         if (!is_file($sourcePath) || !is_file($translatedPath)) {
             Log::warning('VisualQa: source or translated PDF missing', [
                 'source' => $sourcePath, 'translated' => $translatedPath,
             ]);
-            return ['ok' => true, 'flagged_pages' => [], 'pages' => [], 'skipped' => true];
+            return $this->allNotRun($pages, $fingerprint, 'MISSING_PDF');
         }
 
-        $pages = $pageNumbers ?: $this->allPageNumbers($sourcePath);
-        $result = ['ok' => true, 'flagged_pages' => [], 'pages' => []];
-
+        $records = [];
         foreach ($pages as $pageNum) {
-            [$srcImg, $transImg] = $this->renderPagePair($sourcePath, $translatedPath, $pageNum);
-            if ($srcImg === null || $transImg === null) {
-                continue; // could not render this page — skip, don't false-flag
-            }
+            $records[$pageNum] = $this->reviewPage($sourcePath, $translatedPath, $pageNum, $fingerprint);
+        }
 
+        $flagged = [];
+        foreach ($records as $pageNum => $rec) {
+            if (($rec['status'] ?? null) !== self::STATUS_PASSED) {
+                $flagged[] = $pageNum;
+            }
+        }
+
+        return [
+            'ok' => $flagged === [],
+            'flagged_pages' => $flagged,
+            'records' => array_values($records),
+            'pages' => $records,
+        ];
+    }
+
+    /** Build an all-pages not_run result (missing input) — never a pass. */
+    private function allNotRun(array $pages, string $fingerprint, string $reason): array
+    {
+        $records = [];
+        foreach ($pages as $pageNum) {
+            $records[$pageNum] = [
+                'page_number' => $pageNum,
+                'status' => self::STATUS_NOT_RUN,
+                'candidate_fingerprint' => $fingerprint,
+                'severity' => 'major',
+                'issues' => [$reason],
+            ];
+        }
+        return [
+            'ok' => false,
+            'flagged_pages' => array_values($pages),
+            'records' => array_values($records),
+            'pages' => $records,
+        ];
+    }
+
+    /**
+     * Review ONE page, returning an explicit status record bound to the candidate
+     * fingerprint. A render failure or an API/JSON failure yields a non-passing status —
+     * NOT a silent skip (Req 4.3). Bounded retries for the transient API path.
+     */
+    private function reviewPage(string $sourcePath, string $translatedPath, int $pageNum, string $fingerprint): array
+    {
+        $base = [
+            'page_number' => $pageNum,
+            'candidate_fingerprint' => $fingerprint,
+            'severity' => 'major',
+        ];
+
+        [$srcImg, $transImg] = $this->renderPagePair($sourcePath, $translatedPath, $pageNum);
+        if ($srcImg === null || $transImg === null) {
+            if ($srcImg) { @unlink($srcImg); }
+            if ($transImg) { @unlink($transImg); }
+            // Could not render — the page is UNVERIFIED, not clean.
+            return $base + ['status' => self::STATUS_NOT_RUN, 'issues' => ['PAGE_RENDER_FAILED']];
+        }
+
+        $verdict = null;
+        $lastError = null;
+        for ($attempt = 1; $attempt <= self::MAX_API_ATTEMPTS && $verdict === null; $attempt++) {
             try {
                 $verdict = $this->askModel($srcImg, $transImg, $pageNum);
             } catch (\Throwable $e) {
-                Log::warning("VisualQa: model call failed for page {$pageNum}", ['error' => $e->getMessage()]);
-                @unlink($srcImg); @unlink($transImg);
-                continue; // API failure must not block publication — leave unflagged
-            }
-            @unlink($srcImg); @unlink($transImg);
-
-            $result['pages'][$pageNum] = $verdict;
-            if (!($verdict['ok'] ?? true)) {
-                $result['ok'] = false;
-                $result['flagged_pages'][] = $pageNum;
+                $lastError = $e->getMessage();
+                Log::warning("VisualQa: model call failed for page {$pageNum} (attempt {$attempt})", ['error' => $lastError]);
             }
         }
+        @unlink($srcImg); @unlink($transImg);
 
-        return $result;
+        if ($verdict === null) {
+            // API exhausted — unresolved, never a pass.
+            return $base + ['status' => self::STATUS_NOT_RUN, 'issues' => ['VISUAL_API_FAILED: ' . (string) $lastError]];
+        }
+
+        // Map the model verdict to a status. A clean verdict passes; any defect is a
+        // review/fail. Uncertainty (malformed) was already normalised in askModel.
+        $status = ($verdict['ok'] ?? false)
+            ? self::STATUS_PASSED
+            : (($verdict['severity'] ?? 'minor') === 'major' ? self::STATUS_FAILED : self::STATUS_REVIEW);
+
+        return $base + [
+            'status' => $status,
+            'severity' => $verdict['severity'] ?? 'minor',
+            'issues' => $verdict['issues'] ?? [],
+        ];
     }
 
     /**

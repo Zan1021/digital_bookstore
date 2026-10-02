@@ -33,7 +33,13 @@ class TranslationApprovalGateTest extends TestCase
             'language_name' => strtoupper($lang),
             'status' => 'draft',
             'render_status' => $renderStatus,
-            'qa_report' => ['publishable' => true],
+            // A genuinely tested candidate: required QA checks passed AND bound to a
+            // render fingerprint + output hash (unified-rendering-and-testing Req 2).
+            // readiness() rejects a passed-but-unbound report as INVALID_GATE_INPUT.
+            'qa_report' => (new \App\Services\Qa\QaReport())
+                ->pass('structure')->pass('fit')->pass('target_mapping')->toArray(),
+            'render_fingerprint' => "fp-{$lang}-" . str_repeat('a', 8),
+            'output_sha256' => "sha-{$lang}-" . str_repeat('b', 8),
         ]);
 
         foreach (range(1, $pages) as $n) {

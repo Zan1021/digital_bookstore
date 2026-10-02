@@ -239,7 +239,12 @@ class TextUnit:
     paragraph_id: Optional[str] = None
     # Quality
     confidence: float = 1.0
-    extraction_source: str = "native"  # "native", "ocr", "inferred"
+    extraction_source: str = "native"  # "native", "ocr", "inferred" — HOW the text was read
+    # source_kind (inventory-layout-2, spec Req 5.2): the VISUAL nature of the lettering,
+    # distinct from semantic_role (what it means) and extraction_source (how it was read).
+    # One of: "native_text" (live PDF text), "outlined_vector" (text converted to paths),
+    # "raster_text" (text baked into image pixels). Defaults derived in inventory_layout.
+    source_kind: str = "native_text"
     
     @property
     def width(self) -> float:
@@ -269,6 +274,10 @@ class Region:
     page_family_id: Optional[str] = None
     confidence: float = 1.0
     translation_policy: str = "translate"
+    # source_kind (inventory-layout-2, spec Req 5.2): visual nature of this region's
+    # lettering — "native_text" | "outlined_vector" | "raster_text" — distinct from
+    # region_type (semantic). Defaults native; refined by the classifier.
+    source_kind: str = "native_text"
     # Container info
     design_container_bbox: Optional[BBox] = None  # May differ from ink bbox
     container_source: str = "glyph_union"  # "table_cell", "clip_path", "page_family", etc.
