@@ -1648,17 +1648,13 @@ def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_di
     if not resolved:
         return None  # nothing resolved → let caller fall back
 
-    # Redact each unit's source bbox: REMOVE text, PRESERVE images + line art.
-    for u in units:
-        rect = pymupdf.Rect(u.bbox)
-        if not (rect.is_empty or rect.is_infinite):
-            page.add_redact_annot(rect, fill=False)
-    try:
-        page.apply_redactions(images=getattr(pymupdf, "PDF_REDACT_IMAGE_NONE", 0),
-                              graphics=getattr(pymupdf, "PDF_REDACT_LINE_ART_NONE", 0),
-                              text=getattr(pymupdf, "PDF_REDACT_TEXT_REMOVE", 0))
-    except TypeError:
-        page.apply_redactions(images=0, graphics=0)
+    # FIT BEFORE ERASE (world-class-render-engine spec Req 3). We do NOT redact the
+    # source text up front. First we resolve each unit's placement box + font + size and
+    # ask the fit solver whether the translation actually fits that box. Only units that
+    # FIT are redacted and redrawn; a unit whose translation cannot fit is left with its
+    # SOURCE intact (never erased-then-overflowed) and recorded as overflow so the page
+    # is flagged for review (fail closed). This replaces the previous "redact all, then
+    # draw" ordering that erased the source even when the replacement did not fit.
 
     # Helper: find the SOURCE span matching a unit (by bbox overlap), to recover the
     # unit's true font size + colour + alignment (the scene TextUnit does not carry these).
@@ -1691,53 +1687,102 @@ def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_di
     overflow = []
     unresolved_ids = list(unresolved)
 
-    # BOUNDED-CONTAINER PLACEMENT (world-class-render-engine spec Req 1/2). Each unit now
-    # carries a resolved layout_container + safe_box + align_h from the scene builder
-    # (_attach_generic_structure). We place each unit's translation INSIDE its own
-    # safe_box, with the DERIVED alignment and a hard clip to that box. Alignment only
-    # positions text within the fixed box — it may NEVER enlarge the box. This replaces
-    # the old per-unit box reconstruction + center-expansion branch that manufactured
-    # bled the bio/copyright across the page.
+    # BOUNDED-CONTAINER PLACEMENT + FIT-BEFORE-ERASE (spec Req 1/2/3). Each unit carries a
+    # resolved layout_container + safe_box + align_h from the scene builder. We place each
+    # unit's translation INSIDE its own box with derived alignment and a hard clip;
+    # alignment only positions, never enlarges the box. Before erasing anything we solve
+    # the fit: a unit that cannot fit is NOT redacted (source stays) and is flagged.
+    from text_fit_solver import solve_text_fit, FitConstraints
+
     placeable = [u for u in units if resolved.get(u.id)]
     placeable.sort(key=lambda u: (round(u.bbox[1]), u.bbox[0]))
+
+    # --- PASS 1: build a placement plan per unit and solve fit (no mutation yet). ---
+    plans = []  # {unit, box, size, color, align, font_file, tr, fits}
     for u in placeable:
         tr = resolved.get(u.id)
         if not tr or not tr.strip():
             continue
         s = _span_for(u)
 
-        # Resolve the placement box: prefer the scene's safe_box, else the layout
-        # container, else (legacy data with neither) the unit's own ink box — but NEVER
-        # an expanded box. If we only have the ink box we clip to it exactly.
+        # Placement box: scene safe_box, else layout container, else the ink box — NEVER
+        # an expanded box. Width is the container (fixed); vertical anchor is the unit's
+        # own top so each field/line renders where the source put it; it extends to the
+        # container bottom so a wrapped paragraph can flow downward.
         box_src = getattr(u, "safe_box", None) or getattr(u, "layout_container", None)
         if box_src is None:
-            x0, y0, x1, y1 = u.bbox
-            box_src = (x0, y0, x1, y1)
+            box_src = tuple(u.bbox)
         bx0, by0, bx1, by1 = box_src
 
-        # Size: prefer the source span's real font size; else derive from ink height.
         size = float(s.get("font_size")) if (s and s.get("font_size")) else max(7.0, min(u.bbox[3] - u.bbox[1], 40.0))
         size = max(6.0, min(size, 60.0))
         color = _hex_to_rgb01(s.get("color") if s else None, (0, 0, 0))
         align = {"left": "left", "center": "center", "right": "right"}.get(
             getattr(u, "align_h", None), "left")
 
-        # The placement box uses the CONTAINER for horizontal extent (fixed width, never
-        # expanded by alignment) but is anchored at THIS unit's own vertical position, so
-        # each line/field renders where the source put it (not stacked at the container
-        # top). It extends down to the container bottom so a wrapped translation can flow
-        # downward, clamped to the page.
         box_bottom = min(page.rect.height - 10, max(by1, u.bbox[3]))
         box_top = u.bbox[1] - 1
         box = pymupdf.Rect(bx0, box_top, bx1, box_bottom) & page.rect
-        clip = box
         font_file = _weight_aware_house_font([
             {"font_size": size, "is_bold": (s.get("is_bold") if s else False),
              "font_name": (s.get("font_name") if s else "")}
         ], fonts_dir)
+
+        # ROLE-AWARE WRAPPING POLICY (spec Req 3.4): a short label/title stays single-line;
+        # a prose paragraph may wrap within its column.
+        role = (getattr(u, "semantic_role", "") or "").lower()
+        single_line = role in ("book_title", "subtitle", "label", "page_number")
+
+        # FIT (spec Req 3.1/3.5): does the translation fit this box at the source size,
+        # shrinking only within the approved ratio and wrapping if allowed? Measurement
+        # uses the SAME font file we draw with, so measure and draw agree.
+        constraints = FitConstraints(
+            container_width=max(1.0, box.width),
+            container_height=max(1.0, box.height),
+            source_font_size=size,
+            min_font_size=6.0,
+            max_shrink_ratio=0.2,
+            allow_multiline=not single_line,
+            single_word=single_line,
+            line_height_ratio=1.3,
+            padding_x=1.0,
+            padding_y=1.0,
+            alignment=align,
+        )
+        try:
+            fit = solve_text_fit(tr, constraints, font_file)
+            fits = bool(fit.fits) and not fit.overflow
+        except Exception:
+            # Solver error: be conservative and render; the post-render structural +
+            # overflow gates still police the result.
+            fits = True
+
+        plans.append({"unit": u, "box": box, "size": size, "color": color,
+                      "align": align, "font_file": font_file, "tr": tr, "fits": fits})
+
+    # --- PASS 2: redact ONLY the units whose translation fits (FIT BEFORE ERASE,
+    # spec Req 3.2). A non-fitting unit keeps its SOURCE text and is flagged. ---
+    for p in plans:
+        if p["fits"]:
+            rect = pymupdf.Rect(p["unit"].bbox)
+            if not (rect.is_empty or rect.is_infinite):
+                page.add_redact_annot(rect, fill=False)
+    try:
+        page.apply_redactions(images=getattr(pymupdf, "PDF_REDACT_IMAGE_NONE", 0),
+                              graphics=getattr(pymupdf, "PDF_REDACT_LINE_ART_NONE", 0),
+                              text=getattr(pymupdf, "PDF_REDACT_TEXT_REMOVE", 0))
+    except TypeError:
+        page.apply_redactions(images=0, graphics=0)
+
+    # --- PASS 3: draw the fitting units; record the rest as overflow (fail closed). ---
+    for p in plans:
+        u = p["unit"]
+        if not p["fits"]:
+            overflow.append(u.id)
+            continue
         used = draw_paragraph_text(
-            page, box, tr, font_file, round(size),
-            color=color, line_height=1.3, align=align, min_size=6.0, clip=clip,
+            page, p["box"], p["tr"], p["font_file"], round(p["size"]),
+            color=p["color"], line_height=1.3, align=p["align"], min_size=6.0, clip=p["box"],
         )
         if used is None:
             overflow.append(u.id)
