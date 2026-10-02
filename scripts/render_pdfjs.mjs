@@ -71,7 +71,28 @@ async function main() {
 
   const buf = canvas.toBuffer('image/png');
   fs.writeFileSync(outPath, buf);
-  console.log(`OK ${canvas.width}x${canvas.height} -> ${outPath}`);
+
+  // BLANK / WASHED-OUT detection (cover-retypeset spec 6.4): sample the rendered pixels
+  // and report the fraction that are near-white and the colour variance. A cover/mask page
+  // that came out blank or washed (the soft-mask trap) is almost entirely near-white with
+  // near-zero variance — the independent signal the PyMuPDF pixmap could not see.
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  let near = 0, total = 0, sum = 0, sumSq = 0;
+  for (let i = 0; i < img.length; i += 4 * 97) { // sparse stride sample
+    const r = img[i], g = img[i + 1], b = img[i + 2];
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    if (r > 245 && g > 245 && b > 245) near++;
+    sum += lum; sumSq += lum * lum; total++;
+  }
+  const mean = total ? sum / total : 255;
+  const variance = total ? Math.max(0, sumSq / total - mean * mean) : 0;
+  const nearWhiteFrac = total ? near / total : 1;
+  console.log(JSON.stringify({
+    ok: true, width: canvas.width, height: canvas.height, out: outPath,
+    near_white_frac: Number(nearWhiteFrac.toFixed(4)),
+    variance: Number(variance.toFixed(2)),
+    blank: nearWhiteFrac > 0.985 && variance < 25,
+  }));
   process.exit(0);
 }
 

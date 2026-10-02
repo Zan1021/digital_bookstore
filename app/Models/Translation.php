@@ -70,6 +70,8 @@ class Translation extends Model
         'rendered_pdf_path',
         'render_status',
         'qa_report',
+        'render_fingerprint',
+        'narration_fingerprint',
         'layout_overrides',
         'translation_contract',
         'item_translations',
@@ -130,13 +132,39 @@ class Translation extends Model
             return false;
         }
         // qa_report must exist and report the render as publishable.
-        $qa = $this->qa_report;
+        $qa = $this->decodeQaReport();
         if (is_array($qa) && array_key_exists('publishable', $qa)) {
             return (bool) $qa['publishable'];
         }
         return in_array($this->render_status, [
             self::STATE_READY_FOR_REVIEW, self::STATE_APPROVED, self::STATE_PUBLISHABLE,
         ], true);
+    }
+
+    /**
+     * Robustly decode qa_report regardless of how it was persisted (spec R8.5, Phase 6.3).
+     *
+     * qa_report is an `array` cast. The correct way to write it is `['qa_report' => $array]`
+     * (Laravel JSON-encodes once). A legacy bug wrote `json_encode($array)` INTO the cast
+     * field, so Laravel encoded it AGAIN — the cast then returns a STRING (the inner JSON),
+     * and every `is_array($qa)` check silently failed, losing all diagnostics. This decoder
+     * transparently unwraps either shape so old editions keep their QA data.
+     *
+     * @return array|null
+     */
+    public function decodeQaReport(): ?array
+    {
+        $raw = $this->getAttribute('qa_report');
+        // Already an array (correct new path).
+        if (is_array($raw)) {
+            return $raw;
+        }
+        // Legacy double-encoded: the cast handed back a JSON string. Decode once more.
+        if (is_string($raw) && $raw !== '') {
+            $decoded = json_decode($raw, true);
+            return is_array($decoded) ? $decoded : null;
+        }
+        return null;
     }
 
     // ---- Gated review + narration (gated-translation-narration-flow) ----

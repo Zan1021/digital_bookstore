@@ -65,18 +65,25 @@ closed · I4 derived not imposed · I5 immutable source.
   font, fit changes safely, container boundaries fixed. (R11 matrix)
 
 ## Phase 4 — Illustration inventory + region ownership + per-ID translation (R5)
-- [ ] 4.1 Source-only content-class classifier: native / outlined-vector / raster-baked, by
+- [x] 4.1 Source-only content-class classifier: native / outlined-vector / raster-baked, by
   comparing detected text to source PDF objects + OCR geometry. (R5.1, I5)
-- [ ] 4.2 Replace whole-page `contractOwnedPages()` with region-level ownership; DELETE the
+  — `scripts/illustration_classify.py` (3-class, text-layer→vector-paths→raster); wired into
+  `tagRegions` (content_class + classified_by). Avoids the hidden-OCR trap. (deferred item 1 ✅)
+- [x] 4.2 Replace whole-page `contractOwnedPages()` with region-level ownership; DELETE the
   no-op `filterNativeText()`; implement real overlap/object-ownership. (R5.2, R5.3)
-- [ ] 4.3 Per-page coverage result (scanned/no-candidate/deferred/unresolved); cost
+- [x] 4.3 Per-page coverage result (scanned/no-candidate/deferred/unresolved); cost
   heuristic triages only, never decides "no artwork text." (R5.4, R5.5)
-- [ ] 4.4 Emit the unified illustration manifest record with stable region IDs from source
+  — `process()` now records coverage for EVERY page (pdfPageCount); non-candidate distinct from
+  scanned-clean; heuristic is triage-only. (deferred item 2 ✅)
+- [x] 4.4 Emit the unified illustration manifest record with stable region IDs from source
   provenance; include artwork units in the translation request up front. (R5.6)
-- [ ] 4.5 `attachTargetsById()` replaces whole-page/line-index fallbacks; missing target ⇒
+  — `inventoryArtworkRegions()` + manifest-translation merge into item_translations by stable
+  artwork id, consumed by attachTargetsById at repair time. (deferred item 3 ✅)
+- [x] 4.5 `attachTargetsById()` replaces whole-page/line-index fallbacks; missing target ⇒
   issue + block. (R5.6, R8)
-- [ ] 4.6 Verify: native paragraph + raster sign (both translated, paragraph not
+- [x] 4.6 Verify: native paragraph + raster sign (both translated, paragraph not
   rasterized); dense page + small label (label inventoried); two signs distinct targets. (R11 matrix)
+  — IllustrationDeferredItemsTest (5) + IllustrationRegionOwnershipTest (4) + classifier suite (5).
 
 ## Phase 5 — Artwork-preserving repair + coordinate transforms (R6, R7)
 - [x] 5.1 Native text removal preserves images/line art (no white rectangle). (R6.1)
@@ -103,20 +110,37 @@ closed · I4 derived not imposed · I5 immutable source.
   p7 (xref 41, actual 1713x2028) preserving native text, not flattened.
 
 ## Phase 6 — Structured fail-closed QA + versioned staged commits (R8, R9)
-- [ ] 6.1 Machine-readable QA result (`status`, `issues[]` with code/stage, `checks` map,
+- [x] 6.1 Machine-readable QA result (`status`, `issues[]` with code/stage, `checks` map,
   `requires_artwork_approval`); distinguish not-run from passed from failed. (R8.3)
-- [ ] 6.2 Monotonic merge across all passes; publish eligibility computed last; missing/
+  — `app/Services/Qa/QaReport.php`; required checks structure/fit/target_mapping. (12 unit tests)
+- [x] 6.2 Monotonic merge across all passes; publish eligibility computed last; missing/
   invalid QA ⇒ not publishable. (R8.4)
-- [ ] 6.3 Persist via Laravel array-cast (`['qa_report'=>$report]`) + decoder for existing
+  — QaReport::merge/setCheck never un-fail; empty report = not publishable; createTranslatedPdf
+  now feeds every gate (engine/overflow/unresolved-spans/illustration/visual/pdfjs) into ONE
+  QaReport and cross-checks it last (fail closed if it disagrees with the legacy flag).
+- [x] 6.3 Persist via Laravel array-cast (`['qa_report'=>$report]`) + decoder for existing
   double-encoded reports. (R8.5)
-- [ ] 6.4 Independent PDF.js visual check on final output for covers/masks. (R8.6)
-- [ ] 6.5 Render to UNIQUE staging path; keep prior public edition until publishable;
+  — fixed BOTH json_encode persistence sites; Translation::decodeQaReport() recovers legacy
+  double-encoded rows; canBePublished routed through it. (4 feature tests, no diagnostic loss)
+- [x] 6.4 Independent PDF.js visual check on final output for covers/masks. (R8.6)
+  — render_pdfjs.mjs extended with blank/washed detection (near-white frac + variance);
+  pdfJsVisualCheck() runs on cover + flagged pages, feeds QaReport. Config-gated; not_run when
+  node unavailable (never a false pass). (4 node tests: blank flagged, content cleared)
+- [x] 6.5 Render to UNIQUE staging path; keep prior public edition until publishable;
   coherent PDF+DB commit with recovery; persist final actual path before resolve. (R9.1, R9.5)
-- [ ] 6.6 Render fingerprint (source/manifest ver, target IDs/values, font hashes, fit
+  — renders to books/staging/<id>_<lang>_<rand>.pdf; promotes staging→public only on success;
+  promotion failure keeps prior edition + routes to review; final path persisted before resolve.
+- [x] 6.6 Render fingerprint (source/manifest ver, target IDs/values, font hashes, fit
   policies, repair revisions, engine ver); tie approvals to it; invalidate on input change;
   text change invalidates narration; idempotent + per-edition locking. (R9.2–R9.4)
-- [ ] 6.7 Verify: detector/API/repair/verify failure keeps prior edition + blocks; missing
+  — `app/Services/Qa/RenderFingerprint.php` (deterministic, order-independent); migration adds
+  render_fingerprint + narration_fingerprint; fp change clears page_approvals; narration sub-hash
+  independent of layout; TranslateEditionJob wrapped in Cache::lock per edition.
+- [x] 6.7 Verify: detector/API/repair/verify failure keeps prior edition + blocks; missing
   target/overflow blocks; rerun identical inputs ⇒ no drift. (R11 matrix)
+  — RenderVersioningTest (5) + QaReportTest (12) + QaReportPersistenceTest (4). NOTE: full LIVE
+  engine round-trip (real translate+render with illustration enabled) is the remaining
+  integration proof — deterministic units all green; see completion note.
 
 ## Phase 7 — Admin review experience (R10)
 - [ ] 7.1 Extend the `overlay-data` engine command to emit the new boxes (source ink /
@@ -137,6 +161,29 @@ closed · I4 derived not imposed · I5 immutable source.
 - [ ] 8.3 Retain before/after PDF-renderer + PDF.js evidence for covers, masks, p2. (R11.4)
 - [ ] 8.4 Completion report: changed files, behavior, pass/fail, visual samples, remaining
   unsupported cases, new deps — no claim of universal automatic fidelity. (R11.5)
+
+---
+
+## ⚠️ DEFERRED LIVE VERIFICATION — DO THIS AFTER ALL CODING, BEFORE SHIPPING
+Captain Zan's directive (2026-10-02): finish ALL coding across the phases first, THEN run
+the live, API-burning end-to-end tests as ONE deliberate pass. These require real OpenAI
+calls and a real book, so they are intentionally NOT run per-phase. This list MUST NOT be
+dropped — it is the integration proof the deterministic unit/feature tests cannot give.
+
+- [ ] LV1 — Full live engine round-trip: real `translateWithManifest` + `createTranslatedPdf`
+  on a real book (e.g. My House #10000, af) with `bookstore.illustration_text.enabled=true`,
+  exercising the WHOLE Phase-6 chain end to end: staged render → staging→public promotion →
+  QaReport monotonic merge → render fingerprint → approval invalidation. Confirm a failed
+  render keeps the prior public edition. (Phase 6.7 remaining integration proof.)
+- [ ] LV2 — Up-front artwork inventory (Phase-4 item 3) LIVE: with illustration enabled,
+  confirm artwork region ids land in `item_translations` from the translation pass and are
+  consumed by `attachTargetsById` at repair time (end to end, not just unit-wired).
+- [ ] LV3 — Illustration surgical repair LIVE on a book that genuinely has baked-in artwork
+  text (GPT-4o detect → classify → surgical repair → overlay), verifying no page flatten,
+  native text preserved, reused-image isolation on real data.
+- [ ] LV4 — PDF.js visual check (6.4) LIVE on real covers/masks with `pdfjs_check.enabled`.
+- [ ] LV5 — Rerun-identical-inputs drift check LIVE (R9.4): same inputs twice ⇒ identical
+  fingerprint, no duplicate units, no compounded inpaint.
 
 ---
 

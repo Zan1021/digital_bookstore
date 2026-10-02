@@ -43,6 +43,90 @@ class IllustrationTextService
     }
 
     /**
+     * ITEM 3 (spec Req 5.6) — INVENTORY artwork text regions from the SOURCE and emit them
+     * as contract-ready items UP FRONT, so artwork units are translated in the same pass as
+     * everything else (not discovered after translation). NO repair happens here.
+     *
+     * Returns a list of items: ['id','source_text','semantic_role','content_class',
+     * 'page_number','bbox_px','ppi']. The caller (translation path) translates the
+     * source_text and stores the result in item_translations[id]; attachTargetsById() then
+     * consumes item_translations[id] at repair time — closing the loop.
+     *
+     * Book-agnostic, source-only (I5). Config-gated OFF by default (same flag as process()).
+     */
+    public function inventoryArtworkRegions(Book $book, Translation $translation): array
+    {
+        if (!config('bookstore.illustration_text.enabled')) {
+            return [];
+        }
+        $ppi = (int) config('bookstore.illustration_text.ppi', 300);
+        $model = (string) config('bookstore.illustration_text.model', 'gpt-4o');
+
+        // Inventory from the SOURCE PDF (I5), not the translated edition.
+        $sourceRel = $book->pdf_path ?? $book->source_pdf_path ?? null;
+        $pdfPath = $sourceRel ? Storage::disk('public')->path($sourceRel) : null;
+        if (!$pdfPath || !is_file($pdfPath)) {
+            Log::info('IllustrationText: inventory skipped, no source pdf', ['book' => $book->id]);
+            return [];
+        }
+
+        $candidates = $this->candidatePages($pdfPath);
+        if (empty($candidates)) {
+            return [];
+        }
+        $ownedRegionsByPage = $this->contractOwnedRegions($book);
+
+        $items = [];
+        foreach ($candidates as $cand) {
+            $pageIndex = (int) $cand['page'];
+            $pageNumber = $pageIndex + 1;
+            $ownedBoxes = $ownedRegionsByPage[$pageNumber] ?? [];
+
+            // Prefer native text-layer geometry; fall back to vision only for baked pixels.
+            $regions = $this->nativeTextRegions($pdfPath, $pageIndex, $ppi, $translation);
+            $usedNative = !empty($regions);
+            if (!$usedNative) {
+                try {
+                    $regions = $this->detect($pdfPath, $pageIndex, $ppi, $model);
+                } catch (\Throwable $e) {
+                    Log::warning('IllustrationText: inventory detect failed (non-fatal)', [
+                        'page' => $pageIndex, 'error' => $e->getMessage(),
+                    ]);
+                    continue;
+                }
+            }
+            if (empty($regions)) {
+                continue;
+            }
+
+            // Region-level ownership: skip regions the contract renderer already owns.
+            $regions = $this->filterContractOwnedRegions($regions, $ownedBoxes, $ppi);
+            if (empty($regions)) {
+                continue;
+            }
+            // Stable IDs + source-based content class.
+            $regions = $this->tagRegions($regions, $pageNumber, $usedNative, $pdfPath, $pageIndex, $ppi);
+
+            foreach ($regions as $r) {
+                $src = trim((string) ($r['source_text'] ?? ''));
+                if ($src === '') {
+                    continue;
+                }
+                $items[] = [
+                    'id' => $r['id'],
+                    'source_text' => $src,
+                    'semantic_role' => $r['semantic_role'] ?? 'artwork_label',
+                    'content_class' => $r['content_class'] ?? 'raster_text',
+                    'page_number' => $pageNumber,
+                    'bbox_px' => $r['bbox_px'] ?? null,
+                    'ppi' => $ppi,
+                ];
+            }
+        }
+        return $items;
+    }
+
+    /**
      * Process every candidate page of an edition. Returns:
      *   ['modified_pages'=>int[], 'review_pages'=>int[], 'skipped'=>[], 'ok'=>bool]
      */
@@ -124,7 +208,7 @@ class IllustrationTextService
             // STABLE REGION IDS + CONTENT CLASS (spec Req 5.1/5.6): tag each region with a
             // source-derived stable id and its content class so targets attach by ID and
             // the manifest record is unambiguous.
-            $regions = $this->tagRegions($regions, $pageNumber, $usedNative);
+            $regions = $this->tagRegions($regions, $pageNumber, $usedNative, $pdfPath, $pageIndex, $ppi);
 
             if (!$usedNative) {
                 // Only the vision path needs colour measurement + uniformity gating; the
@@ -166,11 +250,16 @@ class IllustrationTextService
             }
         }
 
-        // Record coverage for candidate pages we never reached, and for non-candidate
-        // pages (triaged out) so EVERY page has a recorded result (spec Req 5.4).
-        foreach ($candidatePageNumbers as $pn) {
+        // EVERY page gets a recorded coverage result (spec Req 5.4/5.5). The candidate
+        // heuristic only TRIAGES which pages are inspected first — it never DECIDES a page
+        // has no artwork text. A page the heuristic did not flag is recorded 'no-candidate'
+        // (triaged out, not inspected), which is explicitly DISTINCT from 'scanned-clean'
+        // (inspected, nothing baked-in). No page is silently dropped.
+        $totalPages = $this->pdfPageCount($pdfPath);
+        for ($pn = 1; $pn <= $totalPages; $pn++) {
             $result['coverage'][$pn] = $result['coverage'][$pn] ?? 'no-candidate';
         }
+        ksort($result['coverage']);
 
         // Verify modified pages with the existing AI compare gate.
         if ((bool) config('bookstore.illustration_text.verify', true) && $result['modified_pages']) {
@@ -283,16 +372,70 @@ class IllustrationTextService
      * text layer (selectable text over artwork), else 'raster_text' (baked-in pixels).
      * Book-agnostic — derived from how the region was detected, not any book constant.
      */
-    private function tagRegions(array $regions, int $pageNumber, bool $usedNative): array
+    private function tagRegions(array $regions, int $pageNumber, bool $usedNative,
+                                ?string $pdfPath = null, ?int $pageIndex = null, int $ppi = 300): array
     {
+        // SOURCE-BASED CONTENT CLASS (spec R5.1): classify each region as native /
+        // outlined_vector / raster_text from the SOURCE PDF geometry (I5), not the
+        // detection route alone. The old binary native/raster_text (derived only from
+        // whether we used the text layer) could not see outlined/vector lettering and
+        // risked the hidden-OCR trap. We overlay the richer class when available.
+        $classified = [];
+        if ($pdfPath !== null && $pageIndex !== null && !empty($regions)) {
+            $classified = $this->classifyContentClass($pdfPath, $pageIndex, $ppi, $regions);
+        }
+
         $out = [];
         foreach (array_values($regions) as $i => $r) {
             $r['id'] = $r['id'] ?? sprintf('p%02d_art%02d', $pageNumber, $i + 1);
-            $r['source_kind'] = $usedNative ? 'native' : 'raster_text';
+            // content_class from the source classifier when present; else fall back to the
+            // detection-derived binary (native if we used the PDF text layer, else raster).
+            $cc = $classified[$i]['content_class'] ?? ($usedNative ? 'native' : 'raster_text');
+            $r['content_class'] = $cc;
+            if (isset($classified[$i]['classified_by'])) {
+                $r['classified_by'] = $classified[$i]['classified_by'];
+            }
+            // source_kind kept for backward compatibility with existing consumers; derive it
+            // from the richer class (native stays native; outlined_vector + raster_text are
+            // both non-native pixel/vector art).
+            $r['source_kind'] = $cc === 'native' ? 'native' : 'raster_text';
             $r['semantic_role'] = $r['semantic_role'] ?? 'artwork_label';
             $out[] = $r;
         }
         return $out;
+    }
+
+    /**
+     * Source-based 3-class classifier (scripts/illustration_classify.py). Returns the
+     * regions array enriched with content_class/classified_by, index-aligned with input.
+     * Non-fatal: returns [] on any failure so tagRegions falls back to the binary class.
+     */
+    private function classifyContentClass(string $pdfPath, int $pageIndex, int $ppi, array $regions): array
+    {
+        try {
+            $tmp = storage_path('app/temp/illus_classify_' . uniqid() . '.json');
+            if (!is_dir(dirname($tmp))) {
+                mkdir(dirname($tmp), 0755, true);
+            }
+            file_put_contents($tmp, json_encode(['regions' => $regions], JSON_UNESCAPED_UNICODE));
+            $proc = new Process(['python', base_path('scripts/illustration_classify.py'),
+                '--input', $pdfPath, '--page', (string) $pageIndex, '--ppi', (string) $ppi,
+                '--regions', $tmp]);
+            $proc->setTimeout(60);
+            $proc->run();
+            @unlink($tmp);
+            if (!$proc->isSuccessful()) {
+                Log::warning('IllustrationText: classify failed (non-fatal)', [
+                    'page' => $pageIndex, 'stderr' => $proc->getErrorOutput(),
+                ]);
+                return [];
+            }
+            $data = json_decode(trim($proc->getOutput()), true) ?: [];
+            return $data['regions'] ?? [];
+        } catch (\Throwable $e) {
+            Log::warning('IllustrationText: classify exception (non-fatal)', ['error' => $e->getMessage()]);
+            return [];
+        }
     }
 
     /**
@@ -419,6 +562,19 @@ PY;
             return [];
         }
         return json_decode(trim($proc->getOutput()), true) ?: [];
+    }
+
+    /** Total page count of the PDF (for the full-coverage ledger, spec Req 5.4). */
+    private function pdfPageCount(string $pdfPath): int
+    {
+        $proc = new Process(['python', '-c',
+            'import pymupdf,sys; print(pymupdf.open(sys.argv[1]).page_count)', $pdfPath]);
+        $proc->setTimeout(30);
+        $proc->run();
+        if (!$proc->isSuccessful()) {
+            return 0;
+        }
+        return (int) trim($proc->getOutput());
     }
 
     /**

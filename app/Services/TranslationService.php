@@ -945,6 +945,47 @@ PROMPT;
             );
         }
 
+        // ITEM 3 (spec Req 5.6): emit ARTWORK (baked-in / outlined-vector) regions into the
+        // translation UP FRONT. Inventory them from the SOURCE, translate their source text
+        // in the SAME structured manner, and merge into item_translations keyed by the
+        // artwork region's stable id (pNN_artNN). attachTargetsById() consumes these at
+        // repair time. Config-gated OFF by default; non-fatal.
+        try {
+            if (config('bookstore.illustration_text.enabled')) {
+                $artworkItems = app(\App\Services\IllustrationTextService::class)
+                    ->inventoryArtworkRegions($book, $translation);
+                if (!empty($artworkItems)) {
+                    $byPage = [];
+                    foreach ($artworkItems as $ai) {
+                        $byPage[$ai['page_number']][] = $ai;
+                    }
+                    foreach ($byPage as $pn => $aitems) {
+                        $toTranslate = array_map(fn ($it) => [
+                            'id' => $it['id'], 'text' => $it['source_text'],
+                            'role' => $it['semantic_role'], 'policy' => 'translate',
+                        ], $aitems);
+                        $translated = $this->translateManifestPage(
+                            $toTranslate, 'illustration', $languageCode, $languageName, (int) $pn
+                        );
+                        foreach ($translated as $ti) {
+                            $tid = $ti['id'] ?? null;
+                            if ($tid !== null && isset($ti['translation'])
+                                && trim((string) $ti['translation']) !== '') {
+                                $itemTranslations[$tid] = (string) $ti['translation'];
+                            }
+                        }
+                    }
+                    Log::info('IllustrationText: inventoried artwork items up front', [
+                        'book' => $book->id, 'count' => count($artworkItems),
+                    ]);
+                }
+            }
+        } catch (\Throwable $e) {
+            Log::warning('IllustrationText: up-front artwork inventory failed (non-fatal)', [
+                'error' => $e->getMessage(),
+            ]);
+        }
+
         // FIX B: persist the per-ID translations on the edition so the render resolver
         // consumes them directly (priority over the flat per-page text split).
         $translation->forceFill([

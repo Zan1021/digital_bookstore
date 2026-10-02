@@ -143,13 +143,24 @@ class PdfTranslationService
         }
         file_put_contents($translationsPath, json_encode($translationsData, JSON_UNESCAPED_UNICODE));
 
-        // Define output path
+        // STAGED RENDER (spec R9.1, Phase 6.5): render to a UNIQUE staging path and keep
+        // the existing public edition untouched until the new result is complete and
+        // publishable. The engine + all post-processing (cover flatten, illustration,
+        // QA) operate on the staging file; only on success do we PROMOTE staging -> public.
+        // A failed render therefore never overwrites a good published edition.
         $outputFilename = "books/translated/{$book->id}_{$translation->language_code}.pdf";
-        $outputPath = Storage::disk('public')->path($outputFilename);
-        $outputDir = dirname($outputPath);
-        if (!is_dir($outputDir)) {
-            mkdir($outputDir, 0755, true);
+        $stagingFilename = "books/staging/{$book->id}_{$translation->language_code}_"
+            . substr(bin2hex(random_bytes(6)), 0, 10) . ".pdf";
+        $publicPath = Storage::disk('public')->path($outputFilename);
+        $outputPath = Storage::disk('public')->path($stagingFilename); // engine writes HERE
+        foreach ([dirname($publicPath), dirname($outputPath)] as $dir) {
+            if (!is_dir($dir)) {
+                mkdir($dir, 0755, true);
+            }
         }
+        // The illustration post-pass reads $translation->rendered_pdf_path to locate the
+        // file to mutate — point it at STAGING for the duration of post-processing.
+        $translation->forceFill(['rendered_pdf_path' => $stagingFilename])->save();
 
         // Run the rendering engine (full render — no --only-items, so every page that
         // owns contract items is rendered from the contract).
@@ -296,6 +307,25 @@ class PdfTranslationService
         $publishable = $report['publishable'] ?? true;
         $renderStatus = $report['render_status'] ?? ($publishable ? 'READY_FOR_REVIEW' : 'NEEDS_LAYOUT_REVIEW');
 
+        // STRUCTURED QA (spec R8.3/R8.4, Phase 6.1/6.2): build a machine-readable QaReport
+        // that each pass contributes to MONOTONICALLY. The legacy $publishable flag is kept
+        // (strengthened, not replaced); the QaReport is the authoritative, auditable merge
+        // and is cross-checked at the end — any pass failing it forces review (fail closed).
+        $qaReport = new \App\Services\Qa\QaReport();
+        // Seed the three required checks from the engine's own structural gate.
+        if ($report['publishable'] ?? false) {
+            $qaReport->pass('structure')->pass('fit')->pass('target_mapping');
+        } else {
+            $qaReport->fail('structure', 'ENGINE_GATE_FAILED', 'render',
+                ['detail' => $report['render_status'] ?? 'not_publishable']);
+            // fit/target_mapping remain not_run unless the engine said otherwise
+            $qaReport->pass('fit')->pass('target_mapping');
+        }
+        if (!empty($report['overflow_warnings'])) {
+            $qaReport->fail('fit', 'TEXT_OVERFLOW', 'fit',
+                ['count' => count($report['overflow_warnings'])]);
+        }
+
         // FIX C: even if the engine's own gate passed, unresolved spans (rendered
         // blank to avoid an English leak) mean the edition is incomplete and must be
         // reviewed before it can be published. Fail closed.
@@ -303,6 +333,8 @@ class PdfTranslationService
             $publishable = false;
             $renderStatus = 'NEEDS_LAYOUT_REVIEW';
             $unresolvedIds = $this->getUnresolvedSpanIds();
+            $qaReport->fail('target_mapping', 'UNRESOLVED_TRANSLATION_SPANS', 'contract',
+                ['count' => count($unresolvedIds)]);
             Log::warning("Edition has unresolved translation spans rendered blank "
                 . "(fix C, English-leak guard) — routing to review", [
                     'book' => $book->id,
@@ -323,6 +355,9 @@ class PdfTranslationService
         if (!empty($illustrationReview)) {
             $publishable = false;
             $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+            $qaReport->fail('artwork', 'ILLUSTRATION_TEXT_REVIEW', 'illustration',
+                ['pages' => array_values($illustrationReview)])
+                ->requireArtworkApproval();
             Log::warning("Illustration-text pages flagged for review — routing to review", [
                 'book' => $book->id,
                 'language' => $translation->language_code,
@@ -357,9 +392,12 @@ class PdfTranslationService
                 if (is_array($report)) {
                     $report['visual_qa'] = $qa;
                 }
+                $qaReport->pass('visual');
                 if (!($qa['ok'] ?? true) && !empty($qa['flagged_pages'])) {
                     $publishable = false;
                     $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+                    $qaReport->fail('visual', 'VISUAL_QA_FLAGGED', 'visual',
+                        ['flagged_pages' => array_values($qa['flagged_pages'])]);
                     Log::warning('Visual QA flagged pages — routing edition to review', [
                         'book' => $book->id,
                         'language' => $translation->language_code,
@@ -378,9 +416,119 @@ class PdfTranslationService
             }
         }
 
+        // INDEPENDENT PDF.js VISUAL CHECK (spec R8.6, Phase 6.4). PyMuPDF flattens soft
+        // masks and can report a cover "clean" while the browser (PDF.js) shows a washed/
+        // blank box. Render the cover (and any flagged pages) through the SAME engine the
+        // reader uses and flag a blank/washed result. Config-gated; if node/deps are
+        // unavailable the check is recorded not_run (never a false pass).
+        if (config('bookstore.pdfjs_check.enabled', false)) {
+            try {
+                $checkPages = array_values(array_unique(array_merge(
+                    [0], // the cover is always checked
+                    array_map(fn ($p) => (int) $p - 1, $illustrationReview) // mask pages (0-based)
+                )));
+                $pdfjs = $this->pdfJsVisualCheck($outputPath, $checkPages, $book, $translation);
+                if (is_array($report)) {
+                    $report['pdfjs_check'] = $pdfjs;
+                }
+                if ($pdfjs['ran'] ?? false) {
+                    if (!empty($pdfjs['blank_pages'])) {
+                        $publishable = false;
+                        $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+                        $qaReport->fail('visual_pdfjs', 'PDFJS_BLANK_PAGE', 'visual_pdfjs',
+                            ['pages' => $pdfjs['blank_pages']]);
+                    } else {
+                        $qaReport->pass('visual_pdfjs');
+                    }
+                }
+                // not ran => leave the check not_run on the QaReport (fail-closed aware)
+            } catch (\Throwable $e) {
+                Log::warning('PDF.js visual check errored (non-blocking)', ['error' => $e->getMessage()]);
+            }
+        }
+
+        // FINAL QA CROSS-CHECK (spec R8.4, Phase 6.2): compute publish eligibility from the
+        // merged QaReport LAST. The machine-readable result is embedded in the persisted
+        // report. If the QaReport says not-publishable but the legacy flag somehow still
+        // reads true, the QaReport WINS — fail closed. (The reverse never relaxes a block.)
+        if (is_array($report)) {
+            $report['qa'] = $qaReport->toArray();
+        }
+        if (!$qaReport->isPublishable() && $publishable) {
+            $publishable = false;
+            $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+            if (is_array($report)) {
+                $report['publishable'] = false;
+                $report['render_status'] = 'NEEDS_LAYOUT_REVIEW';
+            }
+            Log::warning('QaReport cross-check forced review (structured gate)', [
+                'book' => $book->id, 'language' => $translation->language_code,
+                'checks' => $qaReport->checks(),
+            ]);
+        }
+
+        // PROMOTE staging -> public (spec R9.5, Phase 6.5). The render + all post-passes
+        // succeeded and wrote to the staging file. Copy it over the public edition
+        // coherently, THEN persist the final actual path before anything resolves it. On a
+        // copy failure we keep the prior public edition and route to review (fail closed).
+        $finalRel = $outputFilename;
+        try {
+            if (is_file($outputPath)) {
+                if (!@copy($outputPath, $publicPath)) {
+                    throw new \RuntimeException("staging->public copy failed");
+                }
+                @unlink($outputPath); // remove staging artifact
+            } else {
+                throw new \RuntimeException("staging file missing after render: {$stagingFilename}");
+            }
+        } catch (\Throwable $e) {
+            Log::error('Staged promotion failed — keeping prior public edition', [
+                'book' => $book->id, 'language' => $translation->language_code,
+                'error' => $e->getMessage(),
+            ]);
+            $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+            if (is_array($report)) {
+                $report['publishable'] = false;
+                $report['render_status'] = 'NEEDS_LAYOUT_REVIEW';
+                $report['flags']['STAGING_PROMOTION_FAILED'] = $e->getMessage();
+            }
+            // leave the staging file for diagnostics; final path stays the public edition
+        }
+
+        // Compute the render fingerprint (spec R9.2, Phase 6.6) from the inputs that
+        // determine this edition's output. Approvals are tied to it; a change invalidates
+        // them. The TARGET-TEXT sub-hash separately gates narration (R9.3).
+        $fingerprint = \App\Services\Qa\RenderFingerprint::compute([
+            'source_version' => $book->updated_at?->timestamp,
+            'manifest_version' => $book->manifest_path,
+            'engine_version' => (string) config('bookstore.engine_version', 'v8'),
+            'item_translations' => $translation->item_translations ?? [],
+            'typography_policy' => $typographyPolicy ?? [],
+        ]);
+        $narrationFp = \App\Services\Qa\RenderFingerprint::hashTextComponent(
+            $translation->item_translations ?? []
+        );
+        // Invalidate stored approvals if the fingerprint changed (R9.3): a new render of
+        // different content must not inherit the prior edition's layout/artwork approvals.
+        $priorFingerprint = $translation->getAttribute('render_fingerprint');
+        if ($priorFingerprint !== null && $priorFingerprint !== $fingerprint) {
+            $translation->forceFill(['page_approvals' => []]);
+            Log::info('Render fingerprint changed — invalidated prior approvals', [
+                'book' => $book->id, 'language' => $translation->language_code,
+            ]);
+        }
+
+        // Persist qa_report via the ARRAY CAST (spec R8.5, Phase 6.3) — NOT json_encode().
+        // Writing json_encode() into an `array`-cast column double-encodes it, which made
+        // every is_array($qa) check silently fail and lost all diagnostics. Pass the array;
+        // Laravel encodes once. Translation::decodeQaReport() still reads legacy rows.
+        // The final actual path is persisted here, before any caller resolves it (R9.5).
         $translation->forceFill([
             'render_status' => $renderStatus,
-            'qa_report' => $report ? json_encode($report, JSON_UNESCAPED_UNICODE) : null,
+            'qa_report' => is_array($report) ? $report : null,
+            'render_fingerprint' => $fingerprint,
+            'narration_fingerprint' => $narrationFp,
+            'rendered_pdf_path' => $finalRel,
         ])->save();
 
         // Cleanup temp file
@@ -389,7 +537,65 @@ class PdfTranslationService
             @unlink($policyPath);
         }
 
-        return $outputFilename;
+        return $finalRel;
+    }
+
+    /**
+     * Independent PDF.js visual check (spec R8.6, Phase 6.4). Renders each requested page
+     * through scripts/render_pdfjs.mjs (the SAME engine the reader uses) and flags any page
+     * that comes out blank/washed — the soft-mask defect PyMuPDF cannot see. Returns:
+     *   ['ran'=>bool, 'blank_pages'=>int[] (0-based), 'pages'=>[pageIndex=>result]].
+     * ran=false when node/the harness is unavailable (recorded, never a false pass).
+     *
+     * @param int[] $pageIndexes 0-based page indexes to check
+     */
+    private function pdfJsVisualCheck(string $pdfPath, array $pageIndexes, Book $book, Translation $translation): array
+    {
+        $out = ['ran' => false, 'blank_pages' => [], 'pages' => []];
+        $script = base_path('scripts/render_pdfjs.mjs');
+        if (!is_file($script)) {
+            return $out;
+        }
+        $dir = storage_path('app/temp');
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+        foreach ($pageIndexes as $pi) {
+            $png = "{$dir}/pdfjs_{$book->id}_{$translation->language_code}_p{$pi}_" . uniqid() . '.png';
+            try {
+                $proc = new Process(['node', $script, $pdfPath, (string) $pi, $png, '2.0']);
+                $proc->setTimeout(120);
+                $proc->run();
+                if (!$proc->isSuccessful()) {
+                    // harness/node missing or render failed — do not mark as a pass or a
+                    // false blank; record and move on (overall ran stays as-is).
+                    Log::info('PDF.js check could not run for a page (non-fatal)', [
+                        'page' => $pi, 'stderr' => substr($proc->getErrorOutput(), 0, 500),
+                    ]);
+                    @unlink($png);
+                    continue;
+                }
+                $res = json_decode(trim($proc->getOutput()), true);
+                if (is_array($res)) {
+                    $out['ran'] = true;
+                    $out['pages'][$pi] = [
+                        'blank' => (bool) ($res['blank'] ?? false),
+                        'near_white_frac' => $res['near_white_frac'] ?? null,
+                        'variance' => $res['variance'] ?? null,
+                    ];
+                    if ($res['blank'] ?? false) {
+                        $out['blank_pages'][] = $pi;
+                    }
+                }
+            } catch (\Throwable $e) {
+                Log::info('PDF.js check threw for a page (non-fatal)', [
+                    'page' => $pi, 'error' => $e->getMessage(),
+                ]);
+            } finally {
+                @unlink($png);
+            }
+        }
+        return $out;
     }
 
     /**
@@ -836,9 +1042,10 @@ class PdfTranslationService
 
         $publishable = $report['publishable'] ?? true;
         $renderStatus = $report['render_status'] ?? ($publishable ? 'READY_FOR_REVIEW' : 'NEEDS_LAYOUT_REVIEW');
+        // Array-cast persistence (R8.5, Phase 6.3) — not json_encode (avoids double-encode).
         $translation->forceFill([
             'render_status' => $renderStatus,
-            'qa_report' => $report ? json_encode($report, JSON_UNESCAPED_UNICODE) : null,
+            'qa_report' => is_array($report) ? $report : null,
         ])->save();
 
         return [

@@ -46,6 +46,26 @@ class TranslateEditionJob implements ShouldQueue
         }
         $book = $edition->book;
 
+        // PER-EDITION LOCK (spec R9.4, Phase 6.6): regeneration is idempotent and
+        // serialized per edition — two concurrent renders of the same translation must not
+        // race on the staging/public artifacts. A blocked second run exits quietly (the
+        // first will produce the authoritative result); the queue can retry it later.
+        $lock = \Illuminate\Support\Facades\Cache::lock("translate-edition-{$this->translationId}", $this->timeout);
+        if (! $lock->get()) {
+            Log::info("TranslateEditionJob: edition #{$this->translationId} already rendering — skipping duplicate run");
+            return;
+        }
+
+        try {
+            $this->runRender($translator, $renderer, $edition, $book);
+        } finally {
+            optional($lock)->release();
+        }
+    }
+
+    private function runRender(TranslationService $translator, PdfTranslationService $renderer,
+                               Translation $edition, $book): void
+    {
         $job = ProcessingJob::updateOrCreate(
             ['book_id' => $book->id, 'type' => 'translation'],
             ['status' => 'processing', 'progress' => 0, 'started_at' => now(),
