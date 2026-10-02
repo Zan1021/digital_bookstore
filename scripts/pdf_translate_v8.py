@@ -1608,7 +1608,8 @@ def _vocab_manifest_from_scene(page_scene, page_num):
 
 
 def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_dir,
-                                   page_num, report, page_spans=None):
+                                   page_num, report, page_spans=None,
+                                   typography_policy=None, language=None):
     """
     BOOK-AGNOSTIC generic scene placer for non-table pages (copyright, and any page
     whose layout is a set of independently-positioned text lines/blocks).
@@ -1723,10 +1724,47 @@ def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_di
         box_bottom = min(page.rect.height - 10, max(by1, u.bbox[3]))
         box_top = u.bbox[1] - 1
         box = pymupdf.Rect(bx0, box_top, bx1, box_bottom) & page.rect
-        font_file = _weight_aware_house_font([
-            {"font_size": size, "is_bold": (s.get("is_bold") if s else False),
-             "font_name": (s.get("font_name") if s else "")}
-        ], fonts_dir)
+
+        # FONT POLICY (spec Req 4): resolve this unit's font through the ONE shared
+        # role-based resolver — honouring any per-book/edition/role/unit policy — instead
+        # of the ad-hoc house-font picker. Falls back to the house/source font when the
+        # policy says nothing. The resolved spec (family/hash/approval) is recorded.
+        role = (getattr(u, "semantic_role", "") or "").lower()
+        font_file = None
+        try:
+            from font_policy import resolve_role_font, check_glyph_coverage
+            spec = resolve_role_font(
+                role=role, fonts_dir=fonts_dir, typography_policy=typography_policy,
+                source_font=(s.get("font_name") if s else None),
+                is_bold=bool(s.get("is_bold")) if s else False,
+                language=language, unit_id=u.id)
+            font_file = spec.get("fontFile")
+            report.setdefault("font_policy", {}).setdefault(str(page_num), []).append({
+                "id": u.id, "role": role, "resolvedBy": spec.get("resolvedBy"),
+                "family": spec.get("resolvedFamily"), "approved": spec.get("approved"),
+                "policyChoice": spec.get("policyChoice"),
+            })
+        except Exception:
+            spec = None
+        if not font_file:
+            font_file = _weight_aware_house_font([
+                {"font_size": size, "is_bold": (s.get("is_bold") if s else False),
+                 "font_name": (s.get("font_name") if s else "")}
+            ], fonts_dir)
+
+        # MISSING-GLYPH (spec Req 4.5): if the resolved font lacks glyphs for the target,
+        # do NOT silently render tofu — flag the unit (treated as a non-fit so the source
+        # is kept and the page is routed to review).
+        glyph_missing = False
+        try:
+            if font_file:
+                cov = check_glyph_coverage(font_file, tr)
+                glyph_missing = not cov.get("ok", True)
+                if glyph_missing:
+                    report.setdefault("font_glyph_gaps", {}).setdefault(str(page_num), []).append(
+                        {"id": u.id, "missing": cov.get("missing", [])[:8]})
+        except Exception:
+            glyph_missing = False
 
         # ROLE-AWARE WRAPPING POLICY (spec Req 3.4): a short label/title stays single-line;
         # a prose paragraph may wrap within its column.
@@ -1756,6 +1794,9 @@ def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_di
             # Solver error: be conservative and render; the post-render structural +
             # overflow gates still police the result.
             fits = True
+        # A missing-glyph font can never be a clean fit — force review (spec Req 4.5).
+        if glyph_missing:
+            fits = False
 
         plans.append({"unit": u, "box": box, "size": size, "color": color,
                       "align": align, "font_file": font_file, "tr": tr, "fits": fits})
@@ -4148,7 +4189,7 @@ def _verify_rendered_page(page, page_type, translated_text, page_num, report):
 # =============================================================================
 
 def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None, only_item_ids=None,
-                        allow_legacy_flat=False):
+                        allow_legacy_flat=False, typography_policy=None):
     """
     V8 Core: Per-span replacement engine with manifest-driven mapping.
     
@@ -4417,7 +4458,7 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None, onl
             if page_scene_obj is not None and id_to_translation:
                 _handled = render_page_from_scene_generic(
                     page, page_scene_obj, id_to_translation, fonts_dir, page_num, report,
-                    page_spans=page_spans)
+                    page_spans=page_spans, typography_policy=typography_policy)
             if _handled is None:
                 render_copyright_page_v8(page, page_spans, translations_map, fonts_dir, page_num, report)
 
@@ -4825,6 +4866,9 @@ def main():
                                "with no contract (default: fail closed to review — Task 11)")
     replace_p.add_argument("--validate", action="store_true",
                           help="Run structural validation after rendering (default: always on)")
+    replace_p.add_argument("--typography-policy",
+                          help="Path to a JSON file with the book's typography_policy "
+                               "(role/edition/unit font choices). Optional; absent = source+house font.")
 
     # STABLE-ID CONTRACT (§2.2): emit the page->region->item translation request
     # with stable IDs so the translation layer (PHP) can store and return IDs.
@@ -4856,6 +4900,15 @@ def main():
         if getattr(args, "only_items", None):
             only_items = [s.strip() for s in args.only_items.split(",") if s.strip()]
 
+        typography_policy = None
+        _tp = getattr(args, "typography_policy", None)
+        if _tp and os.path.isfile(_tp):
+            try:
+                with open(_tp, "r", encoding="utf-8") as tf:
+                    typography_policy = json.load(tf)
+            except Exception:
+                typography_policy = None
+
         report = replace_text_in_pdf(
             input_pdf=args.input,
             output_pdf=args.output,
@@ -4863,6 +4916,7 @@ def main():
             fonts_dir=args.fonts_dir,
             only_item_ids=only_items,
             allow_legacy_flat=getattr(args, "allow_legacy_flat", False),
+            typography_policy=typography_policy,
         )
         print(json.dumps(report, indent=2, ensure_ascii=False), file=sys.stderr)
         print(args.output)

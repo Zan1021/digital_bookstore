@@ -180,3 +180,146 @@ def document_font_policy_report(fonts_dir: str, requested_fonts=None) -> dict:
         if not res["approved"]:
             report["any_unapproved"] = True
     return report
+
+
+# =============================================================================
+# ROLE-BASED FONT POLICY (world-class-render-engine spec Req 4)
+# =============================================================================
+# One resolver shared by BOTH the native renderer and the illustration-text path, so a
+# font choice is an explicit per-book/edition/role decision — not an accident of
+# filenames or a process-wide env var. Precedence (highest first):
+#   unit override > edition role override > book role override > publisher role default
+#   > source font (when usable) > approved script-compatible fallback.
+#
+# typography_policy shape (persisted on Book.metadata['typography_policy']; passed to the
+# engine as JSON). Fonts are referenced by VALIDATED ASSET ID (a font family/stem that
+# must resolve inside the approved fonts dir) — never a client-supplied absolute path.
+#   {
+#     "version": 1,
+#     "publisher_default": {"body": "PlaypenSans", "title": "PlaypenSans",
+#                            "artwork_label": "PlaypenSans"},
+#     "roles": {"body": {"font_asset_id": "<family>", "weight": 400}, ...},
+#     "language_overrides": {"af": {"body": {"font_asset_id": "<family>"}}},
+#     "unit_overrides": {"p02_s0011": {"font_asset_id": "<family>"}}
+#   }
+# Every field is optional; an empty/absent policy degrades to source>fallback (today's
+# behaviour) with the env STORY_BODY_FONT as the publisher default.
+
+import os as _os
+
+# Map a semantic render role to a policy role bucket (book-agnostic).
+_ROLE_BUCKET = {
+    "paragraph": "body", "copyright": "body", "character_bio": "body",
+    "publisher": "body", "caption": "body", "label": "body", "list_item": "body",
+    "word_list_item": "body", "phonics": "body",
+    "book_title": "title", "subtitle": "title", "heading": "title",
+    "table_header": "title", "merged_header": "title",
+    "artwork_label": "artwork_label",
+}
+
+
+def _policy_asset(policy: dict, bucket: str, language: str = None, unit_id: str = None):
+    """Return the font_asset_id chosen by the policy for a bucket, honouring the
+    precedence unit > language(edition) > book role > publisher default. Returns None
+    when the policy says nothing (caller then falls back to source/approved)."""
+    if not isinstance(policy, dict):
+        return None, None
+    # 1. unit override
+    uo = (policy.get("unit_overrides") or {}).get(unit_id or "")
+    if isinstance(uo, dict) and uo.get("font_asset_id"):
+        return uo["font_asset_id"], uo.get("weight")
+    # 2. language/edition override for this bucket
+    lo = ((policy.get("language_overrides") or {}).get(language or "") or {}).get(bucket)
+    if isinstance(lo, dict) and lo.get("font_asset_id"):
+        return lo["font_asset_id"], lo.get("weight")
+    # 3. book role override
+    ro = (policy.get("roles") or {}).get(bucket)
+    if isinstance(ro, dict) and ro.get("font_asset_id"):
+        return ro["font_asset_id"], ro.get("weight")
+    # 4. publisher default for this bucket
+    pd = (policy.get("publisher_default") or {}).get(bucket)
+    if isinstance(pd, str) and pd:
+        return pd, None
+    return None, None
+
+
+def resolve_role_font(role: str, fonts_dir: str, typography_policy: dict = None,
+                      source_font: str = None, is_bold: bool = False,
+                      language: str = None, unit_id: str = None) -> dict:
+    """
+    THE single font resolution entry point for both render paths (spec Req 4.1/4.4).
+
+    Applies the precedence chain, then resolves the chosen family to a concrete approved
+    font file via resolve_font_with_policy (which records provenance + hash + approval).
+    Returns resolve_font_with_policy's dict PLUS: role, bucket, policyChoice (the
+    asset id the policy picked, or None), and resolvedBy (which precedence rung won).
+
+    Book-agnostic. A font asset id is validated by resolution: it only takes effect if
+    it resolves inside the approved fonts dir; otherwise we fall through to the next rung.
+    """
+    bucket = _ROLE_BUCKET.get((role or "").lower(), "body")
+    asset, weight = _policy_asset(typography_policy, bucket, language, unit_id)
+    bold = is_bold or (isinstance(weight, int) and weight >= 600)
+
+    chain = []  # (requested, label) in precedence order
+    if asset:
+        chain.append((asset, "policy"))
+    if source_font:
+        chain.append((source_font, "source"))
+    # Publisher env default as the final named preference before blind fallback.
+    env_default = _os.environ.get("STORY_BODY_FONT", "PlaypenSans")
+    chain.append((env_default, "publisher_env"))
+
+    registry = load_approved_fonts(fonts_dir)
+    for requested, label in chain:
+        res = resolve_font_with_policy(requested, fonts_dir, is_bold=bold)
+        # Accept the first rung that lands on an APPROVED, non-fallback (true) match OR,
+        # for the policy rung, any approved resolution (an approved substitute is fine).
+        if res.get("fontFile") and res.get("approved") and not res.get("fallbackUsed"):
+            res.update({"role": role, "bucket": bucket, "policyChoice": asset,
+                        "resolvedBy": label})
+            return res
+    # Nothing matched cleanly — take the policy/source best-effort resolution (records
+    # fallbackUsed/approved so the caller + gate can decide). Prefer the policy asset.
+    best_req = asset or source_font or env_default
+    res = resolve_font_with_policy(best_req, fonts_dir, is_bold=bold)
+    res.update({"role": role, "bucket": bucket, "policyChoice": asset,
+                "resolvedBy": "fallback"})
+    return res
+
+
+def check_glyph_coverage(font_file: str, text: str) -> dict:
+    """Verify the resolved font actually HAS glyphs for the target text (spec Req 4.5).
+    Returns {ok, missing:[chars]}. Missing glyphs => caller flags the element + fails
+    closed. Book-agnostic: pure font cmap check, no language assumptions."""
+    out = {"ok": True, "missing": []}
+    if not font_file or not _os.path.isfile(font_file) or not text:
+        return out
+    try:
+        import pymupdf
+        font = pymupdf.Font(fontfile=font_file)
+        missing = []
+        seen = set()
+        for ch in text:
+            if ch in seen or ch.isspace():
+                continue
+            seen.add(ch)
+            try:
+                if font.has_glyph(ord(ch)):
+                    continue
+            except Exception:
+                # Older PyMuPDF: fall back to glyph_advance==0 heuristic.
+                try:
+                    if font.glyph_advance(ord(ch)) > 0:
+                        continue
+                except Exception:
+                    continue
+            # Printable char with no glyph.
+            if ch.isprintable():
+                missing.append(ch)
+        out["missing"] = missing
+        out["ok"] = not missing
+    except Exception:
+        # If the check itself errors, do not block (the structural/font gates still run).
+        return {"ok": True, "missing": []}
+    return out

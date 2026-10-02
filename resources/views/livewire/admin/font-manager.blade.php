@@ -9,6 +9,43 @@
     @if(session('success'))
         <div class="mb-4 p-3 bg-green-50 text-green-800 rounded-lg">{{ session('success') }}</div>
     @endif
+    @if(session('error'))
+        <div class="mb-4 p-3 bg-red-50 text-red-800 rounded-lg">{{ session('error') }}</div>
+    @endif
+
+    {{-- Typography Policy (per-role font choice) --}}
+    <div class="mb-8 border rounded-lg p-6 bg-blue-50">
+        <h2 class="text-lg font-semibold mb-1">Typography Policy</h2>
+        <p class="text-gray-600 text-sm mb-4">
+            Choose the font for each role. These apply on the next re-render of every
+            edition. Leave a role blank to keep the book's original (source) font.
+            Only approved fonts (shipped in the fonts directory) can be selected.
+        </p>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            @foreach (['body' => 'Body', 'title' => 'Title / Heading', 'artworkLabel' => 'Artwork Label'] as $prop => $label)
+                <div>
+                    <label class="block text-sm font-medium mb-1">{{ $label }}</label>
+                    <select wire:model="{{ $prop }}Font"
+                            class="w-full text-sm border rounded-lg px-3 py-2 bg-white">
+                        <option value="">— source / house default —</option>
+                        @foreach($approvedFonts as $fam)
+                            <option value="{{ $fam }}">{{ $fam }}</option>
+                        @endforeach
+                    </select>
+                </div>
+            @endforeach
+        </div>
+        <div class="flex items-center gap-3 mt-4">
+            <button wire:click="saveTypographyPolicy"
+                    class="px-4 py-2 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700">
+                Save Policy
+            </button>
+            <button wire:click="clearTypographyPolicy"
+                    class="px-4 py-2 bg-white border text-gray-700 rounded-lg text-sm hover:bg-gray-50">
+                Clear
+            </button>
+        </div>
+    </div>
 
     {{-- Source Fonts (from PDF) --}}
     <div class="mb-8">

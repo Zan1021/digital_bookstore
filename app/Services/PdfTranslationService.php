@@ -172,6 +172,19 @@ class PdfTranslationService
             $cmd[] = '--allow-legacy-flat';
         }
 
+        // TYPOGRAPHY POLICY (world-class-render-engine spec Req 4.3/4.4): when the book
+        // carries an explicit per-role/edition/unit font policy, write it to a temp JSON
+        // and hand it to the engine so BOTH render paths resolve fonts through it. Absent
+        // policy = unchanged behaviour (engine falls back to source > house font).
+        $policyPath = null;
+        $typographyPolicy = $book->getTypographyPolicy();
+        if (!empty($typographyPolicy)) {
+            $policyPath = storage_path("app/temp/typopolicy_{$book->id}_{$translation->language_code}.json");
+            file_put_contents($policyPath, json_encode($typographyPolicy, JSON_UNESCAPED_UNICODE));
+            $cmd[] = '--typography-policy';
+            $cmd[] = $policyPath;
+        }
+
         $process = new Process($cmd);
 
         $process->setTimeout(300);
@@ -182,6 +195,9 @@ class PdfTranslationService
 
         if (!$process->isSuccessful()) {
             @unlink($translationsPath);
+            if ($policyPath) {
+                @unlink($policyPath);
+            }
             throw new \RuntimeException(
                 "PDF translation failed: " . $process->getErrorOutput()
             );
@@ -369,6 +385,9 @@ class PdfTranslationService
 
         // Cleanup temp file
         @unlink($translationsPath);
+        if ($policyPath) {
+            @unlink($policyPath);
+        }
 
         return $outputFilename;
     }

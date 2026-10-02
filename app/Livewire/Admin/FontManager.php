@@ -20,10 +20,58 @@ class FontManager extends Component
     public string $uploadTarget = '';
     public bool $loading = false;
 
+    // TYPOGRAPHY POLICY (world-class-render-engine spec Req 4). Per-role font choices
+    // (body/title/artwork_label) persisted on the book. Empty = source > house font.
+    public array $approvedFonts = [];
+    public string $bodyFont = '';
+    public string $titleFont = '';
+    public string $artworkLabelFont = '';
+
     public function mount(Book $book)
     {
         $this->book = $book;
         $this->loadFontInfo();
+        $this->loadTypographyPolicy();
+    }
+
+    private function loadTypographyPolicy(): void
+    {
+        $this->approvedFonts = Book::approvedFontAssets();
+        $policy = $this->book->getTypographyPolicy();
+        $roles = $policy['roles'] ?? [];
+        $this->bodyFont = $roles['body']['font_asset_id'] ?? '';
+        $this->titleFont = $roles['title']['font_asset_id'] ?? '';
+        $this->artworkLabelFont = $roles['artwork_label']['font_asset_id'] ?? '';
+    }
+
+    /**
+     * Persist the chosen per-role fonts onto the book's typography_policy. Validated
+     * against the approved fonts dir by Book::setRoleFont (rejects paths/unknown fonts).
+     * An empty selection clears that role (reverts to source > house font).
+     */
+    public function saveTypographyPolicy(): void
+    {
+        try {
+            $this->book->setRoleFont('body', $this->bodyFont ?: null);
+            $this->book->setRoleFont('title', $this->titleFont ?: null);
+            $this->book->setRoleFont('artwork_label', $this->artworkLabelFont ?: null);
+            $this->book->refresh();
+            $this->loadTypographyPolicy();
+            session()->flash('success', 'Typography policy saved. Re-render editions to apply.');
+        } catch (\InvalidArgumentException $e) {
+            session()->flash('error', $e->getMessage());
+        }
+    }
+
+    public function clearTypographyPolicy(): void
+    {
+        $meta = $this->book->metadata ?? [];
+        unset($meta['typography_policy']);
+        $this->book->metadata = $meta;
+        $this->book->save();
+        $this->book->refresh();
+        $this->loadTypographyPolicy();
+        session()->flash('success', 'Typography policy cleared (reverts to source/house font).');
     }
 
     private function loadFontInfo()

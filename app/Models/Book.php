@@ -75,6 +75,108 @@ class Book extends Model
         ];
     }
 
+    /**
+     * The book's typography policy (world-class-render-engine spec Req 4), stored on
+     * metadata['typography_policy']. Shape:
+     *   { version, publisher_default:{body,title,artwork_label},
+     *     roles:{body:{font_asset_id,weight}, ...},
+     *     language_overrides:{af:{body:{font_asset_id}}}, unit_overrides:{id:{...}} }
+     * Returns [] when none is set (engine then uses source > house font). Book-agnostic.
+     */
+    public function getTypographyPolicy(): array
+    {
+        $meta = $this->metadata ?? [];
+        $policy = $meta['typography_policy'] ?? null;
+        return is_array($policy) ? $policy : [];
+    }
+
+    /**
+     * Set a role's font for the book policy, validated against the APPROVED fonts dir.
+     * A font asset id is a family stem (e.g. "PlaypenSans") that MUST resolve to a file
+     * in storage/app/fonts — client-supplied absolute paths are rejected (spec Req 4.6).
+     * Pass $fontAssetId = null to clear that role. Optional per-language scope.
+     *
+     * @throws \InvalidArgumentException when the asset id is not an approved family.
+     */
+    public function setRoleFont(string $role, ?string $fontAssetId, ?int $weight = null, ?string $language = null): void
+    {
+        $role = in_array($role, ['body', 'title', 'artwork_label'], true) ? $role : 'body';
+        $policy = $this->getTypographyPolicy();
+        $policy['version'] = $policy['version'] ?? 1;
+
+        if ($fontAssetId !== null && $fontAssetId !== '') {
+            // Reject anything path-like; only a bare validated family stem is allowed.
+            if (preg_match('#[\\\\/]#', $fontAssetId) || str_contains($fontAssetId, '..')) {
+                throw new \InvalidArgumentException('Font asset id must be a family name, not a path.');
+            }
+            if (! self::isApprovedFontAsset($fontAssetId)) {
+                throw new \InvalidArgumentException("Font '{$fontAssetId}' is not an approved font.");
+            }
+        }
+
+        if ($language) {
+            $bucket = $policy['language_overrides'][$language] ?? [];
+            if ($fontAssetId) {
+                $bucket[$role] = array_filter(['font_asset_id' => $fontAssetId, 'weight' => $weight]);
+            } else {
+                unset($bucket[$role]);
+            }
+            $policy['language_overrides'][$language] = $bucket;
+        } else {
+            if ($fontAssetId) {
+                $policy['roles'][$role] = array_filter(['font_asset_id' => $fontAssetId, 'weight' => $weight]);
+            } else {
+                unset($policy['roles'][$role]);
+            }
+        }
+
+        $meta = $this->metadata ?? [];
+        $meta['typography_policy'] = $policy;
+        $this->metadata = $meta;
+        $this->save();
+    }
+
+    /**
+     * Approved font family stems derived from the fonts directory (the approved set).
+     * Book-agnostic: whatever ships in storage/app/fonts is approved.
+     *
+     * @return array<string> family stems, e.g. ["PlaypenSans", "ComicSansMS", ...]
+     */
+    public static function approvedFontAssets(): array
+    {
+        $dir = storage_path('app/fonts');
+        if (! is_dir($dir)) {
+            return [];
+        }
+        $families = [];
+        foreach (glob($dir . '/*.{ttf,otf}', GLOB_BRACE) ?: [] as $file) {
+            $name = pathinfo($file, PATHINFO_FILENAME);
+            foreach (['-Regular', '-Bold', '-SemiBold', '-Medium', '-Light', '-Italic',
+                      'Regular', 'Bold', 'SemiBold', 'Medium', 'Light', 'Italic'] as $suf) {
+                $name = str_replace($suf, '', $name);
+            }
+            $name = rtrim($name, '-_ ');
+            if ($name !== '') {
+                $families[$name] = true;
+            }
+        }
+        $out = array_keys($families);
+        sort($out);
+        return $out;
+    }
+
+    public static function isApprovedFontAsset(string $fontAssetId): bool
+    {
+        $norm = fn ($s) => strtolower(str_replace(['-', '_', ' '], '', $s));
+        $want = $norm($fontAssetId);
+        foreach (self::approvedFontAssets() as $fam) {
+            if ($norm($fam) === $want) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public function pages(): HasMany
     {
         return $this->hasMany(BookPage::class)->orderBy('page_number');

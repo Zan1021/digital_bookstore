@@ -371,8 +371,20 @@ def repair_page(input_pdf, page_index, regions_data, translations, fonts_dir,
     return report
 
 
-def _pick_font(fonts_dir):
-    """Pick a usable embedded font with Latin/Afrikaans glyphs from fonts_dir."""
+def _pick_font(fonts_dir, typography_policy=None, source_font=None, language=None):
+    """Pick the illustration-label font via the SHARED font policy resolver
+    (world-class-render-engine spec Req 4.4) so illustration typography follows the SAME
+    per-book/role policy as the native renderer — not an independent filename preference.
+    Falls back to the previous heuristic only if the resolver yields nothing."""
+    try:
+        from font_policy import resolve_role_font
+        spec = resolve_role_font(role="artwork_label", fonts_dir=fonts_dir,
+                                 typography_policy=typography_policy,
+                                 source_font=source_font, language=language)
+        if spec.get("fontFile"):
+            return spec["fontFile"]
+    except Exception:
+        pass
     if fonts_dir and os.path.isdir(fonts_dir):
         prefer = ("comic", "sans", "regular", "book", "text")
         cands = [f for f in os.listdir(fonts_dir) if f.lower().endswith((".ttf", ".otf"))]
