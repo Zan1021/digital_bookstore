@@ -220,14 +220,24 @@ def _validate_region(r, pw, ph):
 
 
 def repair_page(input_pdf, page_index, regions_data, translations, fonts_dir,
-                output_pdf, ppi=300, generative_bg=None):
-    report = {"page_index": page_index, "ppi": ppi, "regions_in": 0,
-              "regions_applied": 0, "skipped": [], "overflow": [], "modified": False}
+                output_pdf, ppi=300, generative_bg=None, allow_flatten=False):
+    """Artwork-preserving repair of baked-in text (world-class engine Phase 5, R6/R7).
 
+    DEFAULT = SURGICAL: edit only the owning image instance(s) with a letter-shaped mask,
+    preserving the page's native vector text, line art, CropBox/MediaBox, rotation, labels
+    and links (R6.1). A reused image is isolated so only the intended page changes (R6.2).
+
+    FALLBACK = FLATTEN (opt-in, review-gated): only when no single image instance owns a
+    region AND --allow-flatten is passed. Records requires_review=True and preserves page
+    geometry/rotation (R6.5). Never the default; never silent.
+
+    Translated vector text is overlaid on each region after the raster repair, with
+    fit-before-erase discipline (overflow is flagged, not drawn)."""
     regions = regions_data.get("regions", [])
-    report["regions_in"] = len(regions)
+    report = {"page_index": page_index, "ppi": ppi, "regions_in": len(regions),
+              "regions_applied": 0, "skipped": [], "overflow": [], "modified": False,
+              "strategy": None, "requires_review": False}
 
-    same_path = os.path.abspath(input_pdf) == os.path.abspath(output_pdf)
     fd, tmp_out = tempfile.mkstemp(
         suffix=".pdf", dir=os.path.dirname(os.path.abspath(output_pdf)) or None)
     os.close(fd)
@@ -241,101 +251,84 @@ def repair_page(input_pdf, page_index, regions_data, translations, fonts_dir,
         print(output_pdf)
         return report
 
+    # ---- 1. SURGICAL raster repair (preferred, artwork-preserving) ---------
+    surgical_ok = False
+    try:
+        from artwork_repair import repair_page_surgical, LayoutReviewRequired as _LRR
+        srep = repair_page_surgical(doc, page_index, regions, ppi)
+        report["surgical"] = {k: srep[k] for k in ("regions_repaired", "unowned",
+                                                     "skipped", "transforms") if k in srep}
+        if srep.get("unowned"):
+            # at least one region is not owned by any single image instance.
+            if allow_flatten:
+                report["strategy"] = "flatten"
+                report["requires_review"] = True  # R6.5/R6.6 flatten is reviewed-only
+                _flatten_repair(doc, page_index, regions, ppi, report, generative_bg)
+            else:
+                # fail closed: do not paint rectangles, do not flatten silently.
+                report["strategy"] = "surgical"
+                report["skipped"].append({"reason": "regions_unowned_no_flatten",
+                                          "count": len(srep["unowned"])})
+                doc.close(); os.remove(tmp_out)
+                print(json.dumps(report, ensure_ascii=False), file=sys.stderr)
+                print(output_pdf)
+                return report
+        else:
+            report["strategy"] = "surgical"
+            report["isolated_xrefs"] = srep.get("isolated_xrefs", [])
+            surgical_ok = True
+    except _LRR as e:
+        report["skipped"].append({"reason": getattr(e, "reason", str(e)), "stage": "surgical"})
+        if not allow_flatten:
+            doc.close(); os.remove(tmp_out)
+            print(json.dumps(report, ensure_ascii=False), file=sys.stderr)
+            print(output_pdf)
+            return report
+        report["strategy"] = "flatten"
+        report["requires_review"] = True
+        _flatten_repair(doc, page_index, regions, ppi, report, generative_bg)
+
+    # ---- 2. overlay translated vector text (fit-before-erase) --------------
     page = doc[page_index]
-    rect = page.rect
-    zoom = ppi / 72.0
-    mat = pymupdf.Matrix(zoom, zoom)
+    _overlay_targets(page, regions, translations, fonts_dir, ppi, report)
 
-    # Render the page to an opaque raster we will repair, then re-embed.
-    pix = page.get_pixmap(matrix=mat, alpha=False)
-    pw, ph = pix.width, pix.height
+    report["modified"] = report["regions_applied"] > 0 or report.get("surgical", {}).get("regions_repaired", 0) > 0 \
+        or bool(report.get("flattened"))
 
-    # ERASE FIRST, ALWAYS (deterministic). This GUARANTEES the source text is gone
-    # regardless of whether a generative background is supplied — the earlier bug was
-    # overlaying translated text without a reliable erase. Generative is a refinement
-    # layered on top of this clean base, never the sole eraser.
+    doc.save(tmp_out, garbage=4, deflate=True)
+    doc.close()
+    os.replace(tmp_out, output_pdf)
+    print(json.dumps(report, ensure_ascii=False), file=sys.stderr)
+    print(output_pdf)
+    return report
+
+
+def _overlay_targets(page, regions, translations, fonts_dir, ppi, report):
+    """Overlay each region's translated text as live PDF vector text, fitting before draw.
+    Coordinates in regions are render-pixel space; convert to PDF points."""
+    px_to_pt = 72.0 / ppi
+    pw = int(round(page.rect.width * (ppi / 72.0)))
+    ph = int(round(page.rect.height * (ppi / 72.0)))
     for r in regions:
+        b = r.get("bbox_px")
+        if not (isinstance(b, (list, tuple)) and len(b) == 4):
+            continue
+        if r.get("background_type") == "uncertain":
+            continue
         bbox = _validate_region(r, pw, ph)
         if bbox is None:
-            report["skipped"].append({"reason": "invalid bbox", "region": r.get("source_text")})
-            continue
-        bg_type = r.get("background_type", "illustration")
-        if bg_type == "uncertain":
-            report["skipped"].append({"reason": "uncertain background", "region": r.get("source_text")})
-            continue
-        mask = create_text_mask(pix, [bbox], padding=max(4, int(ppi / 60)))
-        for region in mask:
-            if bg_type == "flat" and r.get("color_rgb"):
-                x0, y0, x1, y1 = region
-                col = tuple(int(c) for c in r["color_rgb"])
-                for y in range(y0, y1 + 1):
-                    for x in range(x0, x1 + 1):
-                        if 0 <= x < pix.width and 0 <= y < pix.height:
-                            pix.set_pixel(x, y, col)
-            else:
-                # halo-free robust fill (offset ring + median), not naive edge_fill
-                _robust_fill(pix, region[0], region[1], region[2], region[3], ppi)
-    report["erased"] = True
-
-    # OPTIONAL generative refinement: blend the model-reconstructed background over the
-    # already-erased regions for nicer texture. The text is ALREADY gone, so even a poor
-    # generative result cannot re-introduce it. Composited only inside the region boxes.
-    if generative_bg and os.path.isfile(generative_bg):
-        try:
-            gen = pymupdf.Pixmap(generative_bg)
-            if gen.alpha:
-                gen = pymupdf.Pixmap(gen, 0)
-            applied = 0
-            for r in regions:
-                bbox = _validate_region(r, pw, ph)
-                if bbox is None or r.get("background_type") == "uncertain":
-                    continue
-                pad = max(2, int(ppi / 100))
-                x0 = max(0, int(bbox[0]) - pad); y0 = max(0, int(bbox[1]) - pad)
-                x1 = min(pw - 1, int(bbox[2]) + pad); y1 = min(ph - 1, int(bbox[3]) + pad)
-                # only copy generative pixels that are within the returned image bounds
-                if x1 < gen.width and y1 < gen.height:
-                    for y in range(y0, y1 + 1):
-                        for x in range(x0, x1 + 1):
-                            pix.set_pixel(x, y, gen.pixel(x, y))
-                    applied += 1
-            report["generative_bg"] = True
-            report["generative_regions"] = applied
-        except Exception as e:
-            report["skipped"].append(f"generative composite failed: {e}; kept deterministic erase")
-
-    img_bytes = pix.tobytes("png")
-
-    # Rebuild the page from the repaired raster (guarantees no baked English survives),
-    # preserving geometry & rotation.
-    new_doc = pymupdf.open()
-    if page.rotation in (90, 270):
-        npw, nph = rect.height, rect.width
-    else:
-        npw, nph = rect.width, rect.height
-    new_page = new_doc.new_page(width=npw, height=nph)
-    new_page.insert_image(new_page.rect, stream=img_bytes, keep_proportion=False)
-
-    # Overlay translated vector text on each region.
-    px_to_pt = 72.0 / ppi
-    for r in regions:
-        bbox = _validate_region(r, pw, ph)
-        if bbox is None or r.get("background_type") == "uncertain":
             continue
         target = (r.get("target_text") or translations.get(r.get("source_text", ""), "")).strip()
         if not target:
             continue
-        # region bounds in PDF points
         x0, y0, x1, y1 = (v * px_to_pt for v in bbox)
         cw, ch = (x1 - x0), (y1 - y0)
         src_pt = float(r.get("source_font_pt") or max(8.0, ch * 0.8))
         align = r.get("align", "left")
-
         font_path = _pick_font(fonts_dir)
         color = _normalize_color(r.get("text_color_rgb") or r.get("color_text") or [255, 245, 200])
 
         if _HAS_FIT:
-            # Per-line region: force SINGLE line (no wrap/hyphenation), fit to the box.
             fit = solve_text_fit(
                 target,
                 FitConstraints(container_width=cw, container_height=ch,
@@ -345,30 +338,77 @@ def repair_page(input_pdf, page_index, regions_data, translations, fonts_dir,
                 font_path=font_path,
             )
             if fit.overflow:
+                # fit-before-erase: text does not fit → flag, do NOT draw overflow (R3.2)
                 report["overflow"].append({"region": r.get("source_text"), "text": target})
+                continue
             font_size = fit.font_size
-            # never wrap a single detected line — draw it as one line
-            lines = [target]
         else:
             font_size = src_pt
-            lines = [target]
-
-        _draw_lines(new_page, lines, x0, y0, cw, ch, font_size, font_path, color, align)
+        _draw_lines(page, [target], x0, y0, cw, ch, font_size, font_path, color, align)
         report["regions_applied"] += 1
 
-    # Replace the page.
+
+def _flatten_repair(doc, page_index, regions, ppi, report, generative_bg=None):
+    """REVIEWED FALLBACK ONLY (R6.5): render the page to a raster, erase text regions with
+    the robust letter-aware fill, and rebuild the page from the raster — preserving page
+    size and rotation. Used only when no single image instance owns a region and the caller
+    explicitly allowed flattening. Sets report['flattened']=True and requires_review."""
+    page = doc[page_index]
+    rect = page.rect
+    zoom = ppi / 72.0
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+    pw, ph = pix.width, pix.height
+
+    for r in regions:
+        bbox = _validate_region(r, pw, ph)
+        if bbox is None or r.get("background_type") == "uncertain":
+            continue
+        mask = create_text_mask(pix, [bbox], padding=max(4, int(ppi / 60)))
+        for region in mask:
+            if r.get("background_type") == "flat" and r.get("color_rgb"):
+                x0, y0, x1, y1 = region
+                col = tuple(int(c) for c in r["color_rgb"])
+                for y in range(y0, y1 + 1):
+                    for x in range(x0, x1 + 1):
+                        if 0 <= x < pix.width and 0 <= y < pix.height:
+                            pix.set_pixel(x, y, col)
+            else:
+                _robust_fill(pix, region[0], region[1], region[2], region[3], ppi)
+
+    if generative_bg and os.path.isfile(generative_bg):
+        try:
+            gen = pymupdf.Pixmap(generative_bg)
+            if gen.alpha:
+                gen = pymupdf.Pixmap(gen, 0)
+            for r in regions:
+                bbox = _validate_region(r, pw, ph)
+                if bbox is None or r.get("background_type") == "uncertain":
+                    continue
+                pad = max(2, int(ppi / 100))
+                x0 = max(0, int(bbox[0]) - pad); y0 = max(0, int(bbox[1]) - pad)
+                x1 = min(pw - 1, int(bbox[2]) + pad); y1 = min(ph - 1, int(bbox[3]) + pad)
+                if x1 < gen.width and y1 < gen.height:
+                    for y in range(y0, y1 + 1):
+                        for x in range(x0, x1 + 1):
+                            pix.set_pixel(x, y, gen.pixel(x, y))
+            report["generative_bg"] = True
+            report["requires_review"] = True  # generative is always reviewed (R6.6)
+        except Exception as e:
+            report["skipped"].append(f"generative composite failed: {e}; kept deterministic erase")
+
+    img_bytes = pix.tobytes("png")
+    new_doc = pymupdf.open()
+    if page.rotation in (90, 270):
+        npw, nph = rect.height, rect.width
+    else:
+        npw, nph = rect.width, rect.height
+    new_page = new_doc.new_page(width=npw, height=nph)
+    new_page.insert_image(new_page.rect, stream=img_bytes, keep_proportion=False)
     doc.delete_page(page_index)
     doc.insert_pdf(new_doc, from_page=0, to_page=0, start_at=page_index)
     new_doc.close()
-    report["modified"] = report["regions_applied"] > 0 or bool(report.get("generative_bg"))
-
-    doc.save(tmp_out, garbage=4, deflate=True)
-    doc.close()
-    os.replace(tmp_out, output_pdf)
-
-    print(json.dumps(report, ensure_ascii=False), file=sys.stderr)
-    print(output_pdf)
-    return report
+    report["flattened"] = True
+    report["requires_review"] = True
 
 
 def _pick_font(fonts_dir, typography_policy=None, source_font=None, language=None):
@@ -447,6 +487,9 @@ def main():
     r.add_argument("--output", "-o", required=True)
     r.add_argument("--ppi", type=int, default=300)
     r.add_argument("--generative-bg", default=None)
+    r.add_argument("--allow-flatten", action="store_true",
+                   help="Permit the review-gated full-page flatten fallback when no single "
+                        "image instance owns a region (R6.5). Off by default (fail closed).")
 
     args = ap.parse_args()
 
@@ -461,7 +504,7 @@ def main():
                 translations = json.load(f)
         repair_page(args.input, args.page, regions_data, translations,
                     args.fonts_dir, args.output, ppi=args.ppi,
-                    generative_bg=args.generative_bg)
+                    generative_bg=args.generative_bg, allow_flatten=args.allow_flatten)
     else:
         ap.print_help()
 

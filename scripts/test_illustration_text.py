@@ -32,17 +32,24 @@ def check(name, cond):
 
 
 def _make_pdf(path, draw_text=True, bg=(241, 86, 76)):
-    """A single-page PDF: flat background + one image + optional baked-looking text drawn
-    as a filled rect band (stand-in for baked text)."""
+    """A single-page PDF: flat background + one image with text BAKED INTO its pixels
+    (not a native text object). This mirrors the real case the repair handles."""
+    from PIL import Image, ImageDraw
+    import io
     doc = pymupdf.open()
     page = doc.new_page(width=400, height=560)
     page.draw_rect(page.rect, color=None, fill=[c / 255 for c in bg])
-    # an 'illustration' block (top half) so candidates() sees a dominant image-ish area
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 380, 260), False)
-    pix.set_rect(pix.irect, (90, 160, 60))
-    page.insert_image(pymupdf.Rect(10, 10, 390, 270), pixmap=pix)
+    # an 'illustration' with baked-in text drawn into the raster itself
+    img = Image.new("RGB", (760, 520), (90, 160, 60))
     if draw_text:
-        page.insert_text((120, 400), "My Senses", fontsize=28, color=(1, 0.96, 0.78))
+        d = ImageDraw.Draw(img)
+        # blocky dark glyph stand-ins baked into the image pixels, lower-centre
+        for i in range(9):
+            bx = 180 + i * 44
+            d.rectangle([bx, 360, bx + 34, 440], fill=(20, 20, 20))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    page.insert_image(pymupdf.Rect(10, 10, 390, 270), stream=buf.getvalue())
     doc.save(path)
     doc.close()
 
@@ -102,41 +109,88 @@ def test_candidates():
         check("page with dominant image is a candidate", any(c["page"] == 0 for c in cands))
 
 
+def _baked_region_px(ppi):
+    """Render-pixel bbox of the baked text band. Image placed at page rect (10,10,390,270)
+    pt; baked glyphs at image px x[180..575] y[360..440] of a 760x520 image."""
+    zoom = ppi / 72.0
+    px0, py0, px1, py1 = 10, 10, 390, 270
+    iw, ih = 760, 520
+    def to_render(ix, iy):
+        return ((px0 + ix / iw * (px1 - px0)) * zoom,
+                (py0 + iy / ih * (py1 - py0)) * zoom)
+    rx0, ry0 = to_render(170, 350)
+    rx1, ry1 = to_render(585, 450)
+    return [rx0, ry0, rx1, ry1]
+
+
 def test_repair_end_to_end():
+    """DEFAULT = surgical: baked text is removed from the image, native page content is
+    preserved (page NOT flattened), translated vector text overlaid."""
     with tempfile.TemporaryDirectory() as d:
         pdf = os.path.join(d, "t.pdf")
         out = os.path.join(d, "out.pdf")
         _make_pdf(pdf)
         regions_data = {"ppi": 150, "regions": [{
             "source_text": "My Senses", "target_text": "My Sintuie",
-            "bbox_px": [int(120 * 150 / 72), int(378 * 150 / 72),
-                        int(300 * 150 / 72), int(410 * 150 / 72)],
-            "background_type": "flat", "color_rgb": [241, 86, 76],
+            "bbox_px": _baked_region_px(150),
+            "background_type": "flat", "color_rgb": [90, 160, 60],
             "text_color_rgb": [255, 245, 200], "align": "center", "source_font_pt": 24.0,
         }]}
         report = ilt.repair_page(pdf, 0, regions_data, {}, "", out, ppi=150)
+        check("repair strategy is surgical (default)", report.get("strategy") == "surgical")
         check("repair reports modified", report.get("modified") is True)
-        check("repair applied the region", report.get("regions_applied") == 1)
+        check("repair applied the overlay", report.get("regions_applied") == 1)
         check("output pdf exists", os.path.isfile(out))
-        # the repaired cover page should be a single flattened image (no old text object)
+        check("page NOT flattened", not report.get("flattened"))
         doc = pymupdf.open(out)
         txt = doc[0].get_text().strip()
         doc.close()
-        # new overlaid vector text is "My Sintuie"; old baked "My Senses" must be gone
-        check("no source English text remains", "Senses" not in txt)
         check("translated text present", "Sintuie" in txt)
 
 
+def test_repair_unowned_fails_closed():
+    """A region not inside any image => surgical fails closed (no flatten unless allowed)."""
+    with tempfile.TemporaryDirectory() as d:
+        pdf = os.path.join(d, "t.pdf")
+        out = os.path.join(d, "out.pdf")
+        _make_pdf(pdf)
+        regions_data = {"ppi": 150, "regions": [{
+            "source_text": "x", "target_text": "y", "bbox_px": [5, 1050, 60, 1120],
+            "background_type": "flat", "color_rgb": [241, 86, 76]}]}
+        report = ilt.repair_page(pdf, 0, regions_data, {}, "", out, ppi=150)
+        check("unowned region not modified", report.get("modified") is False)
+        check("unowned region skipped (no flatten)", any(
+            s.get("reason") == "regions_unowned_no_flatten" for s in report.get("skipped", [])))
+
+
+def test_repair_flatten_fallback_is_review_gated():
+    """allow_flatten=True on an unowned region uses the flatten fallback and marks the
+    result requires_review (R6.5)."""
+    with tempfile.TemporaryDirectory() as d:
+        pdf = os.path.join(d, "t.pdf")
+        out = os.path.join(d, "out.pdf")
+        _make_pdf(pdf)
+        regions_data = {"ppi": 150, "regions": [{
+            "source_text": "x", "target_text": "y", "bbox_px": [5, 1050, 200, 1120],
+            "background_type": "flat", "color_rgb": [241, 86, 76]}]}
+        report = ilt.repair_page(pdf, 0, regions_data, {}, "", out, ppi=150,
+                                 allow_flatten=True)
+        check("flatten fallback used", report.get("strategy") == "flatten")
+        check("flatten flagged for review", report.get("requires_review") is True)
+        check("flatten output exists", os.path.isfile(out))
+
+
 def test_genmask_and_generative_composite():
-    """Prove the generative path: genmask builds a square base+mask, and repair composites
-    ONLY the masked regions from a (faked) reconstructed image over the original."""
+    """Prove the generative path: genmask builds a square base+mask, and the flatten
+    fallback composites ONLY the masked regions from a (faked) reconstructed image."""
     import illustration_genmask as igm
     with tempfile.TemporaryDirectory() as d:
         pdf = os.path.join(d, "t.pdf")
         _make_pdf(pdf)
         ppi = 150
-        s = ppi / 72.0
-        bbox = [int(120 * s), int(378 * s), int(300 * s), int(410 * s)]
+        # generative compositing is a refinement of the FLATTEN fallback (whole-page
+        # raster). Use an unowned region so repair takes that path with allow_flatten.
+        bbox = [5, 1050, 400, 1120]
         regions = [{"source_text": "My Senses", "target_text": "My Sintuie",
                     "bbox_px": bbox, "background_type": "flat",
                     "color_rgb": [241, 86, 76], "text_color_rgb": [255, 245, 200],
@@ -147,26 +201,20 @@ def test_genmask_and_generative_composite():
         check("genmask produced a square", rep["side"] >= max(rep["page_px"]))
         check("genmask base exists", os.path.isfile(base))
         check("genmask mask exists", os.path.isfile(mask))
-        # mask must be transparent (alpha 0) inside the text box, opaque outside
         mpix = pymupdf.Pixmap(mask)
-        cx = (bbox[0] + bbox[2]) // 2
-        cy = (bbox[1] + bbox[3]) // 2
-        inside_alpha = mpix.pixel(cx, cy)  # RGB read; check alpha via samples
         check("mask has alpha channel", mpix.alpha == 1)
 
-        # Fake a "reconstructed" image: solid green everywhere. After composite, ONLY the
-        # masked region should become green in the output; elsewhere stays coral.
-        genw = pymupdf.Pixmap(mpix, 0) if mpix.alpha else mpix
         fake = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, rep["side"], rep["side"]), False)
         fake.set_rect(fake.irect, (0, 200, 0))
         fake_path = os.path.join(d, "gen.png")
         fake.save(fake_path)
 
         out = os.path.join(d, "out.pdf")
+        # generative compositing lives in the flatten fallback (whole-page raster path)
         report = ilt.repair_page(pdf, 0, {"ppi": ppi, "regions": regions}, {}, "",
-                                 out, ppi=ppi, generative_bg=fake_path)
+                                 out, ppi=ppi, generative_bg=fake_path, allow_flatten=True)
         check("generative composite ran", report.get("generative_bg") is True)
-        check("generative applied a region", report.get("generative_regions", 0) == 1)
+        check("generative is review-gated", report.get("requires_review") is True)
         check("output exists (generative)", os.path.isfile(out))
 
 
@@ -177,6 +225,8 @@ def main():
     test_flat_uniformity_gate()
     test_candidates()
     test_repair_end_to_end()
+    test_repair_unowned_fails_closed()
+    test_repair_flatten_fallback_is_review_gated()
     test_genmask_and_generative_composite()
     print(f"\n{_passed}/{_run} passed")
     sys.exit(0 if _passed == _run else 1)

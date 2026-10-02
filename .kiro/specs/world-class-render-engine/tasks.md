@@ -79,17 +79,28 @@ closed · I4 derived not imposed · I5 immutable source.
   rasterized); dense page + small label (label inventoried); two signs distinct targets. (R11 matrix)
 
 ## Phase 5 — Artwork-preserving repair + coordinate transforms (R6, R7)
-- [ ] 5.1 Native text removal preserves images/line art (no white rectangle). (R6.1)
-- [ ] 5.2 Raster repair: edit correct image instance (isolate if reused) or local patch +
+- [x] 5.1 Native text removal preserves images/line art (no white rectangle). (R6.1)
+  — surgical path edits only the owning image XObject; native vector text/line-art untouched.
+- [x] 5.2 Raster repair: edit correct image instance (isolate if reused) or local patch +
   letter-shaped mask; background method by sampled type (flat/gradient/textured). (R6.2, R6.3)
-- [ ] 5.3 `CropTransform` with explicit source→render→crop→model→patch mapping after
+  — `artwork_repair.repair_page_surgical`; reused-xref isolation via page-local overlay (proven
+  pixel-identical on the untouched page); letter-shaped PIL luminance mask; flat/gradient/textured fill.
+- [x] 5.3 `CropTransform` with explicit source→render→crop→model→patch mapping after
   rotation/image-matrix normalization; use actual returned size; resize to source crop
   before composite; degenerate ⇒ `LayoutReviewRequired`. (R7.1–R7.4)
-- [ ] 5.4 Rotated/perspective ⇒ transformed path or review; full-page flatten only as
+  — `scripts/crop_transform.py` (12 tests); uses image's ACTUAL embedded size, degenerate dims fail closed.
+- [x] 5.4 Rotated/perspective ⇒ transformed path or review; full-page flatten only as
   reviewed fallback preserving boxes/rotation/labels/links. (R6.5, R7.5)
-- [ ] 5.5 Generative repair always a mandatory-review approximation. (R6.6)
-- [ ] 5.6 Verify: flat/gradient/complex artwork; image reused across pages (only intended
+  — surgical repair is rotation-correct (edits image's own pixel space, xref re-embed re-applies
+  page rotation; proven on a 90° page). Full-page flatten demoted to opt-in `--allow-flatten`,
+  sets requires_review=True.
+- [x] 5.5 Generative repair always a mandatory-review approximation. (R6.6)
+  — generative composite forces `requires_review=True` in the (flatten) path that hosts it.
+- [x] 5.6 Verify: flat/gradient/complex artwork; image reused across pages (only intended
   instance changes); rotated/CropBox/landscape/hi-res round-trip. (R11 matrix)
+  — covered by test_artwork_repair (flat/gradient/mask/reused-isolation/rotated/landscape) +
+  test_crop_transform (hi-res/actual-size/degenerate). Verified surgical repair on REAL My House
+  p7 (xref 41, actual 1713x2028) preserving native text, not flattened.
 
 ## Phase 6 — Structured fail-closed QA + versioned staged commits (R8, R9)
 - [ ] 6.1 Machine-readable QA result (`status`, `issues[]` with code/stage, `checks` map,
