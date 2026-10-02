@@ -168,13 +168,24 @@ closed · I4 derived not imposed · I5 immutable source.
   implemented as XL1 (book-level shared_artwork store + seed on render).
 
 ## Phase 8 — Verification corpus + evidence (R11)
-- [ ] 8.1 Assemble a multi-publisher / multi-size / multi-layout corpus (incl. a
+- [~] 8.1 Assemble a multi-publisher / multi-size / multi-layout corpus (incl. a
   complex-script fixture + a rotated/landscape fixture). (R11.1)
-- [ ] 8.2 Turn every acceptance-matrix row into a meaningful-output test (geometry/
+  — scripts/corpus_fixtures.py generates deterministic SYNTHETIC fixtures (landscape, rotated,
+  RTL, multi-size A4/A5/square, reused-image, gradient) + uses the real Kolulu books (2 sizes)
+  + Math Fun (Letter). HONEST GAP: real source is ONE publisher — true MULTI-PUBLISHER corpus
+  needs third-party PDFs from Captain Zan (flagged in COMPLETION_REPORT + Remaining).
+- [x] 8.2 Turn every acceptance-matrix row into a meaningful-output test (geometry/
   containment/fidelity, not "helper called"). (R11.2, R11.3)
-- [ ] 8.3 Retain before/after PDF-renderer + PDF.js evidence for covers, masks, p2. (R11.4)
-- [ ] 8.4 Completion report: changed files, behavior, pass/fail, visual samples, remaining
+  — scripts/test_acceptance_matrix.py (11): flat/gradient repair, reused-image isolation,
+  rotated/landscape round-trip, hi-res actual-size (real My House p7), degenerate→review,
+  unowned→fail-closed, multi-size, RTL, real-p2 presence.
+- [x] 8.3 Retain before/after PDF-renderer + PDF.js evidence for covers, masks, p2. (R11.4)
+  — scripts/capture_evidence.py captures both PyMuPDF + PDF.js PNGs (with blank/variance
+  signal) for any pages; verified on My House cover/p2/story.
+- [x] 8.4 Completion report: changed files, behavior, pass/fail, visual samples, remaining
   unsupported cases, new deps — no claim of universal automatic fidelity. (R11.5)
+  — COMPLETION_REPORT.md: phase table, invariants, full test tally, HONEST corpus scope,
+  deps, and explicit Remaining (multi-publisher corpus + LV1–LV6 live pass).
 
 ---
 
