@@ -45,6 +45,68 @@ Point = tuple[float, float]               # (x, y)
 Polygon = list[Point]                      # List of vertices
 
 
+# =============================================================================
+# BOUNDED CONTAINERS (world-class-render-engine spec Req 1) — a container is a
+# FIXED region translated text is placed INSIDE. Alignment positions text within
+# a container; it must NEVER enlarge the container. When a container cannot be
+# resolved we fail closed (LayoutReviewRequired) rather than invent page-wide space
+# (the root cause of the My House p2 full-width bleed).
+# =============================================================================
+
+
+class LayoutReviewRequired(RuntimeError):
+    """Raised when geometry/fit cannot be resolved safely. The caller catches this,
+    preserves the prior edition, records the per-region issue, and routes the page to
+    review (fail closed, spec invariant I3). Never swallow this into a page-wide guess."""
+
+
+@dataclass(frozen=True)
+class Bounds:
+    """An axis-aligned box with safe algebra. Refuses to manufacture area: validate()
+    rejects a non-positive box, intersect() keeps content inside a parent, inset()
+    shrinks for padding. Book-agnostic geometry primitive (spec Req 1.1)."""
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+    def validate(self) -> "Bounds":
+        if not (self.x1 > self.x0 and self.y1 > self.y0):
+            raise LayoutReviewRequired("INVALID_CONTAINER")
+        return self
+
+    def intersect(self, other: "Bounds") -> "Bounds":
+        return Bounds(max(self.x0, other.x0), max(self.y0, other.y0),
+                      min(self.x1, other.x1), min(self.y1, other.y1)).validate()
+
+    def inset(self, px: float, py: float) -> "Bounds":
+        return Bounds(self.x0 + px, self.y0 + py,
+                      self.x1 - px, self.y1 - py).validate()
+
+    def as_tuple(self) -> BBox:
+        return (self.x0, self.y0, self.x1, self.y1)
+
+    @property
+    def width(self) -> float:
+        return self.x1 - self.x0
+
+    @property
+    def height(self) -> float:
+        return self.y1 - self.y0
+
+
+def resolve_safe_box(container, page_box, padding_x: float, padding_y: float) -> "Bounds":
+    """Resolve the SAFE inner box for a placement: the inferred layout container,
+    clamped to the page, inset by padding. The caller MUST supply the inferred region
+    container — this intentionally refuses to guess one (spec Req 1.2/1.3). An
+    unresolved container fails closed."""
+    if container is None:
+        raise LayoutReviewRequired("UNRESOLVED_CONTAINER")
+    cont = container if isinstance(container, Bounds) else Bounds(*container)
+    page = page_box if isinstance(page_box, Bounds) else Bounds(*page_box)
+    return cont.intersect(page).inset(padding_x, padding_y)
+
+
 class TranslationPolicy(str, Enum):
     TRANSLATE = "translate"
     PRESERVE = "preserve"
@@ -167,6 +229,14 @@ class TextUnit:
     peer_group_id: Optional[str] = None   # elements that must share a size
     column_span: int = 1                  # >1 for merged/spanning header cells
     is_merged: bool = False               # True for a merged (spanning) header cell
+    # Bounded-container placement (world-class-render-engine spec Req 1). bbox stays the
+    # SOURCE INK box (glyph extent); layout_container is the FIXED region this unit is
+    # placed inside; safe_box is that container minus padding. Translated text is placed
+    # within safe_box and alignment may NEVER enlarge it. paragraph_id groups
+    # continuation lines of one logical paragraph (spec Req 2).
+    layout_container: Optional[tuple] = None
+    safe_box: Optional[tuple] = None
+    paragraph_id: Optional[str] = None
     # Quality
     confidence: float = 1.0
     extraction_source: str = "native"  # "native", "ocr", "inferred"
@@ -711,6 +781,160 @@ def _infer_align_h_public(source_box, cell_box):
     return _infer_align_h(source_box, cell_box)
 
 
+def _attach_generic_structure(page, page_num, spans, page_scene):
+    """
+    Resolve a bounded LAYOUT CONTAINER for every renderable unit on a NON-table page
+    (copyright / generic / story) and group units into logical paragraphs
+    (world-class-render-engine spec Req 1 + 2). This is what makes the generic renderer
+    place text INSIDE fixed geometry instead of reconstructing a per-unit box and
+    bleeding full-width.
+
+    Approach, 100% derived from source geometry (book-agnostic, spec I1/I4):
+      1. Cluster renderable units into COLUMNS by left-edge proximity (tolerance scaled
+         to text height). A column is a vertical stack of lines sharing a left margin.
+      2. Within a column, split into PARAGRAPH BLOCKS wherever a vertical gap exceeds
+         ~1.8x the local line height (a blank-line separation = a new block, e.g. the
+         publisher metadata block vs the bottom copyright notice that currently share
+         one info-left region).
+      3. Each block's LAYOUT CONTAINER is the union of its member ink boxes, widened
+         ONLY to the column's own right edge (never past the page midline toward another
+         column, and never page-wide). Clamp away from any image on the page (artwork
+         exclusion) and from the neighbouring column.
+      4. Assign to every unit in the block: layout_container, safe_box (inset),
+         cell_box (= layout_container so it flows through the SAME structural gate that
+         table cells use), align_h (inferred from the block's own lines), and a shared
+         paragraph_id.
+
+    Fails closed: a block whose container is degenerate raises LayoutReviewRequired via
+    resolve_safe_box, which the caller surfaces as a review flag.
+    """
+    units = [u for u in page_scene.text_units
+             if u.translation_policy in ("translate", "educational_adaptation")
+             and any(ch.isalnum() for ch in (u.source_text or ""))
+             # Do NOT touch units the STRICT structural gate models precisely on its own
+             # (end-markers, headings): they are validated against a tight role-specific
+             # box, not a column container. Giving them a generic container cell_box would
+             # make the strict in-box check fire against the wrong geometry.
+             and (u.semantic_role or "") not in
+             ("end_marker", "heading", "table_header", "merged_header")]
+    if not units:
+        return
+
+    page_w = page_scene.width_pt
+    page_h = page_scene.height_pt
+
+    # Image rectangles for artwork exclusion (don't let a container overlap artwork).
+    img_rects = []
+    try:
+        for img in page.get_images(full=True):
+            for r in page.get_image_rects(img[0]):
+                img_rects.append((r.x0, r.y0, r.x1, r.y1))
+    except Exception:
+        img_rects = []
+
+    # 1. Cluster into columns by left edge. Tolerance is a small FIXED margin: a column
+    # is defined by a shared left margin, so a tall display line must NOT be pulled into
+    # a body column just because its own glyphs are tall (that bled the My House left
+    # container out to the title's right edge). ~12pt catches ragged left edges without
+    # merging distinct columns.
+    COL_TOL = 12.0
+    cols = []
+    for u in sorted(units, key=lambda z: z.bbox[0]):
+        placed = False
+        for c in cols:
+            if abs(u.bbox[0] - c["x0"]) <= COL_TOL:
+                c["units"].append(u)
+                c["x0"] = min(c["x0"], u.bbox[0])
+                c["x1"] = max(c["x1"], u.bbox[2])
+                placed = True
+                break
+        if not placed:
+            cols.append({"x0": u.bbox[0], "x1": u.bbox[2], "units": [u]})
+
+    cols.sort(key=lambda c: c["x0"])
+
+    def _column_right_limit(col):
+        """Right edge a column may legally use: its own widest unit, extended toward —
+        but never into — the next column to its right, and never past the page edge."""
+        own_right = max(uu.bbox[2] for uu in col["units"])
+        next_left = page_w - 20.0
+        for other in cols:
+            if other is col:
+                continue
+            if other["x0"] > col["x0"] + 2:  # a column to the right
+                next_left = min(next_left, other["x0"])
+        # Also clamp away from any image that sits to the right of this column.
+        for (ix0, iy0, ix1, iy1) in img_rects:
+            if ix0 > col["x0"] + 2:
+                next_left = min(next_left, ix0)
+        return max(own_right, min(own_right + 4.0, next_left - 6.0))
+
+    para_idx = 0
+    for col in cols:
+        col_units = sorted(col["units"], key=lambda z: z.bbox[1])
+        col_right = _column_right_limit(col)
+
+        # 2. Split the column into paragraph blocks by vertical gap.
+        blocks = []
+        cur = [col_units[0]]
+        for prev, nxt in zip(col_units, col_units[1:]):
+            line_h = max(prev.bbox[3] - prev.bbox[1], nxt.bbox[3] - nxt.bbox[1], 1.0)
+            gap = nxt.bbox[1] - prev.bbox[3]
+            if gap > line_h * 1.8:
+                blocks.append(cur)
+                cur = [nxt]
+            else:
+                cur.append(nxt)
+        blocks.append(cur)
+
+        # 3-4. Resolve container + paragraph id for each block.
+        for block in blocks:
+            para_idx += 1
+            pid = f"p{page_num:02d}-para{para_idx:02d}"
+            bx0 = min(u.bbox[0] for u in block)
+            by0 = min(u.bbox[1] for u in block)
+            by1 = max(u.bbox[3] for u in block)
+            container = (bx0, by0, max(bx0 + 4.0, col_right), by1)
+            # Alignment inferred from the block's OWN lines (plural), not one bbox.
+            align_h = _infer_block_align_h(block, container)
+            try:
+                safe = resolve_safe_box(container, (0, 0, page_w, page_h), 1.0, 1.0)
+                safe_t = safe.as_tuple()
+            except LayoutReviewRequired:
+                # Degenerate container: leave boxes unset so the renderer falls back and
+                # the gate flags the page (fail closed, do not invent space).
+                safe_t = None
+            for u in block:
+                u.layout_container = container
+                u.safe_box = safe_t
+                u.cell_box = container  # route through the shared structural gate
+                u.align_h = align_h
+                u.align_v = "top"
+                u.paragraph_id = pid
+                u.peer_group_id = pid
+
+
+def _infer_block_align_h(block, container, tol_frac=0.12):
+    """Infer a paragraph block's horizontal alignment from the per-line gaps between
+    the lines' own ink and the container edges (spec Req 1.5/2). Uses ALL lines, not a
+    single merged bbox: centered text has roughly equal+symmetric left/right gaps on
+    every line; left/right text hugs one edge. Book-agnostic."""
+    cx0, _, cx1, _ = container
+    width = max(1.0, cx1 - cx0)
+    left_gaps, right_gaps = [], []
+    for u in block:
+        left_gaps.append(max(0.0, u.bbox[0] - cx0))
+        right_gaps.append(max(0.0, cx1 - u.bbox[2]))
+    avg_left = sum(left_gaps) / len(left_gaps)
+    avg_right = sum(right_gaps) / len(right_gaps)
+    if (avg_left + avg_right) <= 2.0:
+        return "left"
+    diff = abs(avg_left - avg_right) / width
+    if diff < tol_frac and avg_left > width * 0.08:
+        return "center"
+    return "left" if avg_left <= avg_right else "right"
+
+
 def _build_page_scene(page, page_num: int, total_pages: int) -> PageScene:
     """Build a PageScene from a pymupdf page."""
     import pymupdf
@@ -860,6 +1084,16 @@ def _build_page_scene(page, page_num: int, total_pages: int) -> PageScene:
     if page_type == "vocabulary":
         try:
             _attach_table_structure(page, page_num, spans, page_scene.text_units)
+        except Exception:
+            pass
+    else:
+        # Non-table pages (copyright/generic/story): resolve a bounded layout container +
+        # paragraph grouping per unit (world-class-render-engine spec Req 1/2) so the
+        # generic renderer places text INSIDE fixed geometry instead of a per-unit guess.
+        try:
+            _attach_generic_structure(page, page_num, spans, page_scene)
+        except LayoutReviewRequired:
+            raise
         except Exception:
             pass
 

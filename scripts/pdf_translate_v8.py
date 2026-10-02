@@ -1691,75 +1691,58 @@ def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_di
     overflow = []
     unresolved_ids = list(unresolved)
 
-    # GROUP units into COLUMN BLOCKS by geometry (book-agnostic): units whose left edges
-    # are close share a column; within a column, a large vertical gap starts a new block
-    # (e.g. the bottom-left copyright notice). Each block is rendered line-by-line, each
-    # line using its OWN source span's font size, colour and alignment — so headings stay
-    # big/centred/coloured and body stays small, with paragraph spacing between blocks.
+    # BOUNDED-CONTAINER PLACEMENT (world-class-render-engine spec Req 1/2). Each unit now
+    # carries a resolved layout_container + safe_box + align_h from the scene builder
+    # (_attach_generic_structure). We place each unit's translation INSIDE its own
+    # safe_box, with the DERIVED alignment and a hard clip to that box. Alignment only
+    # positions text within the fixed box — it may NEVER enlarge the box. This replaces
+    # the old per-unit box reconstruction + center-expansion branch that manufactured
+    # bled the bio/copyright across the page.
     placeable = [u for u in units if resolved.get(u.id)]
-    placeable.sort(key=lambda u: (round(u.bbox[0] / 12), u.bbox[1]))
-
-    columns = []
+    placeable.sort(key=lambda u: (round(u.bbox[1]), u.bbox[0]))
     for u in placeable:
-        ux0 = u.bbox[0]
-        col = None
-        for c in columns:
-            if abs(c["x0"] - ux0) <= 24:
-                col = c
-                break
-        if col is None:
-            col = {"x0": ux0, "x1": u.bbox[2], "units": []}
-            columns.append(col)
-        col["x0"] = min(col["x0"], ux0)
-        col["x1"] = max(col["x1"], u.bbox[2])
-        col["units"].append(u)
+        tr = resolved.get(u.id)
+        if not tr or not tr.strip():
+            continue
+        s = _span_for(u)
 
-    right_limit = page.rect.width - 30
-    for col in columns:
-        cus = sorted(col["units"], key=lambda u: u.bbox[1])
-        for u in cus:
-            tr = resolved.get(u.id)
-            if not tr or not tr.strip():
-                continue
-            s = _span_for(u)
+        # Resolve the placement box: prefer the scene's safe_box, else the layout
+        # container, else (legacy data with neither) the unit's own ink box — but NEVER
+        # an expanded box. If we only have the ink box we clip to it exactly.
+        box_src = getattr(u, "safe_box", None) or getattr(u, "layout_container", None)
+        if box_src is None:
             x0, y0, x1, y1 = u.bbox
-            # Size: prefer the source span's real font size; else derive from bbox height.
-            size = float(s.get("font_size")) if (s and s.get("font_size")) else max(7.0, min(y1 - y0, 40.0))
-            size = max(6.0, min(size, 60.0))
-            # Colour + alignment from the source span (falls back to unit align / black).
-            color = _hex_to_rgb01(s.get("color") if s else None, (0, 0, 0))
-            align = {"center": "center", "right": "right"}.get(getattr(u, "align_h", None), None)
-            if align is None and s is not None:
-                align = _infer_source_alignment([s], col["x0"], min(col["x1"], right_limit))
-            align = align or "left"
-            # Box width: a CENTERED heading (subtitle) may span the page to centre like
-            # the source. Every other block is clipped to its OWN detected right edge so it
-            # wraps within its column and cannot run across the page into the other column.
-            if align == "center":
-                box_right = min(page.rect.width - 40, max(x1 + (x1 - x0), col["x1"]))
-                box_left = max(40, x0 - (x1 - x0))
-            else:
-                box_left = x0
-                # Use the widest detected right edge in this column (so all lines share a
-                # consistent wrap width), capped to the page and NEVER past the midline
-                # toward the opposite column.
-                col_right = max((uu.bbox[2] for uu in col["units"]), default=x1)
-                box_right = min(col_right + 4, right_limit)
-            box = pymupdf.Rect(box_left, y0 - 1, box_right,
-                               min(page.rect.height - 20, y0 + size * 1.3 * 10)) & page.rect
-            clip = box  # hard clip so no glyph escapes the column box
-            font_file = _weight_aware_house_font([
-                {"font_size": size, "is_bold": (s.get("is_bold") if s else False),
-                 "font_name": (s.get("font_name") if s else "")}
-            ], fonts_dir)
-            used = draw_paragraph_text(
-                page, box, tr, font_file, round(size),
-                color=color, line_height=1.3, align=align, min_size=6.0, clip=clip,
-            )
-            if used is None:
-                overflow.append(u.id)
-            else:
-                placed += 1
+            box_src = (x0, y0, x1, y1)
+        bx0, by0, bx1, by1 = box_src
+
+        # Size: prefer the source span's real font size; else derive from ink height.
+        size = float(s.get("font_size")) if (s and s.get("font_size")) else max(7.0, min(u.bbox[3] - u.bbox[1], 40.0))
+        size = max(6.0, min(size, 60.0))
+        color = _hex_to_rgb01(s.get("color") if s else None, (0, 0, 0))
+        align = {"left": "left", "center": "center", "right": "right"}.get(
+            getattr(u, "align_h", None), "left")
+
+        # The placement box uses the CONTAINER for horizontal extent (fixed width, never
+        # expanded by alignment) but is anchored at THIS unit's own vertical position, so
+        # each line/field renders where the source put it (not stacked at the container
+        # top). It extends down to the container bottom so a wrapped translation can flow
+        # downward, clamped to the page.
+        box_bottom = min(page.rect.height - 10, max(by1, u.bbox[3]))
+        box_top = u.bbox[1] - 1
+        box = pymupdf.Rect(bx0, box_top, bx1, box_bottom) & page.rect
+        clip = box
+        font_file = _weight_aware_house_font([
+            {"font_size": size, "is_bold": (s.get("is_bold") if s else False),
+             "font_name": (s.get("font_name") if s else "")}
+        ], fonts_dir)
+        used = draw_paragraph_text(
+            page, box, tr, font_file, round(size),
+            color=color, line_height=1.3, align=align, min_size=6.0, clip=clip,
+        )
+        if used is None:
+            overflow.append(u.id)
+        else:
+            placed += 1
 
     report.setdefault("scene_generic", {})
     report["scene_generic"][str(page_num)] = {

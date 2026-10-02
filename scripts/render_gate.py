@@ -88,6 +88,26 @@ def validate_structure(expected_elements, rendered_pdf, fonts_dir=None, tol=3.0)
                       if cb[0] - tol <= (s["bbox"][0] + s["bbox"][2]) / 2 <= cb[2] + tol
                       and cb[1] - tol <= (s["bbox"][1] + s["bbox"][3]) / 2 <= cb[3] + tol]
             if not inside:
+                # Before declaring the element MISSING, check whether text exists at this
+                # element's vertical band but spilled HORIZONTALLY out of the column (the
+                # My House p2 bleed: a bio/copyright line rendered starting left of its
+                # container so its center falls outside the box). That is a containment
+                # defect, not a missing element — attribute it precisely so a reviewer
+                # sees the real cause. Only for non-strict (prose/generic) elements.
+                _vocab_content = role in ("word_list_item", "phonics", "list_item")
+                if not strict and not _vocab_content:
+                    band = [s for s in spans
+                            if cb[1] - tol <= (s["bbox"][1] + s["bbox"][3]) / 2 <= cb[3] + tol
+                            and s["bbox"][2] > cb[0] - 200 and s["bbox"][0] < cb[2] + 200]
+                    hspill_tol = max(tol, (cb[2] - cb[0]) * 0.06)
+                    spilled = [s for s in band
+                               if s["bbox"][0] < cb[0] - hspill_tol or s["bbox"][2] > cb[2] + hspill_tol]
+                    if spilled:
+                        failures.append({"constraint": "elementOutOfColumn", "element_id": e.get("id"),
+                                         "role": role or None, "box": list(cb),
+                                         "detail": f"element {e.get('id')} text '{(spilled[0].get('text') or '').strip()[:20]}' "
+                                                   f"spills outside its column container"})
+                        continue
                 failures.append({"constraint": "elementMissing", "element_id": e.get("id"),
                                  "role": role or None, "box": list(cb),
                                  "detail": f"no rendered text in cell for element {e.get('id')}"})
@@ -106,6 +126,31 @@ def validate_structure(expected_elements, rendered_pdf, fonts_dir=None, tol=3.0)
                                          "role": role or None, "box": list(cb),
                                          "detail": f"element {e.get('id')} text spills outside its cell"})
                         break
+            else:
+                # NON-STRICT HORIZONTAL CONTAINMENT (world-class-render-engine spec Req
+                # 1.4 / 8.2). A prose/generic element carries its resolved layout
+                # container as cell_box; its translation must stay WITHIN that column.
+                # A glyph that spills horizontally past the container is the exact
+                # signature of the My House p2 bleed (alignment grew the box / text ran
+                # across the page into another column). We check horizontal spill only
+                # (vertical flow within a column is legitimate), with a tolerance scaled
+                # to the box so sub-pixel/encoding wobble doesn't false-positive.
+                #
+                # EXCLUDED: per-word vocab content cells (word_list_item / phonics) share
+                # a deliberately LOOSE full-column box where a long translated word may
+                # legitimately exceed the modelled cell; those are policed by the vocab
+                # path, not here. This check targets prose/metadata/bio/copyright columns.
+                _vocab_content = role in ("word_list_item", "phonics", "list_item")
+                if not _vocab_content:
+                    hspill_tol = max(tol, (cb[2] - cb[0]) * 0.06)
+                    for s in inside:
+                        bb = s["bbox"]
+                        if bb[0] < cb[0] - hspill_tol or bb[2] > cb[2] + hspill_tol:
+                            failures.append({"constraint": "elementOutOfColumn", "element_id": e.get("id"),
+                                             "role": role or None, "box": list(cb),
+                                             "detail": f"element {e.get('id')} text '{(s.get('text') or '').strip()[:20]}' "
+                                                       f"spills outside its column container"})
+                            break
             # Font fidelity for this element's text (all element kinds).
             if approved:
                 for s in inside:
