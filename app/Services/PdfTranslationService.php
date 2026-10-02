@@ -110,6 +110,20 @@ class PdfTranslationService
 
         $this->setCurrentBook($book);
 
+        // XL1 (R10.4): if this book has a BOOK-LEVEL approved artwork set (cleaned
+        // backgrounds / region repairs promoted from an earlier language), seed those
+        // language-independent artwork overrides into THIS edition's layout_overrides so
+        // the cleaned artwork is reused without re-approval. Per-id text (per-language) is
+        // never seeded — only container/mask/cleaned_bg/content_class.
+        $sharedArtwork = ($book->metadata['shared_artwork']['overrides'] ?? []);
+        if (!empty($sharedArtwork)) {
+            $ov = $translation->layout_overrides ?? [];
+            foreach ($sharedArtwork as $id => $bits) {
+                $ov[$id] = array_merge($bits, $ov[$id] ?? []); // existing edition edits win
+            }
+            $translation->forceFill(['layout_overrides' => $ov])->save();
+        }
+
         // CONTRACT PATH (default): build+persist the per-element contract and render
         // from it. Fall back to the flat path only if no contract items are available.
         $usedContract = false;

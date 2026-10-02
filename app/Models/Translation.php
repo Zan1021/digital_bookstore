@@ -72,6 +72,7 @@ class Translation extends Model
         'qa_report',
         'render_fingerprint',
         'narration_fingerprint',
+        'approval_tracks',
         'layout_overrides',
         'translation_contract',
         'item_translations',
@@ -87,6 +88,7 @@ class Translation extends Model
 
     protected $casts = [
         'qa_report' => 'array',
+        'approval_tracks' => 'array',
         'layout_overrides' => 'array',
         'translation_contract' => 'array',
         'item_translations' => 'array',
@@ -247,6 +249,62 @@ class Translation extends Model
             return true;
         }
         return $this->render_status === self::STATE_APPROVED;
+    }
+
+    // ---- Separate approval TRACKS (spec R10.4/R10.5, Phase 7.4) ------------
+    public const APPROVAL_TRACKS = ['language', 'layout', 'artwork'];
+
+    /**
+     * Approve one track (language | layout | artwork), binding it to the CURRENT render
+     * fingerprint. If the content later changes, the stored fingerprint no longer matches
+     * and the track reads as NOT approved (auto-invalidation, R10.5) — no stale sign-off.
+     */
+    public function approveTrack(string $track): void
+    {
+        if (!in_array($track, self::APPROVAL_TRACKS, true)) {
+            throw new \InvalidArgumentException("Unknown approval track: {$track}");
+        }
+        $tracks = $this->approval_tracks ?? [];
+        $tracks[$track] = [
+            'approved' => true,
+            'approved_at' => now()->toIso8601String(),
+            'fingerprint' => $this->render_fingerprint, // the content this approval covers
+        ];
+        $this->approval_tracks = $tracks;
+        $this->save();
+    }
+
+    /** Whether a track is approved AGAINST THE CURRENT fingerprint (stale = not approved). */
+    public function isTrackApproved(string $track): bool
+    {
+        $entry = ($this->approval_tracks ?? [])[$track] ?? null;
+        if (!is_array($entry) || !($entry['approved'] ?? false)) {
+            return false;
+        }
+        // Fingerprint must still match the current render — a content change invalidates it.
+        return ($entry['fingerprint'] ?? null) === $this->render_fingerprint;
+    }
+
+    /** Explicitly clear a track (e.g. on a reviewer edit). */
+    public function invalidateTrack(string $track): void
+    {
+        $tracks = $this->approval_tracks ?? [];
+        unset($tracks[$track]);
+        $this->approval_tracks = $tracks;
+        $this->save();
+    }
+
+    /** Clear ALL tracks whose stored fingerprint no longer matches (R10.5 sweep). */
+    public function invalidateStaleApprovalTracks(): void
+    {
+        $tracks = $this->approval_tracks ?? [];
+        foreach ($tracks as $name => $entry) {
+            if (($entry['fingerprint'] ?? null) !== $this->render_fingerprint) {
+                unset($tracks[$name]);
+            }
+        }
+        $this->approval_tracks = $tracks;
+        $this->save();
     }
 
     public function book(): BelongsTo

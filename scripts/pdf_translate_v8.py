@@ -4704,6 +4704,16 @@ def build_overlay_data(rendered_pdf, page_number, manifest_path, image_out, dpi=
                 "sourceBounds": _to_px(r.get("sourceBounds")),
                 "safeInnerBounds": _to_px(r.get("safeInnerBounds")),
                 "renderedGlyphBounds": _to_px(r.get("renderedGlyphBounds")),
+                # Phase 7.1 (R10.1): emit the richer box set so the admin overlay can toggle
+                # source ink / layout container / erase mask / target glyph / protected
+                # artwork independently. layoutContainer defaults to safeInnerBounds (the
+                # Phase-1 resolved container) when the manifest doesn't carry it separately;
+                # eraseMask/protectedArtwork pass through when present (Phase-5 artwork path).
+                "layoutContainer": _to_px(r.get("layoutContainer") or r.get("safeInnerBounds")),
+                "targetGlyphBounds": _to_px(r.get("renderedGlyphBounds")),
+                "eraseMask": _to_px(r.get("eraseMask")),
+                "protectedArtwork": _to_px(r.get("protectedArtwork")),
+                "contentClass": r.get("contentClass") or r.get("content_class"),
                 "readingOrderIndex": len(regions_out),
                 "visualScaleRatio": vsr,
                 "lineHeight": r.get("lineHeight"),

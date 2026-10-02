@@ -17,6 +17,18 @@ class ReviewQueue extends Component
     public ?int $currentPage = null;
     public string $filter = 'all'; // all, flagged, approved, rejected
 
+    // Phase 7.2 / UI1 — interactive overlay state.
+    public bool $showOverlay = false;
+    public array $overlay = [];            // overlay-data payload for the current page
+    public array $overlayToggles = [       // which box layers are visible
+        'sourceBounds' => true,
+        'layoutContainer' => true,
+        'eraseMask' => false,
+        'targetGlyphBounds' => false,
+        'protectedArtwork' => true,
+    ];
+    public ?string $selectedRegionId = null;
+
     public function mount(Book $book, ?string $language = null)
     {
         $this->book = $book;
@@ -47,8 +59,9 @@ class ReviewQueue extends Component
         }
 
         // Pages the render gate flagged with structure deviations (Req 4.2) — surfaced
-        // so the reviewer's attention is drawn to likely-broken pages.
-        $qa = $this->translation->qa_report ?? [];
+        // so the reviewer's attention is drawn to likely-broken pages. Read via the
+        // decoder (Phase 6.3) so legacy double-encoded qa_report rows still resolve.
+        $qa = $this->translation->decodeQaReport() ?? [];
         $deviationPages = [];
         foreach (($qa['structureDeviations'] ?? $qa['review_pages'] ?? []) as $key => $val) {
             // Accept either a list of page numbers or a map keyed by page number.
@@ -100,6 +113,50 @@ class ReviewQueue extends Component
     public function selectPage(int $pageNum)
     {
         $this->currentPage = $pageNum;
+        $this->overlay = [];           // invalidate stale overlay for the previous page
+        $this->selectedRegionId = null;
+        if ($this->showOverlay) {
+            $this->loadOverlay();
+        }
+    }
+
+    /**
+     * Phase 7.2 / UI1 — toggle the interactive overlay and (lazily) load its box data for
+     * the current page from the engine's overlay-data command.
+     */
+    public function toggleOverlay(): void
+    {
+        $this->showOverlay = ! $this->showOverlay;
+        if ($this->showOverlay && empty($this->overlay)) {
+            $this->loadOverlay();
+        }
+    }
+
+    public function toggleOverlayLayer(string $layer): void
+    {
+        if (array_key_exists($layer, $this->overlayToggles)) {
+            $this->overlayToggles[$layer] = ! $this->overlayToggles[$layer];
+        }
+    }
+
+    public function selectRegion(?string $regionId): void
+    {
+        $this->selectedRegionId = $regionId;
+    }
+
+    /** Load the overlay-data payload (image + per-region boxes) for the current page. */
+    public function loadOverlay(): void
+    {
+        if (! $this->translation || ! $this->currentPage) {
+            return;
+        }
+        try {
+            $this->overlay = app(\App\Services\PdfTranslationService::class)
+                ->buildOverlayData($this->book, $this->translation, $this->currentPage);
+        } catch (\Throwable $e) {
+            $this->overlay = [];
+            session()->flash('error', 'Could not build overlay: ' . $e->getMessage());
+        }
     }
 
     public function setFilter(string $filter)
@@ -191,6 +248,127 @@ class ReviewQueue extends Component
     }
 
     /**
+     * PER-REGION EDIT (spec R10.3, Phase 7.3). Write a reviewer's correction for a single
+     * region to the CANONICAL override store (layout_overrides[regionId]) — NOT a second
+     * parallel store — then re-render. The contract resolver + attachTargetsById already
+     * consume layout_overrides[id] with top priority, so the edit flows through the single
+     * production path. The edit invalidates the page approval, the layout+artwork approval
+     * tracks, and narration (R10.5). Supported fields: translation (text), font_role,
+     * translation_policy, container (bbox override).
+     *
+     * @param array $fields subset of ['translation','font_role','translation_policy','container']
+     */
+    public function updateRegion(string $regionId, array $fields): void
+    {
+        if (! $this->translation) {
+            return;
+        }
+        $allowed = ['translation', 'font_role', 'translation_policy', 'container'];
+        $clean = array_intersect_key($fields, array_flip($allowed));
+        if (empty($clean)) {
+            return;
+        }
+
+        $overrides = $this->translation->layout_overrides ?? [];
+        $overrides[$regionId] = array_merge($overrides[$regionId] ?? [], $clean, [
+            'edited_by_reviewer' => true,
+            'edited_at' => now()->toIso8601String(),
+        ]);
+        $this->translation->layout_overrides = $overrides;
+        $this->translation->save();
+
+        // A per-region edit changes content/layout: drop the layout + artwork approvals and
+        // mark narration outdated (R10.5). Language approval survives a pure layout tweak,
+        // but a text change also drops it.
+        $this->translation->invalidateTrack('layout');
+        $this->translation->invalidateTrack('artwork');
+        if (array_key_exists('translation', $clean)) {
+            $this->translation->invalidateTrack('language');
+            $this->translation->editionNarrations()
+                ->where('status', 'completed')
+                ->update(['is_outdated' => true]);
+        }
+
+        // Re-render through the single contract path so the override takes effect and the
+        // fingerprint (and thus approval validity) is recomputed.
+        try {
+            app(\App\Services\PdfTranslationService::class)
+                ->createTranslatedPdf($this->book, $this->translation->fresh());
+            $this->translation = $this->translation->fresh();
+        } catch (\Throwable $e) {
+            session()->flash('error', 'Re-render after region edit failed: ' . $e->getMessage());
+        }
+
+        $this->loadTranslation();
+    }
+
+    /** Approve one of the separate tracks (language | layout | artwork) — R10.4. */
+    public function approveTrack(string $track): void
+    {
+        try {
+            $this->translation?->approveTrack($track);
+            session()->flash('success', ucfirst($track) . ' approved for this edition.');
+        } catch (\Throwable $e) {
+            session()->flash('error', $e->getMessage());
+        }
+        $this->loadTranslation();
+    }
+
+    /**
+     * UI2 — reviewer dragged a region's layout container to new bounds in the overlay. The
+     * incoming box is in IMAGE PIXELS at the overlay dpi; convert to PDF points and persist
+     * it as a per-region container override via updateRegion (which re-renders + invalidates).
+     */
+    public function updateRegionContainer(string $regionId, float $x0, float $y0, float $x1, float $y1): void
+    {
+        $dpi = (float) ($this->overlay['dpi'] ?? 110);
+        $scale = 72.0 / $dpi; // px -> pt
+        $container = [
+            round($x0 * $scale, 2), round($y0 * $scale, 2),
+            round($x1 * $scale, 2), round($y1 * $scale, 2),
+        ];
+        // guard against a degenerate drag
+        if ($container[2] <= $container[0] || $container[3] <= $container[1]) {
+            session()->flash('error', 'Ignored a degenerate container drag.');
+            return;
+        }
+        $this->updateRegion($regionId, ['container' => $container]);
+    }
+
+    /**
+     * XL1 (R10.4) — promote this edition's APPROVED artwork (cleaned backgrounds + region
+     * repairs) to a BOOK-LEVEL store so other-language editions of the same book reuse the
+     * cleaned artwork without re-approving it. The artwork is language-independent (only the
+     * overlaid text differs), so a one-time approval is reusable across languages.
+     */
+    public function reuseArtworkAcrossLanguages(): void
+    {
+        if (! $this->translation || ! $this->translation->isTrackApproved('artwork')) {
+            session()->flash('error', 'Approve the artwork track for this edition first.');
+            return;
+        }
+        $artworkOverrides = [];
+        foreach (($this->translation->layout_overrides ?? []) as $id => $ov) {
+            // Keep only artwork-relevant, language-independent bits (mask/container/cleaned bg),
+            // NOT the translated text (that is per-language).
+            $keep = array_intersect_key($ov, array_flip(['container', 'mask', 'cleaned_bg', 'content_class']));
+            if (!empty($keep)) {
+                $artworkOverrides[$id] = $keep;
+            }
+        }
+        $meta = $this->book->metadata ?? [];
+        $meta['shared_artwork'] = [
+            'approved_at' => now()->toIso8601String(),
+            'approved_from_language' => $this->translation->language_code,
+            'fingerprint' => $this->translation->render_fingerprint,
+            'overrides' => $artworkOverrides,
+        ];
+        $this->book->forceFill(['metadata' => $meta])->save();
+        session()->flash('success',
+            'Artwork approved once and now reusable across all languages of this book.');
+    }
+
+    /**
      * Promote the edition to APPROVED once every page is approved and layout QA is
      * clear (spec Req 5.2). Narration for the edition unlocks only after this.
      */
@@ -228,6 +406,15 @@ class ReviewQueue extends Component
             'editionTotalPages' => $editionTotal,
             'editionCanApprove' => $this->translation?->allPagesApproved() && $this->translation?->canBePublished(),
             'editionRenderStatus' => $this->translation?->render_status,
+            'overlay' => $this->overlay,
+            'overlayToggles' => $this->overlayToggles,
+            'showOverlay' => $this->showOverlay,
+            'selectedRegionId' => $this->selectedRegionId,
+            'approvalTracks' => [
+                'language' => $this->translation?->isTrackApproved('language') ?? false,
+                'layout' => $this->translation?->isTrackApproved('layout') ?? false,
+                'artwork' => $this->translation?->isTrackApproved('artwork') ?? false,
+            ],
             'stats' => [
                 'total' => count($this->pages),
                 'approved' => collect($this->pages)->where('review_status', 'approved')->count(),

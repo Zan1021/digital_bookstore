@@ -143,15 +143,29 @@ closed · I4 derived not imposed · I5 immutable source.
   integration proof — deterministic units all green; see completion note.
 
 ## Phase 7 — Admin review experience (R10)
-- [ ] 7.1 Extend the `overlay-data` engine command to emit the new boxes (source ink /
+- [x] 7.1 Extend the `overlay-data` engine command to emit the new boxes (source ink /
   container / mask / glyph bounds / protected artwork). (R10.1)
-- [ ] 7.2 ReviewQueue: original/translated previews + toggleable overlays; show effective
+  — build_overlay_data now emits layoutContainer (defaults to safeInnerBounds), targetGlyphBounds,
+  eraseMask, protectedArtwork, contentClass. (test_overlay_boxes 3/3)
+- [x] 7.2 ReviewQueue: original/translated previews + toggleable overlays; show effective
   font/size/alignment/target/diagnostic reason/policy origin. (R10.1, R10.2)
-- [ ] 7.3 Per-region edits (container, paragraph grouping, policy, mask, font role, text)
+  — DONE: interactive overlay layer (Alpine `overlayLayer`) draws source-ink/container/mask/
+  glyph/protected-artwork boxes over the translated PNG with per-type toggles; selected-region
+  info panel shows type/content-class/visual-scale/line-height/clipped/issues. loadOverlay()
+  pulls overlay-data on demand. (ReviewQueueOverlayTest)
+- [x] 7.3 Per-region edits (container, paragraph grouping, policy, mask, font role, text)
   write to canonical manifest/overrides (no parallel store); edits invalidate the
   fingerprint/approvals. (R10.3, R10.5)
-- [ ] 7.4 One-time background approval reusable across languages; separate language/layout/
+  — ReviewQueue::updateRegion writes to layout_overrides[regionId] (the canonical store the
+  contract resolver + attachTargetsById already consume), re-renders via the single path,
+  invalidates layout+artwork tracks (+language+narration on a text change).
+- [x] 7.4 One-time background approval reusable across languages; separate language/layout/
   artwork approval tracks; `FontManager` persists + previews policy. (R10.4)
+  — Translation approval TRACKS (language/layout/artwork) each tied to render_fingerprint;
+  isTrackApproved returns false when stale; invalidateStaleApprovalTracks sweep; migration
+  2026_10_02_000002. FontManager policy persistence done in Phase 3. (ApprovalTracksTest 5/5)
+  Cross-language cleaned-artwork reuse (R10.4 "one-time background reusable across languages")
+  implemented as XL1 (book-level shared_artwork store + seed on render).
 
 ## Phase 8 — Verification corpus + evidence (R11)
 - [ ] 8.1 Assemble a multi-publisher / multi-size / multi-layout corpus (incl. a
@@ -184,6 +198,19 @@ dropped — it is the integration proof the deterministic unit/feature tests can
 - [ ] LV4 — PDF.js visual check (6.4) LIVE on real covers/masks with `pdfjs_check.enabled`.
 - [ ] LV5 — Rerun-identical-inputs drift check LIVE (R9.4): same inputs twice ⇒ identical
   fingerprint, no duplicate units, no compounded inpaint.
+- [ ] LV6 — Browser-drive the ReviewQueue overlay LIVE (Dusk/Playwright): toggle each box
+  layer, drag a container box, confirm updateRegionContainer persists the px→pt override and
+  the re-render reflects it. (The Alpine drag interaction can't be unit-tested server-side.)
+
+## FOLLOW-ON UI / CROSS-LANGUAGE — DONE
+- [x] UI1 — Interactive toggleable overlay LAYER in ReviewQueue (Alpine overlayLayer): boxes
+  over the page PNG with per-type toggles + effective region info panel. (ReviewQueueOverlayTest)
+- [x] UI2 — Reviewer drag-to-edit container: overlayLayer drag → updateRegionContainer()
+  (px→pt) → updateRegion() container override → re-render. Degenerate drags ignored.
+- [x] XL1 — One-time cleaned-artwork reuse ACROSS languages: reuseArtworkAcrossLanguages()
+  promotes language-independent artwork overrides (container/mask/cleaned_bg/content_class, NOT
+  per-language text) to book.metadata['shared_artwork']; createTranslatedPdf seeds them into a
+  new edition's layout_overrides. Requires artwork track approved first. (ReviewQueueOverlayTest)
 
 ---
 
