@@ -56,37 +56,36 @@ class IllustrationTextService
             ?? "books/translated/{$book->id}_{$translation->language_code}.pdf";
         $pdfPath = Storage::disk('public')->path($translatedRel);
 
-        $result = ['modified_pages' => [], 'review_pages' => [], 'skipped' => [], 'ok' => true];
+        $result = ['modified_pages' => [], 'review_pages' => [], 'skipped' => [], 'ok' => true,
+                   'coverage' => [], 'issues' => []];
 
         if (!is_file($pdfPath)) {
             Log::warning('IllustrationText: translated PDF missing', ['path' => $pdfPath]);
             return $result + ['skipped_reason' => 'missing_pdf'];
         }
 
-        // Cheap pre-filter: only pages with dominant imagery + little native text.
+        // Cheap pre-filter: only pages with dominant imagery + little native text. The
+        // heuristic only TRIAGES which pages to inspect first — it never DECIDES that a
+        // page has no artwork text (spec Req 5.5). Pages it skips are recorded as
+        // 'no-candidate' coverage, not silently dropped.
         $candidates = $this->candidatePages($pdfPath);
+        $candidatePageNumbers = array_map(fn ($c) => ((int) $c['page']) + 1, $candidates);
+
+        // REGION-LEVEL OWNERSHIP (spec Req 5.2/5.3): the V8 contract renderer owns the
+        // native text REGIONS it has a manifest for — not whole pages. A page with a
+        // native paragraph AND a baked-in sign must still have the sign processed. We
+        // skip only a candidate REGION whose box overlaps a contract-owned region box,
+        // never the whole page. (Replaces the old whole-page contractOwnedPages skip.)
+        $ownedRegionsByPage = $this->contractOwnedRegions($book);
+
         if (empty($candidates)) {
             return $result; // nothing to do — no vision spend
         }
 
-        // CRITICAL GUARD: the V8 contract renderer already lays out every page it has a
-        // manifest region for (story/vocabulary/table/cover) applying ALL typography, font,
-        // case, alignment and table rules. This module must NEVER re-process those pages —
-        // doing so re-rasters and destroys correctly-rendered text. It runs ONLY on pages
-        // the contract does NOT own (genuinely baked-in illustration text with no manifest
-        // coverage). Build the set of contract-owned page numbers (1-based) and skip them.
-        $contractPages = $this->contractOwnedPages($book);
-
         foreach ($candidates as $cand) {
             $pageIndex = (int) $cand['page']; // 0-based
             $pageNumber = $pageIndex + 1;     // 1-based (manifest/page_number space)
-
-            // Skip any page the V8 contract already rendered. This is the fix for the
-            // regression where story pages got re-rastered and corrupted.
-            if (in_array($pageNumber, $contractPages, true)) {
-                $result['skipped'][] = ['page' => $pageNumber, 'reason' => 'contract-owned (V8 rendered)'];
-                continue;
-            }
+            $ownedBoxes = $ownedRegionsByPage[$pageNumber] ?? [];
 
             // PREFER GROUND TRUTH: if the page has a real text layer over the artwork, use
             // the PDF's own line boxes for exact placement (the correct, book-agnostic path
@@ -102,31 +101,75 @@ class IllustrationTextService
                     Log::warning("IllustrationText: detect failed (non-fatal)", [
                         'page' => $pageIndex, 'error' => $e->getMessage(),
                     ]);
+                    $result['coverage'][$pageNumber] = 'unresolved'; // inspection failed
                     continue; // detection failure must not block the render
                 }
                 if (empty($regions)) {
-                    continue; // no baked-in text on this page
+                    // Distinguish "inspected, nothing baked-in" from "not inspected"
+                    // (spec Req 5.4): this page WAS scanned and had no artwork text.
+                    $result['coverage'][$pageNumber] = 'scanned-clean';
+                    continue;
                 }
+            }
+
+            // REGION-LEVEL OWNERSHIP: drop only the regions already owned by the contract
+            // renderer (bbox overlap), keeping genuinely-baked-in regions on the same page.
+            $regions = $this->filterContractOwnedRegions($regions, $ownedBoxes, $ppi);
+            if (empty($regions)) {
+                $result['skipped'][] = ['page' => $pageNumber, 'reason' => 'all regions contract-owned'];
+                $result['coverage'][$pageNumber] = 'scanned-clean';
+                continue;
+            }
+
+            // STABLE REGION IDS + CONTENT CLASS (spec Req 5.1/5.6): tag each region with a
+            // source-derived stable id and its content class so targets attach by ID and
+            // the manifest record is unambiguous.
+            $regions = $this->tagRegions($regions, $pageNumber, $usedNative);
+
+            if (!$usedNative) {
                 // Only the vision path needs colour measurement + uniformity gating; the
                 // native path already has exact boxes, colours and font sizes.
                 [$regions, $needsReview] = $this->measureAndGate($pdfPath, $pageIndex, $ppi, $regions);
                 if ($needsReview) {
-                    $result['review_pages'][] = $pageIndex + 1;
+                    $result['review_pages'][] = $pageNumber;
+                    $result['coverage'][$pageNumber] = 'deferred'; // uncertain -> review
                     $result['ok'] = false;
                     continue; // do NOT modify a page we are not confident about
                 }
+            }
+
+            // PER-ID TARGETS (spec Req 5.6 / Phase 4.5): resolve each region's target by its
+            // stable id from the edition's per-element translations / overrides. A region
+            // with no target is NOT erased — it is recorded as an issue and blocks the page.
+            [$regions, $regionIssues] = $this->attachTargetsById($translation, $regions);
+            if (!empty($regionIssues)) {
+                foreach ($regionIssues as $iss) {
+                    $result['issues'][] = $iss + ['page' => $pageNumber];
+                }
+                $result['review_pages'][] = $pageNumber;
+                $result['coverage'][$pageNumber] = 'deferred';
+                $result['ok'] = false;
+                continue; // missing target => do not modify; block (fail closed)
             }
 
             $applied = $this->repair(
                 $book, $translation, $pdfPath, $pageIndex, $ppi, $regions, $generative
             );
             if ($applied['modified'] ?? false) {
-                $result['modified_pages'][] = $pageIndex + 1;
+                $result['modified_pages'][] = $pageNumber;
+                $result['coverage'][$pageNumber] = 'resolved';
             }
             if (!empty($applied['overflow'])) {
-                $result['review_pages'][] = $pageIndex + 1;
+                $result['review_pages'][] = $pageNumber;
+                $result['coverage'][$pageNumber] = 'deferred';
                 $result['ok'] = false;
             }
+        }
+
+        // Record coverage for candidate pages we never reached, and for non-candidate
+        // pages (triaged out) so EVERY page has a recorded result (spec Req 5.4).
+        foreach ($candidatePageNumbers as $pn) {
+            $result['coverage'][$pn] = $result['coverage'][$pn] ?? 'no-candidate';
         }
 
         // Verify modified pages with the existing AI compare gate.
@@ -148,12 +191,13 @@ class IllustrationTextService
     }
 
     /**
-     * Page numbers (1-based) the V8 CONTRACT renderer already owns — any manifest page that
-     * has at least one translatable (non-preserve) region. This module must skip these so it
-     * never re-rasters correctly-rendered story/vocab/table pages. Returns [] if no manifest
-     * (then the module may run everywhere, e.g. genuinely baked-in books).
+     * Contract-owned REGIONS per page (spec Req 5.2/5.3): map page_number => list of
+     * [x0,y0,x1,y1] PDF-point boxes the V8 contract renderer already owns (any manifest
+     * region that is translatable and has items). Region-level, NOT whole-page, so a
+     * baked-in sign on a page that also has a native paragraph is still processed.
+     * Returns [] if no manifest.
      */
-    private function contractOwnedPages(Book $book): array
+    private function contractOwnedRegions(Book $book): array
     {
         try {
             $disk = Storage::disk('public');
@@ -161,7 +205,7 @@ class IllustrationTextService
                 return [];
             }
             $manifest = json_decode($disk->get($book->manifest_path), true) ?: [];
-            $owned = [];
+            $byPage = [];
             foreach (($manifest['pages'] ?? []) as $pg) {
                 $pageNum = $pg['page_number'] ?? null;
                 if ($pageNum === null) {
@@ -170,22 +214,130 @@ class IllustrationTextService
                 foreach (($pg['regions'] ?? []) as $region) {
                     $policy = $region['translation_policy'] ?? 'preserve';
                     $hasItems = !empty($region['items']);
-                    if ($policy !== 'preserve' && $hasItems) {
-                        $owned[] = (int) $pageNum;
-                        break;
+                    $bbox = $region['bbox'] ?? $region['bbox_pt'] ?? null;
+                    if ($policy !== 'preserve' && $hasItems && is_array($bbox) && count($bbox) === 4) {
+                        $byPage[(int) $pageNum][] = array_map('floatval', $bbox);
                     }
                 }
             }
-            return array_values(array_unique($owned));
+            return $byPage;
         } catch (\Throwable $e) {
-            // On any doubt, be conservative: treat NOTHING as safe to touch by returning a
-            // sentinel that the caller interprets as "skip all" would be wrong; instead we
-            // return [] and rely on the (now separate) cover-only default. Log it.
-            Log::warning('IllustrationText: contractOwnedPages failed; treating none as owned', [
+            Log::warning('IllustrationText: contractOwnedRegions failed; treating none as owned', [
                 'error' => $e->getMessage(),
             ]);
             return [];
         }
+    }
+
+    /**
+     * Drop candidate regions whose box overlaps a contract-owned region box (so the
+     * contract renderer keeps ownership of native text while genuinely baked-in regions
+     * on the same page survive). Owned boxes are PDF points; region boxes are pixels at
+     * $ppi — convert owned boxes to pixels for comparison. Overlap = IoU-ish center/area
+     * intersection over the smaller box > 0.5.
+     */
+    private function filterContractOwnedRegions(array $regions, array $ownedBoxesPt, int $ppi): array
+    {
+        if (empty($ownedBoxesPt)) {
+            return $regions;
+        }
+        $scale = $ppi / 72.0;
+        $ownedPx = array_map(fn ($b) => [$b[0] * $scale, $b[1] * $scale, $b[2] * $scale, $b[3] * $scale], $ownedBoxesPt);
+
+        $overlapFrac = function (array $a, array $b): float {
+            $ix0 = max($a[0], $b[0]); $iy0 = max($a[1], $b[1]);
+            $ix1 = min($a[2], $b[2]); $iy1 = min($a[3], $b[3]);
+            if ($ix1 <= $ix0 || $iy1 <= $iy0) {
+                return 0.0;
+            }
+            $inter = ($ix1 - $ix0) * ($iy1 - $iy0);
+            $areaA = max(1.0, ($a[2] - $a[0]) * ($a[3] - $a[1]));
+            $areaB = max(1.0, ($b[2] - $b[0]) * ($b[3] - $b[1]));
+            return $inter / min($areaA, $areaB);
+        };
+
+        $kept = [];
+        foreach ($regions as $r) {
+            $box = $r['bbox_px'] ?? null;
+            if (!is_array($box) || count($box) !== 4) {
+                $kept[] = $r;
+                continue;
+            }
+            $owned = false;
+            foreach ($ownedPx as $ob) {
+                if ($overlapFrac($box, $ob) > 0.5) {
+                    $owned = true;
+                    break;
+                }
+            }
+            if (!$owned) {
+                $kept[] = $r;
+            }
+        }
+        return $kept;
+    }
+
+    /**
+     * Tag each region with a stable source-derived id + content class (spec Req 5.1/5.6).
+     * id = p{page:02d}_art{index:02d}. content class: 'native' when it came from the PDF
+     * text layer (selectable text over artwork), else 'raster_text' (baked-in pixels).
+     * Book-agnostic — derived from how the region was detected, not any book constant.
+     */
+    private function tagRegions(array $regions, int $pageNumber, bool $usedNative): array
+    {
+        $out = [];
+        foreach (array_values($regions) as $i => $r) {
+            $r['id'] = $r['id'] ?? sprintf('p%02d_art%02d', $pageNumber, $i + 1);
+            $r['source_kind'] = $usedNative ? 'native' : 'raster_text';
+            $r['semantic_role'] = $r['semantic_role'] ?? 'artwork_label';
+            $out[] = $r;
+        }
+        return $out;
+    }
+
+    /**
+     * Resolve each region's target text BY STABLE ID (spec Req 5.6 / Phase 4.5),
+     * replacing the old whole-page `__single__` blob and any line-index fallback.
+     * Priority per region: a per-id layout override > the machine per-element
+     * translation (item_translations[id]) > an already-attached target_text (native
+     * path carries the page's translated line). A region with NO usable target is NOT
+     * given one — it is returned as an ISSUE so the caller blocks the page (fail closed,
+     * never erase without a replacement, never leak the source).
+     *
+     * @return array{0: array, 1: array} [regions-with-targets, issues]
+     */
+    private function attachTargetsById(Translation $translation, array $regions): array
+    {
+        $overrides = $translation->layout_overrides ?? [];
+        $itemTr = $translation->item_translations ?? [];
+        $issues = [];
+        $out = [];
+
+        foreach ($regions as $r) {
+            $id = $r['id'] ?? null;
+            // A region marked preserve keeps its source pixels; never erase it.
+            if (($r['translation_policy'] ?? 'translate') === 'preserve') {
+                continue;
+            }
+            $target = null;
+            if ($id && isset($overrides[$id]['translation']) && trim((string) $overrides[$id]['translation']) !== '') {
+                $target = (string) $overrides[$id]['translation'];
+            } elseif ($id && isset($itemTr[$id]) && trim((string) $itemTr[$id]) !== '') {
+                $target = (string) $itemTr[$id];
+            } elseif (!empty($r['target_text']) && trim((string) $r['target_text']) !== '') {
+                // Native path already resolved a per-line target from the edition.
+                $target = (string) $r['target_text'];
+            }
+
+            if ($target === null) {
+                $issues[] = ['code' => 'MISSING_TARGET', 'region_id' => $id,
+                             'source_text' => $r['source_text'] ?? ''];
+                continue; // do NOT erase this region
+            }
+            $r['target_text'] = $target;
+            $out[] = $r;
+        }
+        return [$out, $issues];
     }
 
     /**
@@ -346,27 +498,6 @@ SYS;
         return $out;
     }
 
-    /** Drop regions that overlap real selectable PDF text (owned by the contract renderer). */
-    private function filterNativeText(string $pdfPath, int $pageIndex, array $regions): array
-    {
-        if (empty($regions)) {
-            return $regions;
-        }
-        // Ask Python for native text rectangles (in the SAME pixel space would require ppi;
-        // instead we get PDF-space words and convert). Keep it simple + robust: if the page
-        // has substantial native text overlapping the region, drop it.
-        $py = sprintf(
-            'import pymupdf,json,sys; d=pymupdf.open(r"%s"); p=d[%d]; ' .
-            'print(json.dumps([[w[0],w[1],w[2],w[3]] for w in p.get_text("words")]))',
-            $pdfPath, $pageIndex
-        );
-        $proc = new Process(['python', '-c', $py]);
-        $proc->setTimeout(60);
-        $proc->run();
-        // If we cannot determine, keep regions (fail open for detection, closed for edits later).
-        return $regions;
-    }
-
     /**
      * Measure real background colour from proposed sample regions and gate on uniformity.
      * Returns [regions(with color_rgb + text_color_rgb + align), needsReview].
@@ -397,9 +528,8 @@ SYS;
     private function repair(Book $book, Translation $translation, string $pdfPath,
                             int $pageIndex, int $ppi, array $regions, bool $generative): array
     {
-        // Attach target text from the edition's translated pages when available.
-        $regions = $this->attachTargets($translation, $pageIndex, $regions);
-
+        // Targets are already resolved per-region by attachTargetsById() before this call
+        // (spec Req 5.6) — no whole-page blob fallback here.
         $regionsPath = storage_path('app/temp/illus_regions_' . uniqid() . '.json');
         file_put_contents($regionsPath, json_encode(['ppi' => $ppi, 'regions' => $regions], JSON_UNESCAPED_UNICODE));
 
@@ -572,24 +702,6 @@ SYS;
             }
         }
         return '1024x1024';
-    }
-
-    /** Map source_text -> target_text from the edition's translated pages for this page. */
-    private function attachTargets(Translation $translation, int $pageIndex, array $regions): array
-    {
-        $page = $translation->translatedPages()
-            ->where('page_number', $pageIndex + 1)->first();
-        $map = [];
-        if ($page && $page->translated_text) {
-            // Best-effort: single-line title pages map source line -> translated line.
-            $map = ['__single__' => trim($page->translated_text)];
-        }
-        foreach ($regions as &$r) {
-            if (empty($r['target_text']) && isset($map['__single__'])) {
-                $r['target_text'] = $map['__single__'];
-            }
-        }
-        return $regions;
     }
 
     private function renderPage(string $pdfPath, int $pageIndex, int $ppi): ?array
