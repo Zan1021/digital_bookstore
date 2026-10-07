@@ -154,9 +154,119 @@ def verify_translations_in_output(output_path: str, translations: dict) -> dict:
 
 
 # =============================================================================
-# ENCODING VERIFICATION
+# TEXT-LAYER GATE (engine-wiring-and-activation R-W4 / T9)
 # =============================================================================
 
+def _expected_strings_from_payload(translations: dict) -> list:
+    """Collect expected translated strings from EITHER engine payload shape, so the gate
+    is agnostic to the contract (`items`) vs legacy flat (`pages`) path.
+
+    - contract: {"items": [{"id":..., "translated_text" | "text" | "translation": str}, ...]}
+    - flat:     {"pages": [{"page_number":N, "translated_text": str}, ...]}
+    Returns a de-duplicated list of non-empty strings.
+    """
+    out = []
+    for item in translations.get("items", []) or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("translated_text", "translation", "text"):
+            val = item.get(key)
+            if isinstance(val, str) and val.strip():
+                out.append(val.strip())
+                break
+    for page in translations.get("pages", []) or []:
+        if isinstance(page, dict):
+            val = page.get("translated_text")
+            if isinstance(val, str) and val.strip():
+                out.append(val.strip())
+    # De-dupe, preserve order.
+    return list(dict.fromkeys(out))
+
+
+def verify_text_layer(output_path: str, translations: dict,
+                      min_match_rate: float = 0.6) -> dict:
+    """POST-RENDER TEXT-LAYER GATE (R-W4): confirm the SAVED pdf's text layer is REAL,
+    searchable and not garbled — the ToUnicode-corruption class of defect where a page
+    looks right as pixels but extracts to empty/mojibake.
+
+    Book-agnostic: the expected corpus is whatever strings the payload carries (either
+    shape); no title/page/language literals. Fail-closed: a corrupt/garbled encoding or a
+    searchable-but-empty document fails even if there were no expected strings to match.
+
+    Returns:
+      {
+        "ran": True,
+        "searchable": bool,          # the output has an extractable text layer at all
+        "encoding_ok": bool,         # no U+FFFD / control-char garbling
+        "match_rate": float,         # fraction of expected significant words found
+        "expected_word_count": int,
+        "found_word_count": int,
+        "missing_words_sample": [...],
+        "encoding_issues": [...],
+        "pass": bool,                # searchable AND encoding_ok AND match_rate >= threshold
+        "reason": str | None,        # why it failed (actionable), when pass is False
+      }
+    """
+    expected_strings = _expected_strings_from_payload(translations)
+
+    doc = pymupdf.open(output_path)
+    extracted_all = []
+    try:
+        for page_idx in range(len(doc)):
+            extracted_all.append(doc[page_idx].get_text("text"))
+    finally:
+        doc.close()
+    extracted_text = "\n".join(extracted_all)
+
+    searchable = len(extracted_text.strip()) > 0
+
+    enc = verify_encoding(output_path)
+    encoding_ok = enc["pass"]
+
+    # Significant-word match rate (3+ char words, case-insensitive) across the whole doc.
+    expected_words = set()
+    for s in expected_strings:
+        expected_words |= {w.lower() for w in re.findall(r"\b\w{3,}\b", s)}
+    extracted_words = {w.lower() for w in re.findall(r"\b\w{3,}\b", extracted_text)}
+
+    if expected_words:
+        found = expected_words & extracted_words
+        match_rate = len(found) / len(expected_words)
+        missing = sorted(expected_words - extracted_words)
+    else:
+        found = set()
+        match_rate = 1.0 if searchable else 0.0
+        missing = []
+
+    reason = None
+    if not searchable:
+        reason = "output PDF has NO extractable text layer (painted pixels only / ToUnicode missing)"
+    elif not encoding_ok:
+        reason = ("output text layer is garbled: "
+                  + ", ".join(f"p{i['page']}:{i['issue']}x{i['count']}" for i in enc["encoding_issues"][:5]))
+    elif expected_words and match_rate < min_match_rate:
+        reason = (f"only {match_rate:.0%} of expected words are searchable in the output "
+                  f"(threshold {min_match_rate:.0%}); the text layer does not match the translation")
+
+    passed = searchable and encoding_ok and (not expected_words or match_rate >= min_match_rate)
+
+    return {
+        "ran": True,
+        "searchable": searchable,
+        "encoding_ok": encoding_ok,
+        "match_rate": round(match_rate, 3),
+        "expected_word_count": len(expected_words),
+        "found_word_count": len(found),
+        "missing_words_sample": missing[:10],
+        "encoding_issues": enc["encoding_issues"],
+        "pass": passed,
+        "reason": reason,
+    }
+
+
+# =============================================================================
+# ENCODING VERIFICATION
+# =============================================================================
 def verify_encoding(output_path: str) -> dict:
     """
     Check that text encoding in the PDF is correct (no garbled characters).
@@ -227,6 +337,13 @@ def main():
     # Check encoding
     enc_p = subparsers.add_parser("encoding", help="Check text encoding")
     enc_p.add_argument("--input", "-i", required=True)
+
+    # Text-layer gate (R-W4 / T9) — JSON out for the PHP post-render gate.
+    tl_p = subparsers.add_parser("text-layer",
+                                 help="Post-render text-layer gate (JSON out)")
+    tl_p.add_argument("--output", "-o", required=True, help="Saved translated PDF")
+    tl_p.add_argument("--translations", "-t", required=True, help="Translations JSON (items or pages shape)")
+    tl_p.add_argument("--min-match-rate", type=float, default=0.6)
     
     args = parser.parse_args()
     
@@ -269,6 +386,14 @@ def main():
         print(f"  Garbled: {result['garbled_chars']}")
         print(f"  Issues: {len(result['encoding_issues'])}")
         print(f"  Result: {'PASS' if result['pass'] else 'FAIL'}")
+
+    elif args.command == "text-layer":
+        with open(args.translations, "r", encoding="utf-8") as f:
+            translations = json.load(f)
+        result = verify_text_layer(args.output, translations,
+                                   min_match_rate=args.min_match_rate)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     
     else:
         parser.print_help()

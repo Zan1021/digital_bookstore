@@ -91,6 +91,57 @@ class Book extends Model
     }
 
     /**
+     * Every distinct font family this book explicitly REQUESTS through its typography
+     * policy — the families whose on-disk file must genuinely BE that family (checked by
+     * the font-integrity preflight, engine-wiring-and-activation R-W3). Collected from
+     * publisher_default, per-role, per-language and per-unit overrides. Returns [] when
+     * the book sets no policy (nothing publisher-specific to verify; the engine then uses
+     * source/house fonts which ship approved). Book-agnostic — no title/language literals.
+     *
+     * @return string[] de-duplicated family stems (e.g. ["PlaypenSans","PatrickHand"]).
+     */
+    public function requestedFontFamilies(): array
+    {
+        $policy = $this->getTypographyPolicy();
+        if (empty($policy)) {
+            return [];
+        }
+
+        $families = [];
+        $collect = function ($bucket) use (&$families) {
+            if (!is_array($bucket)) {
+                return;
+            }
+            // A bucket may be a role map ({body:{font_asset_id}, ...}) or a single
+            // role entry ({font_asset_id, weight}). Handle both shapes.
+            if (isset($bucket['font_asset_id']) && is_string($bucket['font_asset_id'])) {
+                $families[] = $bucket['font_asset_id'];
+                return;
+            }
+            foreach ($bucket as $entry) {
+                if (is_array($entry) && isset($entry['font_asset_id']) && is_string($entry['font_asset_id'])) {
+                    $families[] = $entry['font_asset_id'];
+                } elseif (is_string($entry) && $entry !== '') {
+                    // publisher_default:{body:"PlaypenSans",...} shape (plain stem values).
+                    $families[] = $entry;
+                }
+            }
+        };
+
+        $collect($policy['publisher_default'] ?? []);
+        $collect($policy['roles'] ?? []);
+        foreach (($policy['language_overrides'] ?? []) as $langBucket) {
+            $collect($langBucket);
+        }
+        foreach (($policy['unit_overrides'] ?? []) as $unitBucket) {
+            $collect($unitBucket);
+        }
+
+        // De-dupe, preserve order, drop empties.
+        return array_values(array_unique(array_filter($families, fn ($f) => is_string($f) && $f !== '')));
+    }
+
+    /**
      * Set a role's font for the book policy, validated against the APPROVED fonts dir.
      * A font asset id is a family stem (e.g. "PlaypenSans") that MUST resolve to a file
      * in storage/app/fonts — client-supplied absolute paths are rejected (spec Req 4.6).

@@ -50,6 +50,22 @@ requests, and fail closed on a mismatch/counterfeit (the exact class of bug that
 rather than writing new detection. A counterfeit or glyph-incomplete font must route the edition to
 NEEDS_LAYOUT_REVIEW with an actionable reason, never render silently.
 
+**R-W3.1 — Prompt-and-upload resolution loop (restored from the original BookOnboarding design).**
+A fail-closed flag is not a dead end. When a required family is missing, counterfeit, or
+glyph-incomplete, the preflight must surface an ACTIONABLE "upload the correct TTF/OTF for
+`<family>`" prompt wired to the EXISTING FontManager / BookOnboarding upload path (LIVE-SUBPROC
+`font_resolver` / FontManager.php), per the original wizard spec (vault:
+`2026-08-17_mem_font-detector-todo`, `2026-08-18_session-summary`,
+`2026-08-18_mem_product-workflow-brainstorm`). The resolution loop is:
+  1. detect → attempt auto-resolve (existing policy);
+  2. on failure, flag the edition NEEDS_LAYOUT_REVIEW AND emit a per-family upload prompt;
+  3. an approved alias may be applied ONLY as a temporary preview stand-in (never a silent
+     unapproved file), so the publisher sees a render while the real font is outstanding;
+  4. when the publisher uploads a genuine file, re-run the integrity check on it; if its internal
+     name matches and glyphs are complete, clear the font flag for that family and (if no other
+     blocker remains) return the edition to publishable.
+No book is left stuck in review with no path forward — the upload prompt IS the path.
+
 ### R-W4 — Output text-layer verification
 The engine must verify the SAVED PDF's text layer is real and searchable (the ToUnicode-corruption
 class). Wire `text_verification` (or equivalent) as a post-render gate; a corrupt/garbled text layer

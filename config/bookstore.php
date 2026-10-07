@@ -75,6 +75,46 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Font-asset-integrity preflight (engine-wiring-and-activation R-W3/R-W3.1)
+    |--------------------------------------------------------------------------
+    | Before the engine renders, verify every font file the book REQUESTS (via its
+    | typography policy) actually IS the family it claims — i.e. the file's embedded
+    | internal name matches the requested family. This is the guard that would have
+    | caught the counterfeit "AdLibBT" file whose internal name was really "Bangers"
+    | (it shipped the wrong typeface for weeks with nothing catching it).
+    |
+    | Cheap (pure PyMuPDF name/glyph read, no API spend) so it is ON by default. On a
+    | mismatch / glyph gap / missing file for a REQUIRED family, the edition is routed
+    | to NEEDS_LAYOUT_REVIEW (fail-closed) and the qa_report carries an actionable
+    | "upload the correct TTF/OTF for <family>" prompt wired to the existing FontManager
+    | upload path. An approved RETIRED-font alias (font_policy._RETIRED_FONT_ALIASES) is
+    | a deliberate substitution, NOT a counterfeit, and does not fail the edition.
+    | A book with no typography policy requests nothing specific → the preflight is a
+    | no-op (the engine falls back to source/house fonts, which ship approved).
+    */
+    'font_integrity' => [
+        'enabled' => env('FONT_INTEGRITY_ENABLED', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Output text-layer gate (engine-wiring-and-activation R-W4)
+    |--------------------------------------------------------------------------
+    | After render, verify the SAVED pdf has a REAL, searchable text layer that
+    | matches the translation — catching the ToUnicode-corruption class where a page
+    | looks correct as pixels but extracts to empty text or mojibake. Cheap (pure
+    | PyMuPDF extraction, no API) so it is ON by default. A failure (no extractable
+    | text / garbled encoding / too few translated words searchable) routes the edition
+    | to NEEDS_LAYOUT_REVIEW. min_match_rate = the fraction of expected significant words
+    | that must be searchable in the output for the layer to be considered verified.
+    */
+    'text_layer' => [
+        'enabled' => env('TEXT_LAYER_GATE_ENABLED', true),
+        'min_match_rate' => (float) env('TEXT_LAYER_MIN_MATCH_RATE', 0.6),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Illustration-text vision module (text baked into artwork)
     |--------------------------------------------------------------------------
     | Some books bake text (a title, a label) INTO a raster illustration, so it

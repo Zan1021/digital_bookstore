@@ -47,6 +47,151 @@ class PdfTranslationService
     }
 
     /**
+     * FONT-ASSET-INTEGRITY PREFLIGHT (engine-wiring-and-activation R-W3/R-W3.1).
+     *
+     * Runs scripts/font_integrity.py over every family the book REQUESTS via its
+     * typography policy, BEFORE the render subprocess, to verify each font file's
+     * embedded internal name matches the requested family (the counterfeit-"AdLibBT"
+     * guard). The verdict is returned for the caller to fold into the QA merge:
+     *   - 'ran'          : false when disabled or the book requests no specific family
+     *                       (nothing to verify → no-op, never a false block).
+     *   - 'publishable'  : false if any required family is counterfeit/glyph-short/missing.
+     *   - 'needsReview'  : inverse of publishable.
+     *   - 'offending'    : the families that failed.
+     *   - 'uploadPrompts': actionable "upload the correct TTF for <family>" messages,
+     *                       surfaced to the admin (FontManager) so the fix is obvious.
+     *   - 'fonts'        : the full per-font verdicts (diagnostic).
+     *
+     * Fail-SAFE on its own error: if the preflight subprocess itself cannot run (python
+     * missing, script error), we DO NOT block the render on that — we record ran=false
+     * with an error note and let the existing gates stand. Config: bookstore.font_integrity.enabled.
+     *
+     * @return array<string,mixed>
+     */
+    private function runFontIntegrityPreflight(Book $book, string $language): array
+    {
+        if (! config('bookstore.font_integrity.enabled', true)) {
+            return ['ran' => false, 'reason' => 'disabled'];
+        }
+
+        $families = $book->requestedFontFamilies();
+        if (empty($families)) {
+            // No publisher-requested fonts → the engine uses source/house fonts (approved).
+            return ['ran' => false, 'reason' => 'no_requested_families'];
+        }
+
+        try {
+            $process = new Process([
+                'python',
+                base_path('scripts/font_integrity.py'),
+                '--fonts-dir', $this->fontsDir,
+                '--families', json_encode(array_values($families), JSON_UNESCAPED_UNICODE),
+                '--language', $language,
+            ]);
+            $process->setTimeout(60);
+            $process->run();
+
+            if (! $process->isSuccessful()) {
+                // Fail-safe: the preflight itself erroring must not sink the render.
+                Log::warning('Font-integrity preflight could not run (non-fatal)', [
+                    'book' => $book->id,
+                    'language' => $language,
+                    'stderr' => $process->getErrorOutput(),
+                ]);
+                return ['ran' => false, 'reason' => 'preflight_error'];
+            }
+
+            $decoded = json_decode($process->getOutput(), true);
+            if (! is_array($decoded)) {
+                Log::warning('Font-integrity preflight returned unparseable output (non-fatal)', [
+                    'book' => $book->id,
+                    'language' => $language,
+                    'stdout' => $process->getOutput(),
+                ]);
+                return ['ran' => false, 'reason' => 'unparseable'];
+            }
+
+            return array_merge(['ran' => true], $decoded);
+        } catch (\Throwable $e) {
+            Log::warning('Font-integrity preflight threw (non-fatal)', [
+                'book' => $book->id,
+                'language' => $language,
+                'error' => $e->getMessage(),
+            ]);
+            return ['ran' => false, 'reason' => 'exception'];
+        }
+    }
+
+    /**
+     * OUTPUT TEXT-LAYER GATE (engine-wiring-and-activation R-W4 / T9).
+     *
+     * Runs scripts/text_verification.py `text-layer` over the SAVED pdf + the translations
+     * payload AFTER render (and after any passes that mutate the PDF), confirming the output
+     * has a REAL, searchable text layer that matches the translation — catching the
+     * ToUnicode-corruption class where a page looks right as pixels but extracts to empty or
+     * mojibake. Returns the verdict for the caller to fold into the QA merge:
+     *   - 'ran'        : false when disabled or the gate could not run (fail-safe).
+     *   - 'pass'       : searchable AND encoding_ok AND match_rate >= threshold.
+     *   - 'reason'     : actionable failure reason when pass is false.
+     *   - plus searchable / encoding_ok / match_rate / missing_words_sample diagnostics.
+     *
+     * Cheap (pure PyMuPDF extraction, no API) → default on. Fail-SAFE: a gate that cannot
+     * run records ran=false and never sinks the render. Config: bookstore.text_layer.enabled.
+     *
+     * @return array<string,mixed>
+     */
+    private function runTextLayerGate(Book $book, string $language, string $outputPath, string $translationsPath): array
+    {
+        if (! config('bookstore.text_layer.enabled', true)) {
+            return ['ran' => false, 'reason' => 'disabled'];
+        }
+        if (! is_file($outputPath) || ! is_file($translationsPath)) {
+            return ['ran' => false, 'reason' => 'missing_inputs'];
+        }
+
+        try {
+            $process = new Process([
+                'python',
+                base_path('scripts/text_verification.py'),
+                'text-layer',
+                '--output', $outputPath,
+                '--translations', $translationsPath,
+                '--min-match-rate', (string) config('bookstore.text_layer.min_match_rate', 0.6),
+            ]);
+            $process->setTimeout(120);
+            $process->run();
+
+            if (! $process->isSuccessful()) {
+                Log::warning('Text-layer gate could not run (non-fatal)', [
+                    'book' => $book->id,
+                    'language' => $language,
+                    'stderr' => $process->getErrorOutput(),
+                ]);
+                return ['ran' => false, 'reason' => 'gate_error'];
+            }
+
+            $decoded = json_decode($process->getOutput(), true);
+            if (! is_array($decoded)) {
+                Log::warning('Text-layer gate returned unparseable output (non-fatal)', [
+                    'book' => $book->id,
+                    'language' => $language,
+                    'stdout' => $process->getOutput(),
+                ]);
+                return ['ran' => false, 'reason' => 'unparseable'];
+            }
+
+            return array_merge(['ran' => true], $decoded);
+        } catch (\Throwable $e) {
+            Log::warning('Text-layer gate threw (non-fatal)', [
+                'book' => $book->id,
+                'language' => $language,
+                'error' => $e->getMessage(),
+            ]);
+            return ['ran' => false, 'reason' => 'exception'];
+        }
+    }
+
+    /**
      * Robustly parse the engine's JSON report from a (possibly noisy) stderr stream.
      * The engine prints one JSON object, but real runs can wrap it in warnings / progress
      * lines / a UTF-8 BOM / a trailing object. A naive json_decode of the whole string then
@@ -325,6 +470,16 @@ class PdfTranslationService
         // the flat payload (no contract available), pass --allow-legacy-flat so the
         // edition still renders; on the default CONTRACT path we do NOT, so any page
         // the contract cannot cover fails closed to review instead of mapping lossily.
+        // FONT-ASSET-INTEGRITY PREFLIGHT (engine-wiring-and-activation R-W3/R-W3.1).
+        // BEFORE the engine renders, verify every font the book REQUESTS via its
+        // typography policy actually IS that family on disk (embedded internal name ==
+        // requested family). This is the guard that would have caught the counterfeit
+        // "AdLibBT" file (internally "Bangers"). A mismatch/glyph-gap/missing file on a
+        // required family fails closed → NEEDS_LAYOUT_REVIEW with an actionable
+        // "upload the correct TTF" prompt (surfaced via FontManager). Cheap, no API spend,
+        // ON by default. A book with no policy requests nothing specific → no-op.
+        $fontIntegrity = $this->runFontIntegrityPreflight($book, $translation->language_code);
+
         $scriptPath = $this->getScriptPath($book);
 
         $cmd = [
@@ -485,6 +640,71 @@ class PdfTranslationService
         if (!empty($report['overflow_warnings'])) {
             $qaReport->fail('fit', 'TEXT_OVERFLOW', 'fit',
                 ['count' => count($report['overflow_warnings'])]);
+        }
+
+        // FONT-ASSET-INTEGRITY (R-W3/R-W3.1): fold the pre-render preflight verdict into
+        // the authoritative QA merge. A required font that is counterfeit, glyph-short or
+        // missing fails the edition closed and carries the actionable upload prompt(s), so
+        // the admin sees exactly which font to replace via FontManager. An approved alias
+        // or a book with no policy leaves this a clean pass (no false blocks).
+        if (is_array($fontIntegrity) && ($fontIntegrity['ran'] ?? false)) {
+            if (is_array($report)) {
+                $report['font_integrity'] = $fontIntegrity;
+            }
+            if ($fontIntegrity['needsReview'] ?? false) {
+                $publishable = false;
+                $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+                $qaReport->fail('font_integrity', 'FONT_INTEGRITY_MISMATCH', 'font', [
+                    'offending' => $fontIntegrity['offending'] ?? [],
+                    'uploadPrompts' => $fontIntegrity['uploadPrompts'] ?? [],
+                ]);
+                Log::warning('Font-integrity preflight flagged font(s) — routing edition to review', [
+                    'book' => $book->id,
+                    'language' => $translation->language_code,
+                    'offending' => $fontIntegrity['offending'] ?? [],
+                ]);
+                if (is_array($report)) {
+                    $report['publishable'] = false;
+                    $report['render_status'] = 'NEEDS_LAYOUT_REVIEW';
+                    $report['flags']['FONT_INTEGRITY_MISMATCH'] = $fontIntegrity['offending'] ?? [];
+                }
+            } else {
+                $qaReport->pass('font_integrity');
+            }
+        }
+
+        // OUTPUT TEXT-LAYER GATE (R-W4/T9): verify the SAVED pdf's text layer is real,
+        // searchable and matches the translation (the ToUnicode-corruption class). Runs on
+        // the final staging artifact AFTER the cover-flatten + illustration passes that can
+        // mutate it. A fail (no text layer / garbled / low match) routes the edition to
+        // review. Cheap, no API, default on; fail-safe if it cannot run.
+        $textLayer = $this->runTextLayerGate($book, $translation->language_code, $outputPath, $translationsPath);
+        if (is_array($textLayer) && ($textLayer['ran'] ?? false)) {
+            if (is_array($report)) {
+                $report['text_layer'] = $textLayer;
+            }
+            if (! ($textLayer['pass'] ?? true)) {
+                $publishable = false;
+                $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+                $qaReport->fail('text_layer', 'TEXT_LAYER_UNVERIFIED', 'post_render', [
+                    'reason' => $textLayer['reason'] ?? null,
+                    'searchable' => $textLayer['searchable'] ?? null,
+                    'encoding_ok' => $textLayer['encoding_ok'] ?? null,
+                    'match_rate' => $textLayer['match_rate'] ?? null,
+                ]);
+                Log::warning('Text-layer gate failed — routing edition to review', [
+                    'book' => $book->id,
+                    'language' => $translation->language_code,
+                    'reason' => $textLayer['reason'] ?? null,
+                ]);
+                if (is_array($report)) {
+                    $report['publishable'] = false;
+                    $report['render_status'] = 'NEEDS_LAYOUT_REVIEW';
+                    $report['flags']['TEXT_LAYER_UNVERIFIED'] = $textLayer['reason'] ?? true;
+                }
+            } else {
+                $qaReport->pass('text_layer');
+            }
         }
 
         // FIX C: even if the engine's own gate passed, unresolved spans (rendered
