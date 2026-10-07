@@ -23,6 +23,34 @@ import hashlib
 import os
 
 
+# Explicit, approved substitutions for RETIRED source fonts (book-agnostic policy,
+# not a per-title constant): when a source PDF still references a font the publisher
+# has retired, map its name to the approved family we now use in its place. The
+# substitution is deliberate and is still recorded as fallbackUsed in provenance so
+# QA can see it. Keyed by _norm()'d source name.
+#   Edu-Aid / "Edu SA Beginner" -> Playwrite ZA (Captain Zan, 2026-10-07: Edu-Aid
+#   retired; use Playwrite). Keeps the back cover from silently falling back to the
+#   house font when the Edu-Aid file is removed.
+_RETIRED_FONT_ALIASES = {
+    "eduaid": "PlaywriteZA",
+    "edusabeginner": "PlaywriteZA",
+    # AdLibBT retired (the shipped AdLibBT-Regular.ttf was a counterfeit Bangers file,
+    # a comic display face that does NOT match the source). Use the approved house
+    # title weight instead (Captain Zan, 2026-10-07). Veto-able per-book via policy.
+    "adlibbt": "PlaypenSans-Bold",
+    "adlibbtregular": "PlaypenSans-Bold",
+    "adlib": "PlaypenSans-Bold",
+    # Calibri + OzHandicraftBT files were also counterfeits (Open Sans / Caveat inside).
+    # Retire the mislabeled files and map their source names to genuine approved fonts:
+    # Calibri (clean body sans) -> house body PlaypenSans; OzHandicraftBT (craft/hand
+    # face) -> the genuine handwriting font PatrickHand. (Captain Zan, 2026-10-07.)
+    "calibri": "PlaypenSans",
+    "ozhandicraftbtroman": "PatrickHand",
+    "ozhandicraftbt": "PatrickHand",
+    "ozhandicraft": "PatrickHand",
+}
+
+
 def _norm(name: str) -> str:
     """Normalise a font family/file name for comparison."""
     return (name or "").lower().replace("-", "").replace("_", "").replace(" ", "")
@@ -121,6 +149,13 @@ def resolve_font_with_policy(requested_font: str, fonts_dir: str, is_bold: bool 
 
     req_norm = _norm(requested_font)
 
+    # Retired-font substitution: redirect a retired source font name to its approved
+    # replacement family BEFORE matching. Recorded as a deliberate substitution.
+    _alias_applied = False
+    if req_norm in _RETIRED_FONT_ALIASES:
+        req_norm = _norm(_RETIRED_FONT_ALIASES[req_norm])
+        _alias_applied = True
+
     # 1. Exact / substring family match against available fonts.
     chosen_path = None
     chosen_family = None
@@ -148,6 +183,13 @@ def resolve_font_with_policy(requested_font: str, fonts_dir: str, is_bold: bool 
     result["resolvedFamily"] = _family_from_filename(os.path.basename(chosen_path))
     result["fontFileHash"] = _hash_file(chosen_path)
     result["approved"] = _is_approved(chosen_family, registry)
+    # A retired-font alias is a deliberate, approved substitution. We DON'T mark it
+    # fallbackUsed (that would make resolve_role_font reject it and fall through to the
+    # house font); instead we record the alias explicitly so provenance/QA still sees
+    # the source font was redirected.
+    if _alias_applied:
+        result["aliasApplied"] = True
+        result["aliasFrom"] = requested_font
     return result
 
 

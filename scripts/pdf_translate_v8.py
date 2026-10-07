@@ -1725,6 +1725,24 @@ def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_di
         box_top = u.bbox[1] - 1
         box = pymupdf.Rect(bx0, box_top, bx1, box_bottom) & page.rect
 
+        # PAGE-CENTRED TITLE FIX: a unit whose SOURCE line was centred on the page must
+        # centre on the PAGE midline. We detect this from SOURCE GEOMETRY (bbox centre ≈
+        # page centre) rather than trusting the scene's align_h — the alignment inference
+        # mis-tags a short centred title as "left" (its ink box is narrow and sits where
+        # the glyphs were), which left the translated subtitle off-centre. When the source
+        # is page-centred we force center alignment AND a page-symmetric box so "center"
+        # lands on the page midline. Book-agnostic: pure geometry, no per-title constants.
+        page_w = page.rect.width
+        src_cx = (u.bbox[0] + u.bbox[2]) / 2.0
+        role_for_center = (getattr(u, "semantic_role", "") or "").lower()
+        is_titleish = role_for_center in ("book_title", "subtitle", "heading", "label")
+        if is_titleish and abs(src_cx - page_w / 2.0) <= page_w * 0.08:
+            align = "center"
+            half = min(page_w / 2.0 - 20.0,
+                       max((u.bbox[2] - u.bbox[0]) / 2.0 + 40.0, 120.0))
+            box = pymupdf.Rect(page_w / 2.0 - half, box_top,
+                               page_w / 2.0 + half, box_bottom) & page.rect
+
         # FONT POLICY (spec Req 4): resolve this unit's font through the ONE shared
         # role-based resolver — honouring any per-book/edition/role/unit policy — instead
         # of the ad-hoc house-font picker. Falls back to the house/source font when the
@@ -3051,7 +3069,29 @@ def render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num
     # Derive font size from the source spans so we stay faithful to the original.
     src_size = max((s["font_size"] for s in content_spans), default=22)
     line_size = round(src_size)
-    font_file = _weight_aware_house_font(content_spans, fonts_dir)
+    # FONT POLICY: resolve through the ONE shared role-based resolver so retired-font
+    # aliases + per-book policy apply here too (not just the generic path). The back
+    # cover is a series-title list, role 'label'. Falls back to the house picker only
+    # if the policy yields nothing. Uses the dominant SOURCE font name of the content.
+    font_file = None
+    try:
+        from font_policy import resolve_role_font
+        from collections import Counter as _Counter
+        _src_names = [s.get("font_name", "") for s in content_spans if s.get("font_name")]
+        _dom = _Counter(_src_names).most_common(1)[0][0] if _src_names else None
+        _spec = resolve_role_font(
+            role="label", fonts_dir=fonts_dir, typography_policy=None,
+            source_font=_dom, is_bold=(_source_weight(content_spans) == "bold"))
+        font_file = _spec.get("fontFile")
+        report.setdefault("font_policy", {}).setdefault(str(page_num), []).append({
+            "id": "back_cover", "role": "label", "resolvedBy": _spec.get("resolvedBy"),
+            "family": _spec.get("resolvedFamily"), "approved": _spec.get("approved"),
+            "aliasFrom": _spec.get("aliasFrom"),
+        })
+    except Exception:
+        font_file = None
+    if not font_file:
+        font_file = _weight_aware_house_font(content_spans, fonts_dir)
 
     # Horizontal band: for centered text, use a page-centered band so lines center on
     # the PAGE midline (not a skewed min_x..max_x box). For left/right, anchor on the
@@ -3077,11 +3117,29 @@ def render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num
     # Map each output line to a SOURCE line top (preserving the heading gap + rhythm).
     # If counts differ, fall back to an even stack from the first source top.
     if len(src_line_tops) == len(lines) and src_line_tops:
-        row_tops = src_line_tops
+        row_tops = list(src_line_tops)
     else:
         top0 = src_line_tops[0] if src_line_tops else (min_y - 6)
         step = (src_line_tops[1] - src_line_tops[0]) if len(src_line_tops) >= 2 else shared_size * 1.3
         row_tops = [top0 + i * step for i in range(len(lines))]
+
+    # MIN LINE STEP (tall-script safety): a substitute font (e.g. Playwrite ZA) can have
+    # taller ascenders/descenders than the source rhythm allowed, so mapping onto the
+    # source tops makes glyphs overlap. Enforce a minimum gap between consecutive rows
+    # based on the ACTUAL font's real glyph extent (ascender+descender), re-stacking from
+    # the first top when the source rhythm is tighter. Book-agnostic: derived from the
+    # font metrics, not any per-title constant. Preserves roomy source tops as-is.
+    try:
+        _asc = _probe.ascender if (0 < getattr(_probe, "ascender", 0) <= 1.5) else 0.8
+        _desc = abs(_probe.descender) if (0 < abs(getattr(_probe, "descender", 0)) <= 1.0) else 0.3
+    except Exception:
+        _asc, _desc = 0.8, 0.3
+    min_step = shared_size * max(1.3, (_asc + _desc) * 1.05)
+    if len(row_tops) >= 2:
+        tight = any((row_tops[i + 1] - row_tops[i]) < min_step for i in range(len(row_tops) - 1))
+        if tight:
+            top0 = row_tops[0]
+            row_tops = [top0 + i * min_step for i in range(len(row_tops))]
 
     row_h = shared_size * 1.3
     drew_any = False

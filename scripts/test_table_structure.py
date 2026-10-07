@@ -350,7 +350,11 @@ def test_structure_gate_flags_and_passes():
     # 2. MERGED-HEADER off-center / spills horizontally past its right border.
     merged = [{"id": "m", "page_number": 1, "semantic_role": "merged_header",
                "cell_box": (10, 10, 120, 40), "peer_group_id": "hdr"}]
-    spill = _run(merged, [("Woordelys", 95, 30, 14)])  # long word starting near right edge
+    # The word must START inside the cell (so it is matched to element m) yet EXTEND
+    # past the right border x=120. Anchor the start well inside the cell and use a long
+    # word so it reliably crosses the border regardless of the first approved font's
+    # glyph width (the fixture must not be coupled to a specific font).
+    spill = _run(merged, [("Woordelyskategorie", 30, 30, 16)])
     check("gate: merged-header horizontal spill flagged (elementOutOfBox)",
           not spill["ok"] and _has(spill, "elementOutOfBox"))
 
