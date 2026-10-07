@@ -83,6 +83,20 @@ class ExerciseServiceTest extends TestCase
         $this->assertContains(ExerciseService::CODE_UNSUPPORTED, $codes);
     }
 
+    public function test_well_formed_english_contract_passes(): void
+    {
+        // S1: English is structurally supported, so a well-formed contract has NO issues —
+        // proving the educational gate is passable (not permanently un-passable).
+        $contract = ['exercises' => [[
+            'id' => 'e1',
+            'components' => [
+                $this->comp('e1_instruction', 'instruction'),
+                $this->comp('e1_q0', 'questions'),
+            ],
+        ]]];
+        $this->assertSame([], $this->svc->educationalIssues($contract, ['language' => 'en']));
+    }
+
     public function test_null_contract_is_no_issues(): void
     {
         // No exercises → not this layer's concern (caller marks not_applicable).

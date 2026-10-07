@@ -99,4 +99,22 @@ return [
         'image_model' => env('ILLUSTRATION_TEXT_IMAGE_MODEL', 'gpt-image-1'),
         'verify' => env('ILLUSTRATION_TEXT_VERIFY', true),
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Exercise contract extraction (educational gate producer, S1)
+    |--------------------------------------------------------------------------
+    | When enabled, ExerciseContractService reads the render manifest and writes a
+    | structured `exercise_contract` for each edition that has exercise (vocabulary)
+    | pages, which activates the INDEPENDENT educational gate for that edition.
+    |
+    | OFF by default on purpose: populating a contract makes the educational gate
+    | active, and until a language pedagogy validator is registered a populated
+    | contract routes the edition to specialist review (fail-closed). Storybooks with
+    | no vocabulary pages are unaffected (no contract is written → not_applicable).
+    | Enable per-environment when you actually want to gate workbook/exercise content.
+    */
+    'exercise_extraction' => [
+        'enabled' => env('EXERCISE_EXTRACTION_ENABLED', false),
+    ],
 ];

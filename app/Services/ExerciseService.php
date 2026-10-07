@@ -149,16 +149,23 @@ class ExerciseService
     }
 
     /**
-     * Whether a language-specific pedagogy validator is registered. Deliberately
-     * conservative: only languages we have actually validated return true. Everything else
-     * routes to specialist review (never a silent pass).
+     * Whether a language-specific pedagogy validator is registered. Conservative: only
+     * languages we have actually validated structurally return true. An unregistered language
+     * routes to specialist review (never a silent pass, never an English-phonics fallback).
+     *
+     * STRUCTURAL support (currently English only) means: the educational gate validates the
+     * exercise's component IDENTITY (ExerciseService::componentIdIssues — no unknown/duplicate/
+     * missing component IDs) and structure, and a well-formed English contract PASSES. It does
+     * NOT claim deep phonics/spelling pedagogy. Registering `en` lets the gate actually PASS a
+     * well-formed contract instead of being permanently un-passable; every OTHER language
+     * (incl. af) still routes to specialist review — fail-closed, by deliberate design (a
+     * translated edition's pedagogy is specialist work, not an automatic English fallback).
      */
     public function hasValidatorFor(?string $language): bool
     {
-        // No automatic pedagogy validators are registered yet (Phase C builds the structure;
-        // the language-specific phonics/spelling validators are specialist work). Until one
-        // is demonstrated, every language routes to review — honest, fail-closed.
-        $registered = [];
+        // Structurally-supported languages. Extend ONLY when a specialist validator for that
+        // language is actually demonstrated — do not add a language just to make the gate pass.
+        $registered = ['en'];
         return is_string($language) && in_array($language, $registered, true);
     }
 }

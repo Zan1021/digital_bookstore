@@ -61,10 +61,16 @@ class TranslateEditionJob implements ShouldQueue
         // deadlocking against this outer lock (unified-rendering-and-testing D1).
         $renderer->setRenderLockOwner($lock->owner());
 
+        // Q1: this is the queued/background path, so it CAN absorb the heavy whole-book visual
+        // coverage gate (~1 vision call per page). Synchronous admin/web renders do NOT call
+        // this, so the gate is deferred rather than hanging a request.
+        $renderer->allowHeavyGates(true);
+
         try {
             $this->runRender($translator, $renderer, $edition, $book);
         } finally {
             $renderer->setRenderLockOwner(null);
+            $renderer->allowHeavyGates(false);
             optional($lock)->release();
         }
     }

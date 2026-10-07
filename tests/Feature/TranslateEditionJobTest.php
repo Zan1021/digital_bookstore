@@ -42,6 +42,7 @@ class TranslateEditionJobTest extends TestCase
 
         $renderer = Mockery::mock(PdfTranslationService::class);
         $renderer->shouldReceive('setRenderLockOwner')->andReturnNull();
+        $renderer->shouldReceive('allowHeavyGates')->andReturnNull();
         $renderer->shouldReceive('createTranslatedPdf')->once()
             ->andReturnUsing(function () use ($edition) {
                 // Simulate the render step persisting a passing gate verdict.
@@ -71,6 +72,7 @@ class TranslateEditionJobTest extends TestCase
 
         $renderer = Mockery::mock(PdfTranslationService::class);
         $renderer->shouldReceive('setRenderLockOwner')->andReturnNull();
+        $renderer->shouldReceive('allowHeavyGates')->andReturnNull();
         $renderer->shouldNotReceive('createTranslatedPdf');
 
         try {

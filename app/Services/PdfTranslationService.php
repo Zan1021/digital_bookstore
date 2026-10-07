@@ -63,7 +63,19 @@ class PdfTranslationService
         // Strip a leading UTF-8 BOM if present.
         $stderr = preg_replace('/^\xEF\xBB\xBF/', '', $stderr);
 
-        $whole = json_decode(trim($stderr), true);
+        // INVALID-UTF8 GUARD (the real empty-qa_report cause the LV pass hid, found 2026-10-07).
+        // The engine can emit a raw Latin-1 byte for a glyph it copied verbatim from the source
+        // PDF (observed: a bare 0xAE "®" inside a "source_text" field), which makes the ENTIRE
+        // stderr invalid UTF-8. Plain json_decode then fails with JSON_ERROR_UTF8 and returns
+        // null for BOTH the whole-string attempt and the balanced-block scan — so the structured
+        // QA was silently lost and qa_report persisted as []. Sanitize to valid UTF-8 up front;
+        // the decode also carries JSON_INVALID_UTF8_SUBSTITUTE as a second line of defence so a
+        // stray byte can never again zero out the report.
+        if (! mb_check_encoding($stderr, 'UTF-8')) {
+            $stderr = mb_convert_encoding($stderr, 'UTF-8', 'UTF-8');
+        }
+
+        $whole = json_decode(trim($stderr), true, 512, JSON_INVALID_UTF8_SUBSTITUTE);
         if (is_array($whole)) {
             return $whole;
         }
@@ -85,7 +97,7 @@ class PdfTranslationService
                     $depth--;
                     if ($depth === 0 && $start >= 0) {
                         $candidate = substr($stderr, $start, $i - $start + 1);
-                        $decoded = json_decode($candidate, true);
+                        $decoded = json_decode($candidate, true, 512, JSON_INVALID_UTF8_SUBSTITUTE);
                         if (is_array($decoded)) {
                             $best = $decoded; // keep the last valid one
                         }
@@ -196,6 +208,39 @@ class PdfTranslationService
 
     /** Owner token of an outer per-edition lock, when the caller already holds one. */
     private ?string $renderLockOwner = null;
+
+    /**
+     * Whether the caller has explicitly asserted this render runs in a context that can
+     * absorb the heavy whole-book coverage gate (~1 vision call PER PAGE, minutes long).
+     * The queued TranslateEditionJob sets this true. Null = "not asserted" → the service
+     * falls back to App::runningInConsole() and NEVER runs the gate inline on a web request
+     * (unified-rendering-and-testing Q1 — coverage must be queue-only, not hang an admin click).
+     */
+    private ?bool $heavyGatesAllowed = null;
+
+    /**
+     * Let a caller that runs OUTSIDE a user-facing request (the queued TranslateEditionJob,
+     * a background worker, a console command) opt in to the heavy whole-book coverage gate.
+     * Synchronous admin/web paths must NOT call this, so the gate is deferred to the queue.
+     */
+    public function allowHeavyGates(bool $allowed = true): void
+    {
+        $this->heavyGatesAllowed = $allowed;
+    }
+
+    /**
+     * May the heavy whole-book visual coverage gate run INLINE in this render?
+     * Only when a caller explicitly asserted a queue/background context, or we are in the
+     * console (queue worker / artisan). A synchronous web request returns false so the gate
+     * is deferred rather than timing out the request.
+     */
+    private function heavyGatesAllowedHere(): bool
+    {
+        if ($this->heavyGatesAllowed !== null) {
+            return $this->heavyGatesAllowed;
+        }
+        return app()->runningInConsole();
+    }
 
     private function createTranslatedPdfInner(Book $book, Translation $translation): string
     {
@@ -572,29 +617,71 @@ class PdfTranslationService
         // Config-gated (full-book vision spend); when enabled, any coverage issue routes the
         // edition to review — missing/unchecked/stale pages can never masquerade as clean.
         if (config('bookstore.visual_coverage_gate.enabled', false)) {
-            try {
-                $coverage = app(\App\Services\Qa\BookTestingService::class)
-                    ->visualCoverage($book, $translation->fresh());
+            if (! $this->heavyGatesAllowedHere()) {
+                // Q1: coverage is ~1 vision call PER PAGE (minutes) — it must NOT run inline on
+                // a synchronous web request (it would blow past the request/render timeout).
+                // Defer to the queue (TranslateEditionJob, which calls allowHeavyGates(true)).
+                // The 'visual_coverage' check is left NOT_RUN on the QaReport, so the edition
+                // stays fail-closed (cannot be published on a coverage check that never ran)
+                // until the queued render records a real coverage result.
                 if (is_array($report)) {
                     $report['visual_coverage'] = [
-                        'covered' => $coverage['covered'],
-                        'expected_pages' => $coverage['expected_pages'],
-                        'issues' => $coverage['issues'],
+                        'covered' => null,
+                        'deferred_to_queue' => true,
+                        'reason' => 'coverage gate is queue-only; dispatch TranslateEditionJob to run it',
                     ];
                 }
-                if ($coverage['covered'] === true) {
-                    $qaReport->pass('visual_coverage');
-                } else {
-                    $publishable = false;
-                    $renderStatus = 'NEEDS_LAYOUT_REVIEW';
-                    $qaReport->fail('visual_coverage', 'VISUAL_COVERAGE_INCOMPLETE', 'visual_coverage',
-                        ['issues' => $coverage['issues']]);
-                    Log::warning('Whole-book visual coverage incomplete — routing to review', [
-                        'book' => $book->id, 'language' => $translation->language_code,
-                    ]);
+                Log::info('Visual coverage gate deferred (synchronous context) — run via queue', [
+                    'book' => $book->id, 'language' => $translation->language_code,
+                ]);
+            } else {
+                try {
+                    $coverage = app(\App\Services\Qa\BookTestingService::class)
+                        ->visualCoverage($book, $translation->fresh());
+                    if (is_array($report)) {
+                        $report['visual_coverage'] = [
+                            'covered' => $coverage['covered'],
+                            'expected_pages' => $coverage['expected_pages'],
+                            'issues' => $coverage['issues'],
+                        ];
+                    }
+                    if ($coverage['covered'] === true) {
+                        $qaReport->pass('visual_coverage');
+                    } else {
+                        $publishable = false;
+                        $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+                        $qaReport->fail('visual_coverage', 'VISUAL_COVERAGE_INCOMPLETE', 'visual_coverage',
+                            ['issues' => $coverage['issues']]);
+                        Log::warning('Whole-book visual coverage incomplete — routing to review', [
+                            'book' => $book->id, 'language' => $translation->language_code,
+                        ]);
+                    }
+                } catch (\Throwable $e) {
+                    Log::warning('Visual coverage gate errored (non-blocking)', ['error' => $e->getMessage()]);
+                }
+            }
+        }
+
+        // EXERCISE CONTRACT PRODUCER (unified-rendering-and-testing Req 6 / S1). Config-gated,
+        // OFF by default. When enabled, extract a structured exercise_contract from THIS
+        // render's fresh manifest ($report) so the educational check below has data to gate.
+        // Storybooks with no vocabulary pages get no contract (educational stays not_applicable),
+        // so enabling this never affects them. Non-fatal: a failure here must not sink the render.
+        if (config('bookstore.exercise_extraction.enabled', false)) {
+            try {
+                if (is_array($report)) {
+                    $contract = app(\App\Services\ExerciseContractService::class)
+                        ->extractFromManifest($book, $translation, $report, true);
+                    if ($contract !== null) {
+                        $translation->refresh(); // pick up the persisted exercise_contract
+                        Log::info('Exercise contract extracted for edition', [
+                            'book' => $book->id, 'language' => $translation->language_code,
+                            'exercises' => count($contract['exercises']),
+                        ]);
+                    }
                 }
             } catch (\Throwable $e) {
-                Log::warning('Visual coverage gate errored (non-blocking)', ['error' => $e->getMessage()]);
+                Log::warning('Exercise contract extraction threw (non-blocking)', ['error' => $e->getMessage()]);
             }
         }
 

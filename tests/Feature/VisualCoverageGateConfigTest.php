@@ -34,4 +34,36 @@ class VisualCoverageGateConfigTest extends TestCase
         $svc = app(BookTestingService::class);
         $this->assertInstanceOf(BookTestingService::class, $svc);
     }
+
+    /**
+     * Q1 — the heavy whole-book coverage gate is QUEUE-ONLY. The service only runs it inline
+     * when a caller explicitly asserts a background context (TranslateEditionJob calls
+     * allowHeavyGates(true)) or we are in the console; a synchronous web request must NOT run
+     * it (it would hang past the request timeout). This guards the decision helper directly.
+     */
+    public function test_heavy_gates_decision_honours_explicit_optin_and_optout(): void
+    {
+        $svc = app(\App\Services\PdfTranslationService::class);
+        $m = new \ReflectionMethod($svc, 'heavyGatesAllowedHere');
+        $m->setAccessible(true);
+
+        // Explicit opt-in (what the queued job does) => allowed.
+        $svc->allowHeavyGates(true);
+        $this->assertTrue($m->invoke($svc), 'explicit opt-in must allow the gate inline');
+
+        // Explicit opt-out (simulating a synchronous web request) => deferred.
+        $svc->allowHeavyGates(false);
+        $this->assertFalse($m->invoke($svc), 'explicit opt-out must defer the gate');
+    }
+
+    public function test_heavy_gates_default_follows_console_context(): void
+    {
+        // With nothing asserted, the decision falls back to runningInConsole(). The test
+        // suite runs in the console, so the default here is "allowed" — proving the fallback
+        // path exists (a real web request returns false because runningInConsole() is false).
+        $svc = app(\App\Services\PdfTranslationService::class);
+        $m = new \ReflectionMethod($svc, 'heavyGatesAllowedHere');
+        $m->setAccessible(true);
+        $this->assertSame(app()->runningInConsole(), $m->invoke($svc));
+    }
 }
