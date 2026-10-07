@@ -1,7 +1,7 @@
 # Engine Wiring Audit (mechanical)
 
 Entry points (invoked by PHP): ['page_manifest', 'pdf_translate_v8']
-Totals: LIVE-IMPORT=15, LIVE-SUBPROC=11, TEST-ONLY=12, DEAD=29
+Totals: LIVE-IMPORT=15, LIVE-SUBPROC=11, TEST-ONLY=13, DEAD=23
 
 | Tier | Module | Note |
 |------|--------|------|
@@ -38,6 +38,7 @@ Totals: LIVE-IMPORT=15, LIVE-SUBPROC=11, TEST-ONLY=12, DEAD=29
 | TEST-ONLY | crop_transform |  |
 | TEST-ONLY | incremental_render |  |
 | TEST-ONLY | inventory_layout |  |
+| TEST-ONLY | make_gate_fixtures | [test_fixtures/make_gate_fixtures.py] |
 | TEST-ONLY | ocr_integration |  |
 | TEST-ONLY | page_inventory |  |
 | TEST-ONLY | scene_graph |  |
@@ -48,16 +49,11 @@ Totals: LIVE-IMPORT=15, LIVE-SUBPROC=11, TEST-ONLY=12, DEAD=29
 | DEAD | audit_trail |  |
 | DEAD | caption_detection |  |
 | DEAD | capture_evidence |  |
-| DEAD | container_detection |  |
 | DEAD | font_registry |  |
 | DEAD | get_translations |  |
 | DEAD | glyph_preflight |  |
 | DEAD | image_inpainting |  |
-| DEAD | list_detection |  |
-| DEAD | merged_cells |  |
 | DEAD | optical_calibration |  |
-| DEAD | pdf_digital_twin |  |
-| DEAD | pikepdf_integration |  |
 | DEAD | quality_gates |  |
 | DEAD | raster_fallback |  |
 | DEAD | render_book |  |
@@ -70,5 +66,4 @@ Totals: LIVE-IMPORT=15, LIVE-SUBPROC=11, TEST-ONLY=12, DEAD=29
 | DEAD | typography_fingerprint |  |
 | DEAD | variable_fonts |  |
 | DEAD | view_pdf |  |
-| DEAD | visual_qa |  |
 | DEAD | wiring_audit |  |

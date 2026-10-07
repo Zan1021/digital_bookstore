@@ -21,8 +21,22 @@ from collections import deque
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 APP = os.path.normpath(os.path.join(SCRIPTS, "..", "app"))
 
-pyfiles = {f[:-3]: os.path.join(SCRIPTS, f)
-           for f in os.listdir(SCRIPTS) if f.endswith(".py")}
+# Scan scripts/ RECURSIVELY (top-level AND subdirs like scripts/legacy/) so an orphaned
+# legacy tree can't hide from the audit. Module key is the path relative to scripts/,
+# without extension, using the bare stem for import matching (python import uses the stem).
+pyfiles = {}
+rel_of = {}
+for root, _dirs, files in os.walk(SCRIPTS):
+    if "__pycache__" in root:
+        continue
+    for f in files:
+        if f.endswith(".py"):
+            stem = f[:-3]
+            full = os.path.join(root, f)
+            rel = os.path.relpath(full, SCRIPTS).replace("\\", "/")
+            # keep first occurrence of a stem for the import graph; track rel for reporting
+            pyfiles.setdefault(stem, full)
+            rel_of[stem] = rel
 modnames = set(pyfiles)
 imp_re = re.compile(r'^\s*(?:from\s+(\w+)\s+import|import\s+(\w+))', re.M)
 
@@ -82,20 +96,22 @@ prod = sorted(m for m in modnames if m not in tests and m not in helpers)
 
 rows = []
 for m in prod:
+    rel = rel_of.get(m, m + ".py")
+    loc = "" if "/" not in rel else f" [{rel}]"
     if m in live_import:
         tier = "LIVE-IMPORT"
-        note = "engine entrypoint" if m in entry else ""
+        note = ("engine entrypoint" if m in entry else "") + loc
     elif m in subproc:
         gates = sorted({g for _f, g in subproc[m] if g})
         callers = sorted({f for f, _g in subproc[m]})
         tier = "LIVE-SUBPROC"
-        note = ("gated:" + ",".join(gates) + " " if gates else "") + "via " + ",".join(callers)
+        note = ("gated:" + ",".join(gates) + " " if gates else "") + "via " + ",".join(callers) + loc
     elif m in test_imports:
         tier = "TEST-ONLY"
-        note = ""
+        note = loc.strip()
     else:
         tier = "DEAD"
-        note = ""
+        note = loc.strip()
     rows.append((tier, m, note))
 
 order = {"LIVE-IMPORT": 0, "LIVE-SUBPROC": 1, "TEST-ONLY": 2, "DEAD": 3}

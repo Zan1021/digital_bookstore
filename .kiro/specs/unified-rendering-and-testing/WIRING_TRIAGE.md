@@ -99,3 +99,40 @@ WIRING_AUDIT_MECHANICAL.md. Add it to CI to catch "built-but-never-wired" at the
 
 **NOT YET DONE:** no module deleted, no feature wired. This is a decision sheet. Next step needs
 Captain Zan's pick of which LOST features to wire and which DELETE? candidates to confirm-and-remove.
+
+---
+
+## C1 RECONCILIATION — executed 2026-10-07 (Captain Zan approved)
+
+Phase C1 of the engine-wiring-and-activation spec. Before deleting, the audit tool was fixed to
+scan `scripts/` RECURSIVELY — it had a blind spot (missed the whole `scripts/legacy/` V7 tree and
+nested files). Totals before: 15/11/14/33 (import/subproc/test/dead). After deletions: 15/11/13/23.
+
+### DELETED (confirmed superseded + zero live/test coupling; verified by repo-wide grep)
+- `scripts/legacy/` entire tree — superseded V7 generation (pdf_translate_v7, _backup, book_engine,
+  pipeline, hybrid_renderer, test_hybrid_render, test_v6_render). Self-contained island; nothing in
+  app/ or the live engine referenced it.
+- `scripts/visual_qa.py` — superseded by the LIVE PHP `VisualQaService`; only consumer was
+  legacy/pipeline (deleted with the tree).
+- `scripts/merged_cells.py` — table merging is inline + via live universal_containers/borderless_table.
+- `scripts/container_detection.py` — superseded by live universal_containers + document_model.
+- `scripts/list_detection.py` — list handling inline in document_model.
+- `scripts/pdf_digital_twin.py` — superseded by document_model + page_manifest.
+- `scripts/pikepdf_integration.py` — engine standardised on PyMuPDF.
+
+### HELD (NOT deleted)
+- `scripts/scene_graph.py` — still imported by test_integration.py + test_unit.py (test-coupled, not
+  dead). Keep until those tests are migrated. NOTE: the STRING "scene_graph" is also a live manifest
+  provenance tag (`builder:"scene_graph"` in page_manifest.py, checked by TranslationService.php) —
+  that is unrelated to the file and must NOT be renamed.
+
+### VERIFICATION (post-delete, all green)
+- Audit DEAD 33→23, TEST-ONLY 14→13, live counts UNCHANGED (15/11) — nothing live touched.
+- Suites: font_policy 6, table_structure 39, render_gate 45, generic_containment 6, second_book 14,
+  integration 10/10, unit 64/64 — all pass.
+- Repo-wide grep: zero dangling imports of any deleted module.
+- Regenerated WIRING_AUDIT_MECHANICAL.md.
+
+### LESSON (fed into steering)
+The original audit under-reported because it scanned only top-level scripts/. The tool now recurses.
+Re-run `python scripts/wiring_audit.py` — never trust a prior count after moving/adding files.
