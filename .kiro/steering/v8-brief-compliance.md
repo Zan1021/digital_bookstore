@@ -9,6 +9,21 @@ inclusion: always
 **This block exists so the engine's workings survive a cold session start — no re-briefing.**
 It is the current, verified state. When it conflicts with older prose below, THIS wins.
 
+> ### ►► RESUME POINTER (where to start next session) ◄◄
+> **Active spec:** `.kiro/specs/engine-wiring-and-activation/` (wire the brief's modules into the one
+> live engine; each proven on a REAL render, not just tests — R4).
+> **DONE:** font-counterfeit fixes + AI QA gate on (session 5); mechanical wiring audit + triage
+> (session 6); Phase C1 dead-code removal + this steering/spec (session 7, commit `2d7cef9`).
+> **DO NEXT = Phase C2, tasks T6–T8 in that spec's `tasks.md`:** build the FONT-ASSET-INTEGRITY
+> PREFLIGHT (reuse font_registry/glyph_preflight/typography_fingerprint; PHP pre-flight in
+> `createTranslatedPdf`; fail-closed on a counterfeit/mismatched font; PROVE by planting a counterfeit
+> on a real My House #10000 af render). Highest value — it prevents a repeat of the counterfeit bug.
+> **BEFORE C2, answer the 3 open decisions** at the bottom of that `tasks.md` (font-integrity
+> hard-block vs flag+alias; accessibility wire-now vs dormant; OCR/caption in-scope vs follow-up).
+> **FIRST ACTION on resume:** run `python scripts/wiring_audit.py` to confirm the live/dead map is
+> still current (totals were 15 import-live / 11 subproc-live / 13 test-only / 23 dead after C1).
+
+
 - **ONE live render engine:** `scripts/pdf_translate_v8.py` (invoked by `PdfTranslationService::
   createTranslatedPdf`) + `scripts/page_manifest.py` for extraction. There is NO second renderer;
   `v8_advanced.py` is only an admin FontManager helper, `scene_renderer.py` was removed.
