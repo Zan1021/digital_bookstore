@@ -191,12 +191,23 @@ defect) on a real book, plus suite-green + ≥2-book check (R6).
 
 ## Phase C5 — Keep it honest (R-W7/R-W8)
 
-- [ ] **T13. Add `python scripts/wiring_audit.py` to the test/CI run** — assert no NEW dead
-      production module vs a committed baseline (catches "built but never wired" at creation).
-- [ ] **T14. Document every DORMANT module** in steering LIVE SYSTEM STATE (one line each: what,
-      which flag/condition activates it, why off now): content_cache, incremental_render,
-      variable_fonts, raster_fallback, translation_variants, script_detection, content_stream_surgery,
-      optical_calibration (if left dormant), accessibility (decide wire vs dormant).
+- [x] **T13. Add `python scripts/wiring_audit.py` to the test/CI run** — DONE. Added `--check` and
+      `--write-baseline` modes to `wiring_audit.py`: `--check` compares the current inert set (DEAD +
+      TEST-ONLY production modules) to the committed baseline `scripts/.wiring_audit_baseline.json`
+      and exits 3 if a NEW unwired production module appears (built-but-never-wired regression); a
+      module that LEAVES the inert set is reported but not a failure. Wired into the Laravel suite via
+      `tests/Feature/WiringAuditGateTest.php` (runs the gate; exit 0 pass / 3 fail; skips if python is
+      unavailable). PROOF: baseline written (27 allowed-inert); `--check` green; NEGATIVE test — a
+      planted `tmpunwiredprobe.py` makes `--check` FAIL exit 3 (gate bites), removed after. One-off
+      dev scripts (render_book, view_pdf, etc.) stay in the baseline so they don't trip it.
+- [x] **T14. Document every DORMANT module** in steering LIVE SYSTEM STATE — DONE. Added a
+      "DORMANT MODULES" block to `v8-brief-compliance.md` (inclusion:always) with a what/flag/why-off
+      one-liner for each, grounded in each module's docstring: optical_calibration, raster_fallback,
+      translation_variants, typography_fingerprint, variable_fonts, content_cache,
+      content_stream_surgery, incremental_render, script_detection, security. Notable: `security` is
+      flagged as MUST-WIRE before accepting untrusted public uploads; `typography_fingerprint`'s
+      intent is now served by the live font_integrity preflight. The steering also now points at the
+      CI gate + baseline so the DORMANT list and the baseline are kept in sync by rule.
 
 ## Phase C6 — The now-MEANINGFUL full-engine book test (R-W9)
 

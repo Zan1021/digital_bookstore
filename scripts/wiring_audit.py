@@ -139,6 +139,57 @@ lines.append("|------|--------|------|")
 for tier, m, note in rows:
     lines.append(f"| {tier} | {m} | {note} |")
 report = "\n".join(lines)
+
+# ---------------------------------------------------------------------------
+# CI GATE (R-W8 / T13): --check compares the CURRENT non-production-reachable set
+# (DEAD + TEST-ONLY production modules) against a committed baseline, and FAILS (exit 3)
+# if a NEW such module appears — i.e. someone added a production module and never wired
+# it in (the exact "built but inert" rot this spec exists to kill). A module that LEAVES
+# the dead set (got wired, or deleted) is reported but is NOT a failure. One-off dev
+# scripts stay in the baseline so they don't trip the gate.
+#   python scripts/wiring_audit.py --check                 # gate against the baseline
+#   python scripts/wiring_audit.py --write-baseline        # (re)generate the baseline
+# Baseline file: scripts/.wiring_audit_baseline.json
+# ---------------------------------------------------------------------------
+BASELINE_PATH = os.path.join(SCRIPTS, ".wiring_audit_baseline.json")
+# The "allowed inert" set: everything NOT reachable in production (DEAD + TEST-ONLY).
+inert_now = sorted(m for (tier, m, _n) in rows if tier in ("DEAD", "TEST-ONLY"))
+
+if "--write-baseline" in sys.argv:
+    import json as _json
+    with open(BASELINE_PATH, "w", encoding="utf-8") as f:
+        _json.dump({"allowed_inert": inert_now}, f, indent=2)
+    print(report)
+    print(f"\n[baseline written] {BASELINE_PATH} ({len(inert_now)} allowed-inert modules)")
+    sys.exit(0)
+
+if "--check" in sys.argv:
+    import json as _json
+    print(report)
+    try:
+        with open(BASELINE_PATH, encoding="utf-8") as f:
+            baseline = set(_json.load(f).get("allowed_inert", []))
+    except FileNotFoundError:
+        print(f"\n[FAIL] no baseline at {BASELINE_PATH} — run --write-baseline first.")
+        sys.exit(3)
+
+    new_inert = sorted(set(inert_now) - baseline)   # NEW build-but-unwired modules
+    left_inert = sorted(baseline - set(inert_now))  # got wired or deleted (good)
+
+    if left_inert:
+        print("\n[note] modules no longer inert (wired or removed) — refresh the baseline:")
+        for m in left_inert:
+            print(f"  - {m}")
+    if new_inert:
+        print("\n[FAIL] NEW unwired production module(s) detected (built but never wired):")
+        for m in new_inert:
+            print(f"  - {m}")
+        print("Wire it into the live engine, delete it, or (if intentionally dormant) add it to "
+              "the baseline with --write-baseline AND document it in the steering DORMANT list.")
+        sys.exit(3)
+    print("\n[OK] no new unwired production modules vs baseline.")
+    sys.exit(0)
+
 print(report)
 
 if "--md" in sys.argv:

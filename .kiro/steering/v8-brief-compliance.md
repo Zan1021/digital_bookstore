@@ -26,14 +26,15 @@ It is the current, verified state. When it conflicts with older prose below, THI
 > DONE+PROVEN (s12 — OCR fallback in extract_page_spans fail-closed via report['ocr'] ledger;
 > caption tagging in page_manifest.annotate_captions; ocr_integration + caption_detection now
 > LIVE-IMPORT). Audit totals now 20/16/10/17.
-> **DO NEXT:** Phase **C5** = T13 add `python scripts/wiring_audit.py` to CI (assert no NEW dead
-> production module vs a committed baseline) + T14 document every DORMANT module in this LIVE SYSTEM
-> STATE. Then Phase **C6** = full-book test (My House + a 2nd book, T15/T16) — the honest proof gap:
-> a full `createTranslatedPdf` recording WHICH capabilities fired (font_integrity, text_layer,
-> accessibility, ocr, captions, illustration repair, visual_qa), with a PLANTED counterfeit +
-> corrupted text layer. T12b (the trio vision proof) folds naturally into C6.
-> **FIRST ACTION on resume:** run `python scripts/wiring_audit.py` (s12 totals: 20 import-live /
-> 16 subproc-live / 10 test-only / 17 dead).
+> **DO NEXT:** Phase **C5** DONE (s13 — T13 CI gate `WiringAuditGateTest` + `wiring_audit.py
+> --check`/baseline; T14 DORMANT modules documented in the block below). Phase **C6** is the only
+> remaining phase = full-book test (My House + a 2nd book, T15/T16): a full `createTranslatedPdf`
+> recording WHICH capabilities fired (font_integrity, text_layer, accessibility, ocr, captions,
+> illustration repair, visual_qa), with a PLANTED counterfeit + corrupted text layer. **T12b** (the
+> illustration-trio vision proof) folds into C6. ⚠️ C6/T12b need Captain Zan's VISION-API budget OK
+> (the illustration path is gated OFF for cost); the counterfeit/text-layer parts are free.
+> **FIRST ACTION on resume:** run `python scripts/wiring_audit.py` (s13 totals: 20 import-live /
+> 16 subproc-live / 10 test-only / 17 dead; CI gate baseline = 27 allowed-inert).
 
 
 - **ONE live render engine:** `scripts/pdf_translate_v8.py` (invoked by `PdfTranslationService::
@@ -46,6 +47,39 @@ It is the current, verified state. When it conflicts with older prose below, THI
   were wrongly TEST-ONLY/DEAD). Reports:
   `.kiro/specs/unified-rendering-and-testing/WIRING_AUDIT_MECHANICAL.md` (the map) +
   `WIRING_TRIAGE.md` (what to wire/keep/delete). Re-run before trusting any claim about wiring.
+  **CI GATE (R-W8/T13):** `tests/Feature/WiringAuditGateTest.php` runs `wiring_audit.py --check`
+  against the committed baseline `scripts/.wiring_audit_baseline.json`; a NEW unwired production
+  module fails the build. If you intentionally add a DORMANT module, add it to the baseline
+  (`--write-baseline`) AND to the DORMANT list below.
+- **DORMANT MODULES (R-W7/T14 — built, inert, intentionally OFF; what / flag / why off):**
+  - `optical_calibration` — measures rendered ink vs source metrics for fine font-size calibration.
+    No flag yet (not wired). OFF: current per-region font fitting (text_fit_solver) is sufficient;
+    revisit only if measured ink drift becomes a visible problem.
+  - `raster_fallback` — renders a page to high-DPI raster + paints over text when vector editing
+    would damage content. OFF: the surgical/illustration paths + fail-closed-to-review cover this;
+    a blind raster fallback would mask defects (anti-R5). Enable only as a deliberate last resort.
+  - `translation_variants` — primary vs compact translation variants for overflow. OFF: overflow is
+    currently handled by fit-before-erase + review, not variant swapping. Activate if/when the
+    translation layer supplies compact variants.
+  - `typography_fingerprint` — visual font signature for automatic matching. OFF as a standalone
+    path; its IDEA is now served by the LIVE `font_integrity` preflight (embedded-name compare).
+    Keep for a future similarity-based matcher; not needed for the counterfeit guard.
+  - `variable_fonts` — OpenType variable-font axes (wght/wdth/opsz). OFF: no current book ships a
+    variable font; the house/approved fonts are static. Activate when a variable font asset appears.
+  - `content_cache` — content-addressed caching so identical source pages skip reprocessing. OFF:
+    the in-process `_GEOM_CACHE` already memoises per render; a persistent cache is a perf-only
+    optimisation, enable if batch throughput demands it.
+  - `content_stream_surgery` — removes text operators directly from the PDF content stream (cleanest
+    possible removal). OFF: the live engine uses tight per-span redaction (safer across malformed
+    streams); keep as an alternative removal strategy, not the default.
+  - `incremental_render` — re-render only the changed page on a single-translation edit. OFF: no
+    flag wired; the current path re-renders the edition (cheap, reuses stored translations). Enable
+    for a faster single-page edit loop later.
+  - `script_detection` — RTL/complex-script (Arabic/Hebrew/Indic) detection. OFF: current catalogue
+    is LTR (African languages + European); activate when an RTL/complex-script edition is onboarded
+    (also the gate for the dormant RTL render path).
+  - `security` — PDF-processing hardening (no JS, size/time limits). OFF as a wired gate; uploads are
+    currently trusted (publisher-supplied). WIRE THIS before accepting untrusted public uploads.
 - **The big open problem:** the ChatGPT brief was built module-by-module but MOST modules were
   never wired into the live engine. Capability exists as code yet does nothing at runtime. The
   active plan to fix this is spec `.kiro/specs/engine-wiring-and-activation/`.
