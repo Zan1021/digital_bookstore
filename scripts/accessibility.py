@@ -27,6 +27,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from typing import Optional
 
 import pymupdf
@@ -174,10 +175,21 @@ def set_document_language(pdf_path: str, output_path: str, language_code: str) -
         
         # Update the catalog with language
         doc.xref_set_key(catalog_xref, "Lang", f"({lang_tag})")
-        
-        # Save
-        doc.save(output_path, garbage=4, deflate=True)
-        doc.close()
+
+        # PyMuPDF refuses a full (garbage-collecting) save back over the SAME open file
+        # ("save to original must be incremental"). When output == input, write to a temp
+        # file and atomically replace, so an in-place stamp still gets a clean, GC'd save.
+        same_path = os.path.abspath(pdf_path) == os.path.abspath(output_path)
+        if same_path:
+            fd, tmp_out = tempfile.mkstemp(
+                suffix=".pdf", dir=os.path.dirname(os.path.abspath(output_path)) or None)
+            os.close(fd)
+            doc.save(tmp_out, garbage=4, deflate=True)
+            doc.close()
+            os.replace(tmp_out, output_path)
+        else:
+            doc.save(output_path, garbage=4, deflate=True)
+            doc.close()
         
         return {
             "success": True,
@@ -305,6 +317,52 @@ def generate_alt_text_placeholders(pdf_path: str) -> dict:
 
 
 # =============================================================================
+# COMBINED PASS (PHP contract — one JSON in / one JSON out)
+# =============================================================================
+
+def accessibility_pass(pdf_path: str, language_code: str) -> dict:
+    """Post-render accessibility pass used by PdfTranslationService::runAccessibilityPass.
+
+    Does, in one invocation (mirrors font_integrity / text_verification CLIs):
+      1. Stamp the document /Lang metadata to the edition's target language, IN PLACE on
+         `pdf_path` (so screen readers pronounce correctly). This is the one deterministic,
+         always-on, fail-closed-on-failure step.
+      2. Re-check accessibility and emit the score + flags + recommendations.
+      3. Emit alt-text placeholders for human review.
+
+    Returns a single JSON-able dict. `pass` reflects ONLY the language stamp (a true
+    regression if it fails); a missing structure tree / alt text is a RECOMMENDATION, never
+    a block — PyMuPDF cannot synthesize a StructTreeRoot, so blocking on it would be a gate
+    that can never be satisfied.
+    """
+    lang_result = set_document_language(pdf_path, pdf_path, language_code)
+    if not lang_result.get("success"):
+        return {
+            "pass": False,
+            "reason": "lang_write_failed",
+            "language_requested": language_code,
+            "error": lang_result.get("error"),
+        }
+
+    check = check_pdf_accessibility(pdf_path)
+    alt = generate_alt_text_placeholders(pdf_path)
+
+    return {
+        "pass": True,
+        "language_set": lang_result.get("language_set"),
+        "language_requested": language_code,
+        "has_structure_tree": check.get("has_structure_tree", False),
+        "has_marked_content": check.get("has_marked_content", False),
+        "has_language": check.get("has_language", False),
+        "accessibility_score": check.get("accessibility_score", 0.0),
+        "recommendations": check.get("recommendations", []),
+        "images_total": alt.get("total_images", 0),
+        "images_need_alt_text": alt.get("needs_alt_text", 0),
+        "alt_text_placeholders": alt.get("placeholders", []),
+    }
+
+
+# =============================================================================
 # CLI
 # =============================================================================
 
@@ -325,7 +383,12 @@ def main():
     # Alt text
     alt_p = subparsers.add_parser("alt-text", help="Generate alt text placeholders")
     alt_p.add_argument("--input", "-i", required=True)
-    
+
+    # Combined pass (PHP contract) — stamp /Lang in place, re-check, emit one JSON object
+    pass_p = subparsers.add_parser("pass", help="Post-render accessibility pass (JSON out)")
+    pass_p.add_argument("--input", "-i", required=True)
+    pass_p.add_argument("--language", "-l", required=True, help="Target language code (af, en, zu, ...)")
+
     args = parser.parse_args()
     
     if args.command == "check":
@@ -357,7 +420,11 @@ def main():
         print(f"  Needs alt text: {result['needs_alt_text']}")
         for p in result['placeholders'][:10]:
             print(f"    Page {p['page']}: [{p['role']}] {p['dimensions']} — {p['alt_text']}")
-    
+
+    elif args.command == "pass":
+        result = accessibility_pass(args.input, args.language)
+        print(json.dumps(result, ensure_ascii=False))
+
     else:
         parser.print_help()
 

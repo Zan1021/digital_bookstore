@@ -12,23 +12,36 @@ It is the current, verified state. When it conflicts with older prose below, THI
 > ### ►► RESUME POINTER (where to start next session) ◄◄
 > **Active spec:** `.kiro/specs/engine-wiring-and-activation/` (wire the brief's modules into the one
 > live engine; each proven on a REAL render, not just tests — R4).
-> **DONE:** font-counterfeit fixes + AI QA gate on (session 5); mechanical wiring audit + triage
-> (session 6); Phase C1 dead-code removal + this steering/spec (session 7, commit `2d7cef9`).
-> **DO NEXT = Phase C2, tasks T6–T8 in that spec's `tasks.md`:** build the FONT-ASSET-INTEGRITY
-> PREFLIGHT (reuse font_registry/glyph_preflight/typography_fingerprint; PHP pre-flight in
-> `createTranslatedPdf`; fail-closed on a counterfeit/mismatched font; PROVE by planting a counterfeit
-> on a real My House #10000 af render). Highest value — it prevents a repeat of the counterfeit bug.
-> **BEFORE C2, answer the 3 open decisions** at the bottom of that `tasks.md` (font-integrity
-> hard-block vs flag+alias; accessibility wire-now vs dormant; OCR/caption in-scope vs follow-up).
-> **FIRST ACTION on resume:** run `python scripts/wiring_audit.py` to confirm the live/dead map is
-> still current (totals were 15 import-live / 11 subproc-live / 13 test-only / 23 dead after C1).
+> **DONE:** font-counterfeit fixes + AI QA gate on (s5); mechanical wiring audit + triage (s6); Phase
+> C1 dead-code removal + this steering/spec (s7, `2d7cef9`); Phase **C2** font-asset-integrity
+> preflight (s9) + Phase **C3** output text-layer gate (s9) — both built, wired, PROVEN at unit+
+> integration level (Laravel 212 green). The **3 open decisions are RESOLVED** (s9): font-integrity =
+> flag+fail-closed+alias-preview+upload-prompt; accessibility = WIRE NOW; OCR/caption = IN SCOPE.
+> Phase **C4a** (accessibility) + **C4b** (OCR + captions) are now **PLANNED** (s10, tasks T17–T22,
+> reqs R-W10/R-W11, design C7/C8) — but NOT yet built.
+> **DO NEXT = implement, in design dependency order:** Phase **C4** illustration trio is now
+> RECLASSIFIED-LIVE (s11 — it was always wired via illustration_text; the audit was blind to the
+> transitive import chain, now fixed). Its only open item is **T12b** = PROVE the trio on a real
+> render with a baked-in-text book (needs a vision-API budget OK — gated OFF by default). Then
+> Phase **C4a** accessibility (T17–T18) → Phase **C4b** OCR+captions (T19 C1-reconcile grep FIRST,
+> then T20–T22). accessibility/caption_detection are confirmed GENUINELY DEAD by the fixed audit, so
+> C4a/C4b is real wiring work. Each task's exit bar = PROVEN on a real render (R4), not just tests.
+> **THEN:** C5 (CI audit + DORMANT docs, T13/T14) → C6 (full-book test My House + a 2nd book,
+> T15/T16 — the one honest proof gap: a full `createTranslatedPdf` with a PLANTED counterfeit +
+> corrupted text layer was deferred here).
+> **FIRST ACTION on resume:** run `python scripts/wiring_audit.py` to confirm the live/dead map
+> (s11 totals after the transitive fix: 18 import-live / 15 subproc-live / 11 test-only / 19 dead).
 
 
 - **ONE live render engine:** `scripts/pdf_translate_v8.py` (invoked by `PdfTranslationService::
   createTranslatedPdf`) + `scripts/page_manifest.py` for extraction. There is NO second renderer;
   `v8_advanced.py` is only an admin FontManager helper, `scene_renderer.py` was removed.
 - **Authoritative module map is GENERATED, not remembered:** run `python scripts/wiring_audit.py`.
-  Latest totals: 15 import-live, 11 subprocess-live, 12 test-only, 29 dead. Reports:
+  Latest totals (s11, after the transitive-liveness fix): 18 import-live, 15 subprocess-live,
+  11 test-only, 19 dead. The audit now propagates liveness TRANSITIVELY from LIVE-SUBPROC modules
+  through the Python import graph (earlier versions seeded only the 2 engine entrypoints and
+  under-counted — the illustration-repair trio + font_registry/glyph_preflight/document_model/etc.
+  were wrongly TEST-ONLY/DEAD). Reports:
   `.kiro/specs/unified-rendering-and-testing/WIRING_AUDIT_MECHANICAL.md` (the map) +
   `WIRING_TRIAGE.md` (what to wire/keep/delete). Re-run before trusting any claim about wiring.
 - **The big open problem:** the ChatGPT brief was built module-by-module but MOST modules were
@@ -38,8 +51,11 @@ It is the current, verified state. When it conflicts with older prose below, THI
   those were COUNTERFEITS (Google-Font lookalikes renamed). The counterfeits were deleted and
   `font_policy.py::_RETIRED_FONT_ALIASES` now maps those source names to approved substitutes
   (AdLibBT->PlaypenSans-Bold, Edu-Aid->PlaywriteZA, Calibri->PlaypenSans, OzHandicraft->PatrickHand).
-  The whole font-DETECTION subsystem (font_registry/glyph_preflight/typography_fingerprint/
-  optical_calibration) is DEAD — wiring a font-asset-integrity preflight is the #1 recommended task.
+  The font-asset-integrity preflight (`scripts/font_integrity.py`, s9) is now WIRED and LIVE — it
+  compares each font file's embedded internal name vs the requested family and fails closed on a
+  counterfeit before render (the guard that would have caught the Bangers-as-AdLibBT fiasco). The
+  rest of the old detection subsystem (font_registry/glyph_preflight/typography_fingerprint/
+  optical_calibration) is reused BY it or still dormant.
 - **AI QA gate is ON** (PHP `VisualQaService`, `VISUAL_QA_ENABLED=true` in `.env`, scope=structured,
   runs on queue/console path). It compares source vs translated pages. The python `visual_qa.py` is
   the dead old version — ignore it.

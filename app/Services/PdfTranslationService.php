@@ -192,6 +192,75 @@ class PdfTranslationService
     }
 
     /**
+     * TAGGED-PDF / ACCESSIBILITY PASS (engine-wiring-and-activation R-W10/T17).
+     *
+     * Post-render pass over scripts/accessibility.py `pass`: stamps the SAVED pdf's /Lang
+     * metadata to the edition's target language (so screen readers pronounce correctly),
+     * re-checks accessibility, and emits alt-text placeholders for human review. Runs on the
+     * final staging artifact.
+     *
+     * Fail-CLOSED only on a true regression — the language could not be written
+     * (`pass=false`); the edition then routes to NEEDS_LAYOUT_REVIEW. A missing structure
+     * tree / alt text is RECORDED as a recommendation, never a block (PyMuPDF cannot
+     * synthesize a StructTreeRoot — blocking on it would be a gate that can never pass).
+     *
+     * Fail-SAFE on its own error: a pass that cannot run (python missing, script error,
+     * unparseable) records ran=false and never sinks the render. Config:
+     * bookstore.accessibility.enabled (default true, no API).
+     *
+     * @return array<string,mixed>
+     */
+    private function runAccessibilityPass(Book $book, string $language, string $outputPath): array
+    {
+        if (! config('bookstore.accessibility.enabled', true)) {
+            return ['ran' => false, 'reason' => 'disabled'];
+        }
+        if (! is_file($outputPath)) {
+            return ['ran' => false, 'reason' => 'missing_inputs'];
+        }
+
+        try {
+            $process = new Process([
+                'python',
+                base_path('scripts/accessibility.py'),
+                'pass',
+                '--input', $outputPath,
+                '--language', $language,
+            ]);
+            $process->setTimeout(120);
+            $process->run();
+
+            if (! $process->isSuccessful()) {
+                Log::warning('Accessibility pass could not run (non-fatal)', [
+                    'book' => $book->id,
+                    'language' => $language,
+                    'stderr' => $process->getErrorOutput(),
+                ]);
+                return ['ran' => false, 'reason' => 'gate_error'];
+            }
+
+            $decoded = json_decode($process->getOutput(), true);
+            if (! is_array($decoded)) {
+                Log::warning('Accessibility pass returned unparseable output (non-fatal)', [
+                    'book' => $book->id,
+                    'language' => $language,
+                    'stdout' => $process->getOutput(),
+                ]);
+                return ['ran' => false, 'reason' => 'unparseable'];
+            }
+
+            return array_merge(['ran' => true], $decoded);
+        } catch (\Throwable $e) {
+            Log::warning('Accessibility pass threw (non-fatal)', [
+                'book' => $book->id,
+                'language' => $language,
+                'error' => $e->getMessage(),
+            ]);
+            return ['ran' => false, 'reason' => 'exception'];
+        }
+    }
+
+    /**
      * Robustly parse the engine's JSON report from a (possibly noisy) stderr stream.
      * The engine prints one JSON object, but real runs can wrap it in warnings / progress
      * lines / a UTF-8 BOM / a trailing object. A naive json_decode of the whole string then
@@ -704,6 +773,39 @@ class PdfTranslationService
                 }
             } else {
                 $qaReport->pass('text_layer');
+            }
+        }
+
+        // TAGGED-PDF / ACCESSIBILITY PASS (R-W10/T17): stamp the SAVED pdf's /Lang metadata
+        // to the edition language, re-check accessibility, emit alt-text placeholders for
+        // review. Runs AFTER the text-layer gate (which reads the artifact) so the metadata
+        // write never perturbs the gate's view. Fail-closed ONLY if the language cannot be
+        // written (a true regression); missing structure/alt-text is a recommendation.
+        // Cheap, no API, default on; fail-safe if it cannot run.
+        $accessibility = $this->runAccessibilityPass($book, $translation->language_code, $outputPath);
+        if (is_array($accessibility) && ($accessibility['ran'] ?? false)) {
+            if (is_array($report)) {
+                $report['accessibility'] = $accessibility;
+            }
+            if (! ($accessibility['pass'] ?? true)) {
+                $publishable = false;
+                $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+                $qaReport->fail('accessibility', 'ACCESSIBILITY_LANG_UNSET', 'post_render', [
+                    'reason' => $accessibility['reason'] ?? null,
+                    'language_requested' => $accessibility['language_requested'] ?? $translation->language_code,
+                ]);
+                Log::warning('Accessibility pass failed to set language — routing edition to review', [
+                    'book' => $book->id,
+                    'language' => $translation->language_code,
+                    'reason' => $accessibility['reason'] ?? null,
+                ]);
+                if (is_array($report)) {
+                    $report['publishable'] = false;
+                    $report['render_status'] = 'NEEDS_LAYOUT_REVIEW';
+                    $report['flags']['ACCESSIBILITY_LANG_UNSET'] = $accessibility['reason'] ?? true;
+                }
+            } else {
+                $qaReport->pass('accessibility');
             }
         }
 

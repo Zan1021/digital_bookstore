@@ -76,40 +76,74 @@ defect) on a real book, plus suite-green + ≥2-book check (R6).
       text_verification LIVE-SUBPROC (was DEAD). Full Laravel suite 212 passed; Python suites green.
       NOTE: full-book proof on My House deferred to C6 (needs real source PDF + translations fixture).
 
-## Phase C4 — Illustration-repair trio (R-W5, heaviest)
+## Phase C4 — Illustration-repair trio (R-W5) — ALREADY WIRED (reclassified 2026-10-07)
 
-- [ ] **T10. Wire `crop_transform`** into the IllustrationTextService python half (coordinate
-      transforms source→render→crop→model→patch; degenerate dim → review). PROOF: a known region's
-      patch lands at the correct source coordinates on a real render (measured), not offset.
-- [ ] **T11. Wire `artwork_repair`** (background-preserving raster repair; flat/gradient/textured by
-      sampled type; protected-region reject → review). PROOF on a book with REAL baked-in text: the
-      source label is removed without damaging surrounding artwork (PDF.js render + vision check).
-- [ ] **T12. Wire `image_inpainting`** (background-only generative inpaint; ALWAYS mandatory-review).
-      Stays behind `bookstore.illustration_text.enabled` (default off, vision API). PROOF: an
-      illustration-text page → inpaint produces a clean background OR routes to review; never a
-      guessed rectangle. Verified via render_pdfjs.mjs.
+> **FINDING (session 11):** the trio was NOT dead. `scripts/illustration_text.py` (LIVE-SUBPROC via
+> `IllustrationTextService::repair()`) imports `image_inpainting` (top-level) and `artwork_repair`
+> (`repair_page_surgical`, inside the live repair path), and `artwork_repair` imports+uses
+> `crop_transform.CropTransform`. The chain `illustration_text → artwork_repair → crop_transform +
+> image_inpainting` is live, fail-closed (surgical-preferred; flatten is review-only), and DORMANT
+> behind `bookstore.illustration_text.enabled` (default false, vision API). The wiring_audit MISREAD
+> them (TEST-ONLY/DEAD) because it did not propagate liveness TRANSITIVELY from a LIVE-SUBPROC module
+> through the Python import graph — fixed in T10 below. So C4 is NOT "build the wiring" (doing so
+> would create a second repair path — R2 violation); it is "fix the audit's blind spot + PROVE the
+> existing path on a real render."
+
+- [x] **T10. crop_transform — RECLASSIFIED LIVE (not wired anew).** Confirmed `crop_transform.
+      CropTransform` is imported+used by `artwork_repair.repair_page_surgical` (line ~43/281), which
+      is called in the live `illustration_text.render_page_repair()` path. Writing new wiring would
+      duplicate this (R2). INSTEAD fixed the AUDIT BLIND SPOT: `scripts/wiring_audit.py` now seeds its
+      import-liveness BFS from LIVE-SUBPROC modules too (not just the 2 engine entrypoints) and
+      propagates transitively, so a module reached only through a live subprocess module is correctly
+      LIVE-IMPORT. PROOF: audit totals 15/13/13/22 → 18/15/11/19; crop_transform now
+      `LIVE-IMPORT (transitively imported by a live module)`; `test_crop_transform.py` 12/12 green.
+      (Also corrected the under-count of font_registry/glyph_preflight/document_model/render_gate/
+      text_fit_solver/text_shaping/etc., which were live all along.)
+- [x] **T11. artwork_repair — RECLASSIFIED LIVE (not wired anew).** `repair_page_surgical` /
+      `repair_image_region` are the live surgical repair invoked by `illustration_text.py` line ~257
+      (`from artwork_repair import repair_page_surgical`). Background-preserving raster repair with
+      fail-closed on unowned regions (no silent flatten; flatten is `--allow-flatten` + review-only).
+      PROOF: audit now `LIVE-IMPORT`; `test_artwork_repair.py` 10/10 green (asserts baked text pixels
+      removed, surrounding artwork intact, reused xref isolated).
+- [x] **T12. image_inpainting — RECLASSIFIED LIVE (not wired anew).** `create_text_mask` /
+      `inpaint_region` imported at the top of `illustration_text.py` (line ~59) and used by its
+      halo-free inpaint. Generative background stays opt-in + mandatory-review
+      (`bookstore.illustration_text.generative`, default false). PROOF: audit now `LIVE-IMPORT`.
+- [ ] **T12b. PROVE the trio on a real render (the actual remaining R-W5/R4 work).** With
+      `ILLUSTRATION_TEXT_ENABLED=true` on a book that HAS baked-in artwork text (not My House if it
+      has none — pick a book with a real baked label; the Kolulu corpus fixture has them), run
+      `createTranslatedPdf` and show: the surgical path repairs the region (translated label lands at
+      correct source coords via the CropTransform chain — measured, not eyeballed) OR fails closed to
+      NEEDS_LAYOUT_REVIEW; `qa_report` records the illustration coverage ledger. Verify via
+      `render_pdfjs.mjs`, not PyMuPDF pixmap. This is the C6-adjacent proof; it needs a vision-API
+      budget decision from Captain Zan (the trio is gated OFF precisely because it costs vision calls).
 
 ## Phase C4a — Tagged-PDF / accessibility (R-W10, Decision 2 — wire now)
 
-- [ ] **T17. Wire `accessibility` language-stamp + check as a post-render pass** (seam #3, beside the
-      text-layer gate). New thin PHP `runAccessibilityPass(Book,$language)` that subprocess-calls the
-      EXISTING `scripts/accessibility.py` (no new python): (a) `set-language --language <edition
-      lang>` on the staging artifact → writes `/Lang` (BCP-47 via the module's LANGUAGE_MAP); (b)
-      `check` → fold `qa_report['accessibility']` (language_set, has_structure_tree,
-      has_marked_content, score, recommendations); (c) `alt-text` → emit alt-text placeholders into
-      the report for human review (never auto-final). Config `bookstore.accessibility.enabled`
-      (default true, no API). FAIL-CLOSED only when the language write fails (true regression →
-      NEEDS_LAYOUT_REVIEW, flag `ACCESSIBILITY_LANG_UNSET`); missing structure-tree/alt-text is a
-      recommendation, NOT a block (PyMuPDF can't synthesize a StructTreeRoot — blocking on it is the
-      "gate that can never pass" anti-pattern). Fail-SAFE: cannot-run → ran=false, no sink.
-      PROOF (R4): on a real render the output catalog `/Lang` reads the edition language
-      (e.g. `af-ZA`) — verified by re-reading the catalog, not just a passing test; qa_report carries
-      the score; wiring_audit reclassifies accessibility DEAD→LIVE-SUBPROC.
-- [ ] **T18. Regression test for the accessibility pass** — Python unit against a hermetic PyMuPDF
-      doc: set-language stamps `/Lang`, check reports it; a doc that cannot be written routes the
-      verdict to review. Laravel Feature test drives `runAccessibilityPass` via reflection: language
-      stamped + recorded, structure-absent is a recommendation not a block, config-disable no-op,
-      cannot-run fail-safe. Suites green; ≥2 books unaffected (R6).
+- [x] **T17. Wire `accessibility` language-stamp + check as a post-render pass** (seam #3, beside the
+      text-layer gate) — DONE. Added a `pass` subcommand to `scripts/accessibility.py` (one JSON
+      in/out, mirrors font_integrity/text_verification): stamps `/Lang` (BCP-47 via LANGUAGE_MAP) IN
+      PLACE on the output, re-checks accessibility, emits alt-text placeholders. Wired PHP
+      `runAccessibilityPass(Book,$language,$outputPath)` in `createTranslatedPdfInner` AFTER the
+      text-layer gate (so the metadata write never perturbs the gate's read). Verdict folded into
+      QaReport check `accessibility` + `report['accessibility']`. FAIL-CLOSED only when the language
+      write fails (`pass=false` → publishable=false, NEEDS_LAYOUT_REVIEW, flag
+      `ACCESSIBILITY_LANG_UNSET`); a missing structure tree / alt text is a recorded recommendation,
+      NOT a block (PyMuPDF can't synthesize a StructTreeRoot). Config `bookstore.accessibility.enabled`
+      (env `ACCESSIBILITY_PASS_ENABLED`, default true, no API). Fail-SAFE: cannot-run → ran=false, no
+      sink. FIXED a real bug found by testing: PyMuPDF refuses a full save over the same open file
+      ("save to original must be incremental") — `set_document_language` now writes to a temp file +
+      atomic replace on same-path. PROOF (R4): on a built PDF the output catalog `/Lang` reads `af-ZA`
+      — verified by RE-READING the catalog from disk, not just a return value; qa_report carries the
+      score; wiring_audit reclassifies accessibility DEAD→LIVE-SUBPROC (gated:accessibility.enabled),
+      totals 18/15/11/19 → 18/16/11/18.
+- [x] **T18. Regression test for the accessibility pass** — DONE. `scripts/test_accessibility.py`
+      6/6 (hermetic PyMuPDF docs: `/Lang` stamped in-place and re-read from the catalog; BCP-47
+      mapping; missing structure = recommendation not block; fail-closed on lang-write failure;
+      alt-text placeholders for an embedded image). Laravel `tests/Feature/AccessibilityPassTest.php`
+      5/5 (reflection-driven: normal pass stamps `/Lang`, missing-structure not blocked, lang-write
+      failure fails closed, config-disable + missing-input no-ops). Full Laravel suite 217 passed
+      (was 212). ≥2-book check deferred to C6 full render.
 
 ## Phase C4b — Scanned-page OCR fallback + caption/label classification (R-W11, Decision 3 — wire now)
 

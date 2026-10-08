@@ -115,6 +115,22 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Tagged-PDF / accessibility pass (engine-wiring-and-activation R-W10)
+    |--------------------------------------------------------------------------
+    | Post-render pass (scripts/accessibility.py) that stamps the output's /Lang
+    | metadata to the edition's target language, re-checks accessibility, and emits
+    | alt-text placeholders for human review. Cheap, no API, default on. Fail-closed
+    | ONLY when the language write fails (a true regression); a missing structure
+    | tree / alt text is a recorded recommendation, NOT a block (PyMuPDF cannot
+    | synthesize a StructTreeRoot). Fail-safe: a pass that cannot run never sinks the
+    | render.
+    */
+    'accessibility' => [
+        'enabled' => env('ACCESSIBILITY_PASS_ENABLED', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Illustration-text vision module (text baked into artwork)
     |--------------------------------------------------------------------------
     | Some books bake text (a title, a label) INTO a raster illustration, so it
