@@ -74,6 +74,42 @@ class PdfService
         // Generate V8 page manifest (stable content IDs for translation)
         $this->rebuildManifest($book, $fullPath);
 
+        // UPLOAD-TIME TEXT-ON-ILLUSTRATION SCAN (Captain Zan, 2026-10-07): detect which
+        // pages carry text baked into artwork up front, so the book record knows from the
+        // moment of upload (useful for effort/quote, complexity flagging, and pre-warming
+        // the illustration pipeline). Reuses the SAME cheap, book-agnostic detector the
+        // render path uses (scripts/illustration_text.py `candidates`). Best-effort +
+        // non-fatal: a scan failure never blocks the upload. Stored on metadata, no migration.
+        try {
+            $scan = new \Symfony\Component\Process\Process([
+                'python', base_path('scripts/illustration_text.py'),
+                'candidates', '--input', $fullPath,
+            ]);
+            $scan->setTimeout(120);
+            $scan->run();
+            if ($scan->isSuccessful()) {
+                $candidates = json_decode(trim($scan->getOutput()), true);
+                if (is_array($candidates)) {
+                    $meta = $book->metadata ?? [];
+                    $meta['artwork_text_pages'] = [
+                        'scanned_at' => now()->toIso8601String(),
+                        'count' => count($candidates),
+                        'pages' => array_map(fn ($c) => ($c['page'] ?? 0) + 1, $candidates), // 1-based
+                        'detail' => $candidates,
+                    ];
+                    $book->update(['metadata' => $meta]);
+                }
+            } else {
+                \Illuminate\Support\Facades\Log::info('Upload artwork scan non-fatal failure', [
+                    'book' => $book->id, 'stderr' => $scan->getErrorOutput(),
+                ]);
+            }
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::info('Upload artwork scan threw (non-fatal)', [
+                'book' => $book->id, 'error' => $e->getMessage(),
+            ]);
+        }
+
         // NOTE: narration is intentionally NOT triggered here. Upload only creates the
         // ebook; narration is chosen deliberately on the book management page
         // (gated-translation-narration-flow Req 1.3 / Req 2). The original language may

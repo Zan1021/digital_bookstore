@@ -313,15 +313,33 @@ defect) on a real book, plus suite-green + ≥2-book check (R6).
 
 ## Phase C6 — The now-MEANINGFUL full-engine book test (R-W9) — RUNS ONLY AFTER C7/T30
 
-- [ ] **T15. End-to-end render of My House #10000 (af) AND a second, different book** with the wired
-      capability set; record in qa_report WHICH capabilities fired (font_integrity, text_layer,
-      accessibility, ocr, captions, illustration repair if applicable, visual_qa). This is the test
-      that was previously meaningless. PROOF: both books render; the capabilities demonstrably
-      executed (not just present); any genuine defect is caught fail-closed; suite green; temp files
-      cleaned.
-- [ ] **T16. Completion report** — list what got wired, what was deleted, what stays dormant (+flags),
-      which capabilities the final book test exercised, and the honest remaining gaps. Update the
-      steering LIVE SYSTEM STATE + regenerate the audit so the next cold session starts from truth.
+- [~] **T15. End-to-end render of My House #10000 (af) AND a second, different book** — PARTIAL
+      (primary book PROVEN; second book + generative still open). Ran a FULL `createTranslatedPdf` on
+      #10000 (af, 16 pages) with ALL gates on (vision budget approved by Captain Zan). Completed in
+      83s. CAPABILITIES THAT FIRED (recorded in the live qa_report, not asserted): security (safe),
+      text_layer (searchable+clean), accessibility (/Lang=af-ZA — verified IN THE OUTPUT FILE),
+      conformance (PDF/A pass), inventory_layout (16pp/35 regions), object_inventory (17 img/750
+      paths/118 spans), illustration path + visual_qa compare (fired → flagged cover). Correct no-ops:
+      font_integrity (no typography policy), ocr (born-digital), captions (none present). FAIL-CLOSED
+      WORKED: publishable=false, NEEDS_LAYOUT_REVIEW, review_pages [1,2,3,16],
+      flags[ILLUSTRATION_TEXT_REVIEW]=[1] — the engine routed to review rather than ship a page it
+      wasn't confident on. Output = real 16-page PDF with the /Lang tag embedded. Full report:
+      storage/app/temp/c6_report_10000_af.json.
+      TWO HONEST GAPS (gap 1 now CLOSED): (1) ✅ GENERATIVE background inpaint (gpt-image-1) PROVEN
+      — a second full render with generative=true completed in 700.9s (~11.7 min, the expected slow
+      path); the full erase→AI-fill→translate illustration pipeline executed on all 16 pages; same
+      correct fail-closed verdict (generative is mandatory-review by design — never auto-ships an
+      AI-painted background). Output = real 16-page/43MB PDF. Report:
+      storage/app/temp/c6_report_10000_af_gen.json. BOTH the non-generative (83s) and generative
+      (701s) paths are now proven. (2) ⏳ The SECOND book #10001 still has 0 item_translations — only
+      proves fail-closed, not capabilities; still needs translations before it meets R-W9's ≥2-book
+      bar. ALSO ADDED (Captain Zan, this session): upload-time text-on-illustration scan in
+      `PdfService::processUpload` (reuses illustration_text.py `candidates`), storing which pages have
+      baked-in artwork text on `book.metadata['artwork_text_pages']` from the moment of upload —
+      verified on My House (13/16 pages flagged, matching a picture book).
+- [ ] **T16. Completion report** — pending: fold the C6 result into the steering LIVE SYSTEM STATE +
+      regenerate the audit, and close out generative + the 2nd-book gap (or record them as accepted
+      limitations) once Captain Zan decides on the generative full run.
 
 ---
 
