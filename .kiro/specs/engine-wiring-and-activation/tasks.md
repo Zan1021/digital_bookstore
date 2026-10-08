@@ -76,7 +76,7 @@ defect) on a real book, plus suite-green + ≥2-book check (R6).
       text_verification LIVE-SUBPROC (was DEAD). Full Laravel suite 212 passed; Python suites green.
       NOTE: full-book proof on My House deferred to C6 (needs real source PDF + translations fixture).
 
-## Phase C4 — Illustration-repair trio (R-W5, heaviest, last)
+## Phase C4 — Illustration-repair trio (R-W5, heaviest)
 
 - [ ] **T10. Wire `crop_transform`** into the IllustrationTextService python half (coordinate
       transforms source→render→crop→model→patch; degenerate dim → review). PROOF: a known region's
@@ -88,6 +88,61 @@ defect) on a real book, plus suite-green + ≥2-book check (R6).
       Stays behind `bookstore.illustration_text.enabled` (default off, vision API). PROOF: an
       illustration-text page → inpaint produces a clean background OR routes to review; never a
       guessed rectangle. Verified via render_pdfjs.mjs.
+
+## Phase C4a — Tagged-PDF / accessibility (R-W10, Decision 2 — wire now)
+
+- [ ] **T17. Wire `accessibility` language-stamp + check as a post-render pass** (seam #3, beside the
+      text-layer gate). New thin PHP `runAccessibilityPass(Book,$language)` that subprocess-calls the
+      EXISTING `scripts/accessibility.py` (no new python): (a) `set-language --language <edition
+      lang>` on the staging artifact → writes `/Lang` (BCP-47 via the module's LANGUAGE_MAP); (b)
+      `check` → fold `qa_report['accessibility']` (language_set, has_structure_tree,
+      has_marked_content, score, recommendations); (c) `alt-text` → emit alt-text placeholders into
+      the report for human review (never auto-final). Config `bookstore.accessibility.enabled`
+      (default true, no API). FAIL-CLOSED only when the language write fails (true regression →
+      NEEDS_LAYOUT_REVIEW, flag `ACCESSIBILITY_LANG_UNSET`); missing structure-tree/alt-text is a
+      recommendation, NOT a block (PyMuPDF can't synthesize a StructTreeRoot — blocking on it is the
+      "gate that can never pass" anti-pattern). Fail-SAFE: cannot-run → ran=false, no sink.
+      PROOF (R4): on a real render the output catalog `/Lang` reads the edition language
+      (e.g. `af-ZA`) — verified by re-reading the catalog, not just a passing test; qa_report carries
+      the score; wiring_audit reclassifies accessibility DEAD→LIVE-SUBPROC.
+- [ ] **T18. Regression test for the accessibility pass** — Python unit against a hermetic PyMuPDF
+      doc: set-language stamps `/Lang`, check reports it; a doc that cannot be written routes the
+      verdict to review. Laravel Feature test drives `runAccessibilityPass` via reflection: language
+      stamped + recorded, structure-absent is a recommendation not a block, config-disable no-op,
+      cannot-run fail-safe. Suites green; ≥2 books unaffected (R6).
+
+## Phase C4b — Scanned-page OCR fallback + caption/label classification (R-W11, Decision 3 — wire now)
+
+- [ ] **T19. C1-reconcile FIRST (R2 guard):** grep the live engine for an existing inline OCR or
+      caption path (`get_textpage_ocr`, `is_scanned`, `caption`, `ocr`) before wiring, so we don't
+      double-run. Record the finding (inline equivalent? none?) in a one-line note. Only then proceed
+      to T20/T21.
+- [ ] **T20. Wire `ocr_integration` scanned-page fallback into the manifest stage** (seam #2, the
+      `page_manifest`/`extract_page_spans` boundary). Per page: `is_scanned_page`; a scanned page →
+      `ocr_for_manifest(page, page_num, lang)` returns V8-schema spans that merge into the manifest
+      and flow through the normal translate+render path (backend PyMuPDF→pytesseract→none). FAIL-
+      CLOSED on the right thing: no backend available OR confidence < `bookstore.ocr.min_confidence`
+      (default 0.5) → `qa_report['ocr']` (per-page: scanned?, backend, confidence) +
+      NEEDS_LAYOUT_REVIEW + flag `OCR_UNAVAILABLE` / `OCR_LOW_CONFIDENCE`. Born-digital book = pure
+      no-op. Config `bookstore.ocr.enabled` (default true). PROOF (R4): a scanned/image-only page
+      (reuse the C3 image-only fixture) → recovered spans render as LIVE selectable text (verified via
+      render_pdfjs.mjs), OR with no backend installed routes to review with the OCR flag; qa_report
+      records which. wiring_audit reclassifies ocr_integration DEAD→LIVE-SUBPROC/IMPORT.
+- [ ] **T21. Wire `caption_detection` into the manifest stage** (seam #2). Run `detect_captions` over
+      the assembled text units + image bboxes; annotate matched units in the manifest
+      (`caption_type`, `position`, `related_image_bbox`) so the renderer sizes/places them as captions
+      and they translate as captions, not body. Summary → `qa_report['captions']` (count by type).
+      INFORMATIONAL ONLY — never gates publishability (R5 applies to failures, not to a classifier
+      that simply found nothing). Deterministic, no API, default on; no-op when a page has no
+      image-adjacent small text. PROOF (R4): a page with a known image+caption pair tags that unit
+      `image_caption` in the manifest JSON on a real render; a plain-body page tags nothing.
+      wiring_audit reclassifies caption_detection DEAD→LIVE.
+- [ ] **T22. Regression tests for OCR + captions** — Python: `is_scanned_page` classifies image-only
+      vs born-digital correctly; `ocr_for_manifest` returns valid V8-schema spans (mock/skip the real
+      Tesseract call — assert the no-backend path flags review); `detect_captions` tags a synthetic
+      image+caption fixture and ignores body text. Laravel Feature: a scanned-page manifest with no
+      OCR backend → review + `OCR_UNAVAILABLE`; a caption-bearing manifest records
+      `qa_report['captions']`; both config-disables no-op. Suites green; ≥2 books (R6).
 
 ## Phase C5 — Keep it honest (R-W7/R-W8)
 
@@ -102,9 +157,10 @@ defect) on a real book, plus suite-green + ≥2-book check (R6).
 
 - [ ] **T15. End-to-end render of My House #10000 (af) AND a second, different book** with the wired
       capability set; record in qa_report WHICH capabilities fired (font_integrity, text_layer,
-      illustration repair if applicable, visual_qa). This is the test that was previously meaningless.
-      PROOF: both books render; the capabilities demonstrably executed (not just present); any genuine
-      defect is caught fail-closed; suite green; temp files cleaned.
+      accessibility, ocr, captions, illustration repair if applicable, visual_qa). This is the test
+      that was previously meaningless. PROOF: both books render; the capabilities demonstrably
+      executed (not just present); any genuine defect is caught fail-closed; suite green; temp files
+      cleaned.
 - [ ] **T16. Completion report** — list what got wired, what was deleted, what stays dormant (+flags),
       which capabilities the final book test exercised, and the honest remaining gaps. Update the
       steering LIVE SYSTEM STATE + regenerate the audit so the next cold session starts from truth.
@@ -117,7 +173,8 @@ defect) on a real book, plus suite-green + ≥2-book check (R6).
    existing FontManager/BookOnboarding path (restores the original wizard design). On a matching
    re-upload the flag clears. NOT a silent substitute; NOT a full hard-block-no-render. → R-W3.1, T7/T7b.
 2. **accessibility (tagged PDF):** WIRE NOW (Captain Zan: "if it's functionality we need, do it").
-   Not dormant. → add to Phase C scope (tagged-PDF output gate).
+   Not dormant. → PLANNED: Phase C4a, tasks T17–T18 (R-W10). Tagged-PDF output gate + `/Lang` stamp.
 3. **ocr_integration / caption_detection:** IN SCOPE for this spec (wire now), not a follow-up. →
-   add to the illustration/text-extraction scope.
+   PLANNED: Phase C4b, tasks T19–T22 (R-W11). Scanned-page OCR fallback + caption classification at
+   the manifest stage.
 ```

@@ -33,9 +33,13 @@ Every wired module MUST record its result into the `qa_report` (so it's observab
    counterfeit class). No dependency on other wiring.
 3. **Output text-layer verification (R-W4)** — seam #3, self-contained post-render gate.
 4. **Illustration-repair trio (R-W5)** — depends on the already-live IllustrationTextService; the
-   heaviest, so last. Config-gated + review-gated.
-5. **Document DORMANT + wire the CI audit (R-W7/R-W8)** — housekeeping, any time.
-6. **Full-engine book test (R-W9)** — only meaningful after 2–4.
+   heaviest, so last of the capability wiring. Config-gated + review-gated.
+5. **Tagged-PDF accessibility (R-W10)** + **scanned-page OCR & caption classification (R-W11)** —
+   accessibility is a self-contained post-render pass (seam #3); OCR/caption attach at the manifest
+   stage (seam #2) and must C1-reconcile against any inline equivalent first. Independent of the
+   illustration trio, so order between them is flexible.
+6. **Document DORMANT + wire the CI audit (R-W7/R-W8)** — housekeeping, any time.
+7. **Full-engine book test (R-W9)** — only meaningful after 2–6.
 
 ## Component designs
 
@@ -78,6 +82,51 @@ are invoked as subprocess steps the service already uses for its python half.
 - **Config:** stays behind `bookstore.illustration_text.enabled` (default off) — it costs vision API.
 - **Proof:** a book with real baked-in illustration text → repair runs, output shows the translated
   label on the artwork OR routes to review; verified via the PDF.js harness, not PyMuPDF pixmap.
+
+### C7 — Tagged-PDF / accessibility (R-W10)
+Reuse `accessibility.py` as-is (CLI already exists). Two touch-points:
+- **Language stamp (engine-internal, seam #2/#3 boundary):** after the saved PDF exists, call
+  `accessibility.set-language --language <edition lang>` on the staging artifact (the same artifact
+  the text-layer gate inspects). Deterministic, idempotent, no API. This writes `/Lang` into the
+  catalog via `doc.xref_set_key`.
+- **Accessibility gate (post-render, seam #3):** call `accessibility.check` on the final artifact,
+  fold the result into `qa_report['accessibility']` (language_set, has_structure_tree,
+  has_marked_content, score, recommendations) and run `accessibility.alt-text` to emit alt-text
+  placeholders for review. Fail-closed ONLY when the language could not be set (a true regression);
+  structure-tree/alt-text absence is a recorded recommendation, not a block — PyMuPDF cannot
+  synthesize a StructTreeRoot, so blocking on it would be the "gate that can never be satisfied"
+  anti-pattern. Config `bookstore.accessibility.enabled` (default true). Wire a thin PHP
+  `runAccessibilityPass()` beside the text-layer gate; subprocess calls to the existing CLI (no new
+  python logic). Fail-safe: cannot-run → `ran=false`, no sink.
+- **Proof:** render → `/Lang` is `af-ZA` on the output (verified by re-reading the catalog);
+  qa_report records the score; a book where the language write fails (simulated) routes to review.
+
+### C8 — Scanned-page OCR + caption/label classification (R-W11)
+Both modules attach at the manifest stage (seam #2) — the point where spans and image regions are
+assembled, before translation. Neither reinvents anything; both are already-written detectors.
+- **OCR fallback:** in the manifest build (`page_manifest`/`extract_page_spans` boundary), classify
+  each page with `ocr_integration.is_scanned_page`. For a scanned page, `ocr_for_manifest(page,
+  page_num, lang)` returns spans in the exact V8 span schema (`id`, `text`, `bbox`, `origin`,
+  `font_size`, `ocr_confidence`, `ocr_backend`), which merge into the manifest and flow through the
+  normal translate+render path. Backend priority PyMuPDF→pytesseract→none. **Fail-closed on the
+  right thing:** a scanned page with NO available backend, or OCR below the confidence threshold,
+  records `qa_report['ocr']` (per-page: detected-scanned, backend, confidence) and sets
+  NEEDS_LAYOUT_REVIEW with flag `OCR_UNAVAILABLE`/`OCR_LOW_CONFIDENCE`. A born-digital book is a
+  pure no-op (detection returns is_scanned=false everywhere). Config `bookstore.ocr.enabled`
+  (default true), `min_confidence` (default 0.5).
+- **Caption classification:** in the same manifest stage, run `caption_detection.detect_captions`
+  over the assembled text units + image bboxes; annotate matched units in the manifest with
+  `caption_type`/`position`/`related_image_bbox` so the renderer sizes/places them as captions and
+  the translator treats them as captions, not body. Record a summary in `qa_report['captions']`
+  (count by type). Informational only — never gates publishability. Deterministic, no API,
+  default on.
+- **Risk (R2):** confirm the manifest stage does not ALREADY OCR or already tag captions inline
+  before wiring (grep `get_textpage_ocr`, `caption`, `is_scanned` in the live engine) — if an
+  inline equivalent exists, reconcile first, don't double-run.
+- **Proof:** OCR — a scanned/image-only page (reuse the C3 image-only fixture) yields recovered
+  spans that render as live text (or, with no backend, routes to review with the OCR flag), proven
+  via the PDF.js harness. Captions — a page with a known image+caption pair tags that unit
+  `image_caption` in the manifest, verified in the manifest JSON on a real render.
 
 ### C5 — CI audit + DORMANT docs (R-W8/R-W7)
 Add `python scripts/wiring_audit.py` to the test runner (assert no NEW dead production module appears

@@ -76,6 +76,47 @@ fails closed.
 (config-gated) `IllustrationTextService` so text-on-illustration is actually repaired, not just
 detected. Remains config-gated and review-gated per the brief (generative = mandatory review).
 
+### R-W10 — Tagged-PDF / accessibility output (wire now — Decision 2)
+The engine must emit an accessible output and verify it, rather than leaving `accessibility.py`
+inert. Reuse the existing module (`check_pdf_accessibility`, `set_document_language`,
+`extract_reading_order`, `generate_alt_text_placeholders`) — do NOT rewrite detection.
+Concretely, on every render:
+  1. **Set document language metadata** (`/Lang`) on the SAVED PDF to the edition's target language
+     (BCP-47 via the module's `LANGUAGE_MAP`), so screen readers pronounce correctly. This is a
+     deterministic, no-API, always-on step.
+  2. **Verify accessibility as a post-render gate:** record `qa_report['accessibility']`
+     (language set?, structure tree?, marked content?, score, recommendations). A render whose
+     language metadata could NOT be set fails closed (NEEDS_LAYOUT_REVIEW) — that is a real
+     regression. Missing structure-tree/alt-text is RECORDED as a recommendation but does NOT by
+     itself sink the edition (PyMuPDF cannot synthesize a full StructTreeRoot; forcing it would be
+     a false block). Alt-text placeholders are emitted into the report for human review, never
+     auto-published as final.
+  3. Config `bookstore.accessibility.enabled` (default true — cheap, no API). Fail-safe: a gate
+     that cannot run records `ran=false` and never sinks the render.
+No edition renders with the wrong (or absent) language tag silently.
+
+### R-W11 — Scanned-page OCR fallback + caption/label classification (wire now — Decision 3)
+Image-only (scanned) pages currently yield zero translatable spans and pass through invisibly —
+exactly the "capability exists but does nothing" trap. Wire the two detection modules into the
+pre-render manifest stage:
+  1. **OCR fallback (`ocr_integration.py`):** during manifest build, classify each page with
+     `is_scanned_page`; a scanned page (few spans + large image) is OCR'd via the best available
+     backend (`ocr_for_manifest`, PyMuPDF→pytesseract) and its recovered spans feed the SAME
+     translation/render pipeline. OCR is **best-effort and gated**: when no backend is available
+     the page is flagged `OCR_UNAVAILABLE` → `qa_report['ocr']` + NEEDS_LAYOUT_REVIEW (a scanned
+     page we cannot read must route to review, never silently drop its text). Low-confidence OCR
+     (< threshold) is also flagged for review. Config `bookstore.ocr.enabled` (default true;
+     no-op when a book has no scanned pages).
+  2. **Caption/label classification (`caption_detection.py`):** during manifest build, run
+     `detect_captions` over the page's text units + image bboxes and tag the matched units
+     (`caption_type`, related image, position) in the manifest so the renderer can size and place
+     them as captions, and so they are translated as captions rather than body. Deterministic,
+     no-API, default on. This is informational metadata — it refines rendering, it does not gate
+     publishability.
+Both record their outcome into the `qa_report` (`ocr`, `captions`) so they are observable (R-W2),
+and both degrade safely to a no-op on books that have neither scanned pages nor image-adjacent
+captions.
+
 ### R-W6 — DELETE? candidates are confirmed and removed
 `scene_graph`, `visual_qa.py`, `pdf_digital_twin`, `pikepdf_integration`, `container_detection`,
 `list_detection`, `merged_cells` are each repo-grepped (incl. *.md/*.php/*.mjs); if genuinely unused
@@ -107,8 +148,11 @@ previously meaningless; it becomes the acceptance gate.
 
 ## Acceptance (whole spec)
 - `wiring_audit.py` shows ZERO modules in an undocumented LOST state (every one is live / dormant+
-  documented / deleted).
+  documented / deleted) — INCLUDING accessibility, ocr_integration, caption_detection now LIVE.
 - The font-integrity preflight catches a deliberately-planted counterfeit font on a real render
   (fail-closed), proven with a test built from a real mismatched file.
+- Every rendered edition carries correct `/Lang` metadata and an `qa_report['accessibility']` score;
+  a scanned page with no OCR backend routes to review (never silently drops its text); captions are
+  tagged in the manifest and recorded in `qa_report['captions']`.
 - A full book render exercises the wired capability set, logged in the qa_report; verified on ≥2 books.
 - Steering LIVE SYSTEM STATE + the generated audit agree; CI runs the audit.
