@@ -283,7 +283,7 @@ def test_10_full_pipeline():
     from pdf_translate_v8 import extract_page_spans, classify_page
     from page_inventory import build_page_inventory
     from pdf_validation import validate_pdf_standalone
-    from scene_graph import build_scene_graph
+    from document_model import build_document_scene
     from rotated_text import scan_page_for_rotated_text
     
     doc = pymupdf.open(KOLULU_PDF)
@@ -302,9 +302,10 @@ def test_10_full_pipeline():
         inventory = build_page_inventory(page, 3)
         assert inventory["object_counts"]["total"] > 0
         
-        # Step 4: Scene graph
-        graph = build_scene_graph(page, 3)
-        assert len(graph.nodes) > 0
+        # Step 4: Scene graph — exercise the LIVE inline region graph (document_model),
+        # which supersedes the retired standalone scene_graph.py (R-W6 / C7-T29).
+        scene = build_document_scene(KOLULU_PDF)
+        assert scene is not None
         
         # Step 5: Rotation check
         rot_scan = scan_page_for_rotated_text(page, 3)

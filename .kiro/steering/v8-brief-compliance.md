@@ -26,23 +26,27 @@ It is the current, verified state. When it conflicts with older prose below, THI
 > DONE+PROVEN (s12 — OCR fallback in extract_page_spans fail-closed via report['ocr'] ledger;
 > caption tagging in page_manifest.annotate_captions; ocr_integration + caption_detection now
 > LIVE-IMPORT). Audit totals now 20/16/10/17.
-> **DO NEXT:** Phase **C5** DONE (s13 — T13 CI gate `WiringAuditGateTest` + `wiring_audit.py
-> --check`/baseline; T14 DORMANT modules documented in the block below). Phase **C6** is the only
-> remaining phase = full-book test (My House + a 2nd book, T15/T16): a full `createTranslatedPdf`
-> recording WHICH capabilities fired (font_integrity, text_layer, accessibility, ocr, captions,
-> illustration repair, visual_qa), with a PLANTED counterfeit + corrupted text layer. **T12b** (the
-> illustration-trio vision proof) folds into C6. ⚠️ C6/T12b need Captain Zan's VISION-API budget OK
-> (the illustration path is gated OFF for cost); the counterfeit/text-layer parts are free.
-> **FIRST ACTION on resume:** run `python scripts/wiring_audit.py` (s13 totals: 20 import-live /
-> 16 subproc-live / 10 test-only / 17 dead; CI gate baseline = 27 allowed-inert).
+> **DO NEXT:** Phase **C7** DONE (s13 — the full LOST backlog wired: T23 security preflight, T24
+> optical_calibration, T25 quality_gates/PDF-A conformance signal, T26 audit_trail provenance log,
+> T27 inventory_layout + page_inventory, T28 typography_fingerprint signal, T29 scene_graph deleted
+> (R-W6 closed), T30 reconciliation — ZERO ambiguous LOST rows, 226 Laravel green). **ALL DEV IS NOW
+> WIRED** — per Captain Zan, end-to-end testing (Phase C6) was gated behind this. Phase **C6** is the
+> only remaining phase = full-book test (My House + a 2nd book, T15/T16): a full `createTranslatedPdf`
+> recording WHICH capabilities fired (security, font_integrity, text_layer, accessibility, ocr,
+> captions, conformance, inventory, illustration repair, visual_qa), with a PLANTED counterfeit +
+> corrupted text layer. **T12b** (illustration-trio vision proof) folds into C6. ⚠️ C6/T12b need the
+> VISION-API budget OK (illustration path gated OFF for cost); counterfeit/text-layer parts are free.
+> **FIRST ACTION on resume:** run `python scripts/wiring_audit.py` (s13 totals: 24 import-live /
+> 19 subproc-live / 6 test-only / 13 dead; CI gate baseline = 19 allowed-inert).
 
 
 - **ONE live render engine:** `scripts/pdf_translate_v8.py` (invoked by `PdfTranslationService::
   createTranslatedPdf`) + `scripts/page_manifest.py` for extraction. There is NO second renderer;
   `v8_advanced.py` is only an admin FontManager helper, `scene_renderer.py` was removed.
 - **Authoritative module map is GENERATED, not remembered:** run `python scripts/wiring_audit.py`.
-  Latest totals (s12, after C4a+C4b wiring): 20 import-live, 16 subprocess-live, 10 test-only,
-  17 dead. The audit now propagates liveness TRANSITIVELY from LIVE-SUBPROC modules through the Python import graph (earlier versions seeded only the 2 engine entrypoints and
+  Latest totals (s13, after C7 — all LOST backlog wired): 24 import-live, 19 subprocess-live,
+  6 test-only, 13 dead. The audit now propagates liveness TRANSITIVELY from LIVE-SUBPROC modules
+  through the Python import graph (earlier versions seeded only the 2 engine entrypoints and
   under-counted — the illustration-repair trio + font_registry/glyph_preflight/document_model/etc.
   were wrongly TEST-ONLY/DEAD). Reports:
   `.kiro/specs/unified-rendering-and-testing/WIRING_AUDIT_MECHANICAL.md` (the map) +

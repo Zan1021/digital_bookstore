@@ -149,6 +149,50 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | PDF security pre-flight (engine-wiring-and-activation R-W1 / C7-T23)
+    |--------------------------------------------------------------------------
+    | Before the engine processes a source PDF, scripts/security.py scans it for
+    | threats (JavaScript, /Launch actions, decompression-bomb/oversized files,
+    | corrupt structure, suspicious embedded files). A PDF flagged unsafe routes
+    | the edition to review (fail-closed) rather than being processed. Warnings
+    | (encrypted, many pages, embedded files) are recorded but do not block.
+    | Cheap, no API, default on. Fail-safe: a scan that cannot run never blocks.
+    | ⚠️ This is the guard that MUST be on before accepting untrusted/public uploads.
+    */
+    'security' => [
+        'enabled' => env('PDF_SECURITY_SCAN_ENABLED', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | PDF/A archival-conformance signal (engine-wiring-and-activation C7-T25)
+    |--------------------------------------------------------------------------
+    | Post-render INFORMATIONAL signal from scripts/quality_gates.py (the one gate
+    | not already covered by the live stack). Recorded in qa_report['conformance']
+    | for visibility; NEVER blocks (PDF/A is aspirational for picture books). The
+    | duplicate quality_gates checks (syntax/extraction/accessibility/visual/
+    | determinism) are intentionally NOT wired — the live modules own those (R2).
+    */
+    'conformance' => [
+        'enabled' => env('CONFORMANCE_SIGNAL_ENABLED', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Audit trail — persistent render-provenance log (engine-wiring C7-T26)
+    |--------------------------------------------------------------------------
+    | After each render, scripts/audit_trail.py appends a timestamped entry
+    | (language, engine version, pages, errors, validation) to a per-book audit
+    | log under storage/app/audit. This is the HISTORICAL log the live
+    | RenderFingerprint (a point-in-time reproducibility hash) does not keep.
+    | Best-effort + non-blocking: a logging failure never affects the render.
+    */
+    'audit_trail' => [
+        'enabled' => env('AUDIT_TRAIL_ENABLED', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Illustration-text vision module (text baked into artwork)
     |--------------------------------------------------------------------------
     | Some books bake text (a title, a label) INTO a raster illustration, so it

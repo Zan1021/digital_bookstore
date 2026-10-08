@@ -190,7 +190,51 @@ def resolve_font_with_policy(requested_font: str, fonts_dir: str, is_bold: bool 
     if _alias_applied:
         result["aliasApplied"] = True
         result["aliasFrom"] = requested_font
+
+    # OPTICAL CALIBRATION (engine-wiring-and-activation C7-T24): when we SUBSTITUTED a
+    # different family for the requested source font (fallbackUsed or aliasApplied), the
+    # substitute may render visually larger/smaller at the same pt size. If the ORIGINAL
+    # requested font file is resolvable in fonts_dir, compute an optical size factor so the
+    # placement code can keep the translated text visually the same size as the source.
+    # Fail-SAFE + honest: if the source font file is NOT available (the usual reason we had
+    # to substitute), we CANNOT measure it, so sizeFactor stays 1.0 (never a guess). Default
+    # on; no API. `calibrate_font_size` wraps all of this and never raises.
+    result["opticalSizeFactor"] = 1.0
+    if result.get("fallbackUsed") or result.get("aliasApplied"):
+        try:
+            factor = _optical_size_factor(requested_font, chosen_path, registry)
+            if factor and factor > 0:
+                result["opticalSizeFactor"] = round(float(factor), 4)
+        except Exception:
+            result["opticalSizeFactor"] = 1.0  # never let calibration break resolution
     return result
+
+
+def _optical_size_factor(requested_font: str, resolved_path: str, registry: dict):
+    """Return the optical size factor to apply to a span whose font was substituted, or
+    1.0 when the source font cannot be measured (so we never guess). Compares the requested
+    (source) font's optical profile to the resolved (substitute) font's."""
+    if not os.environ.get("OPTICAL_CALIBRATION_ENABLED", "1").strip().lower() in ("1", "true", "yes"):
+        return 1.0
+    # Find a font FILE for the REQUESTED source family in the approved dir. If the source
+    # font itself isn't present (the common substitution case), we can't measure it → 1.0.
+    req_norm = _norm(requested_font)
+    source_path = None
+    for fam, path in registry["families"].items():
+        if req_norm and (req_norm in fam or fam in req_norm):
+            source_path = path
+            break
+    if not source_path or source_path == resolved_path:
+        return 1.0  # no distinct source to measure against → no calibration
+    try:
+        from optical_calibration import (build_optical_profile,
+                                          compute_calibration_factor)
+    except Exception:
+        return 1.0
+    src = build_optical_profile(source_path)
+    tgt = build_optical_profile(resolved_path)
+    cal = compute_calibration_factor(src, tgt)
+    return cal.size_factor if cal and cal.size_factor else 1.0
 
 
 def document_font_policy_report(fonts_dir: str, requested_fonts=None) -> dict:

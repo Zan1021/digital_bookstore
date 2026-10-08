@@ -640,28 +640,29 @@ def run_all_gates(
 
 def main():
     """Run quality gates on Kolulu render."""
-    source_pdf = r"C:\Users\zande\Documents\Digital Bookstore\Kolulu Engl Series 3 - 2 - A Fun Place.pdf"
-    output_pdf = r"C:\Users\zande\Documents\Digital Bookstore\bookstore\storage\app\public\books\translated\2_af_v8.pdf"
-    
-    print("=== Quality Gates ===\n")
-    
-    if not os.path.isfile(output_pdf):
-        print(f"Output PDF not found: {output_pdf}")
+    import argparse
+    # engine-wiring-and-activation C7-T25: a focused JSON CLI exposing ONLY the quality
+    # signal that is NOT already covered by the live stack — PDF/A archival conformance.
+    # (multi_engine/pdf_syntax = live pdf_validation+text_verification; accessibility = live
+    # accessibility pass; visual_qa = live VisualQaService; deterministic = live
+    # RenderFingerprint. Those are intentionally NOT re-exposed here — R2, no double gate.)
+    parser = argparse.ArgumentParser(description="Quality Gates — V8")
+    sub = parser.add_subparsers(dest="command")
+    conf = sub.add_parser("conformance", help="PDF/A archival-conformance signal (JSON)")
+    conf.add_argument("--input", "-i", required=True)
+    args, _unknown = parser.parse_known_args()
+
+    if args.command == "conformance":
+        res = gate_pdfa_conformance(args.input)
+        print(json.dumps({
+            "gate": res.gate_name,
+            "passed": res.passed,
+            "severity": res.severity,
+            "message": res.message,
+            "issues": (res.details or {}).get("issues", []),
+        }, ensure_ascii=False))
         return
-    
-    report = run_all_gates(source_pdf, output_pdf)
-    
-    print(f"Overall: {'PASS' if report.overall_passed else 'FAIL'} (score: {report.score:.0f}/100)")
-    print(f"Requires review: {report.requires_review}")
-    
-    for gate in report.gates:
-        status = "PASS" if gate.passed else "FAIL"
-        print(f"  [{status}] {gate.gate_name}: {gate.message}")
-    
-    if report.blocking_issues:
-        print(f"\nBlocking issues:")
-        for issue in report.blocking_issues:
-            print(f"  - {issue}")
+    parser.print_help()
 
 
 if __name__ == "__main__":

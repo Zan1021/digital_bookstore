@@ -209,7 +209,109 @@ defect) on a real book, plus suite-green + ≥2-book check (R6).
       intent is now served by the live font_integrity preflight. The steering also now points at the
       CI gate + baseline so the DORMANT list and the baseline are kept in sync by rule.
 
-## Phase C6 — The now-MEANINGFUL full-engine book test (R-W9)
+## Phase C7 — Finish the LOST backlog (close every remaining capability gap before C6)
+
+> **Why this phase exists:** a full re-audit (session 13) against the triage sheet showed the
+> engine-wiring spec never wrote task lines for several triage-LOST modules. Captain Zan's rule: ALL
+> dev wired before any end-to-end testing — so C7 clears every genuine gap, one task at a time, each
+> proven, BEFORE Phase C6. Dev throwaway scripts (analyze_page2, render_page*_check, view_pdf,
+> get_translations, render_book, show_qa_report, render_comparison) and KEEP-test-infra
+> (corpus_fixtures, make_gate_fixtures) are explicitly OUT (not features). DORMANT modules
+> (content_cache, incremental_render, content_stream_surgery, variable_fonts, raster_fallback,
+> translation_variants, script_detection) stay dormant+documented (C5/T14) — not re-wired.
+> Each task: wire or reconcile-then-wire, add a regression test, run the audit, keep the suite green.
+
+- [x] **T23. `security` — wire input/path hardening on the Python entrypoints (R-W1).** DONE.
+      `scripts/security.py scan` wired as a PHP pre-flight `runSecurityPreflight(Book,$sourcePath)` in
+      `createTranslatedPdfInner`, BEFORE the engine subprocess, over the SOURCE pdf. Verdict folded
+      into QaReport check `security`: an UNSAFE source (JavaScript / `/Launch` / oversized-bomb /
+      corrupt) → publishable=false, NEEDS_LAYOUT_REVIEW, flag `PDF_SECURITY_THREAT`; warnings
+      (encrypted/many-pages/embedded) recorded, non-blocking. Config `bookstore.security.enabled`
+      (env `PDF_SECURITY_SCAN_ENABLED`, default true). Fail-SAFE: a scan that can't run records
+      ran=false, never blocks. PROOF: `tests/Feature/SecurityPreflightTest.php` 4/4 — clean pdf safe,
+      hand-built OpenAction-/JavaScript pdf fails closed with threat type `javascript`, config-disable
+      + missing-input no-ops. wiring_audit reclassifies security TEST-ONLY→LIVE-SUBPROC
+      (gated:security.enabled); totals 20/16/10/17 → 20/17/9/17. CI baseline refreshed at T30.
+- [x] **T24. `optical_calibration` — wire optical-size compensation for substituted fonts (R-W1).**
+      DONE. Wired at the single font-resolution seam: `font_policy.resolve_font_with_policy` now
+      computes `opticalSizeFactor` (via `optical_calibration.build_optical_profile` +
+      `compute_calibration_factor`) whenever a font is SUBSTITUTED (fallbackUsed/aliasApplied) AND the
+      source font file is resolvable; it carries through `resolve_role_font` unchanged. The engine
+      (`pdf_translate_v8`) applies it: `calibrated_size = size * opticalSizeFactor` fed into the
+      `FitConstraints.source_font_size`, so the substitute renders at the optically-equivalent size;
+      recorded in `report['font_policy'][page][].opticalSizeFactor`. HONEST FAIL-SAFE: when the source
+      font isn't on disk (the usual reason we substituted) it CANNOT be measured → factor stays 1.0, a
+      pure no-op (never a guessed scale); the module's own ±30% guard bounds any computed factor. Env
+      `OPTICAL_CALIBRATION_ENABLED` (default on). PROOF: `scripts/test_optical_calibration_wiring.py`
+      3/3 — every resolution carries a float factor; unmeasurable source = exactly 1.0; a measured
+      factor between two real distinct fonts stays in 0.7..1.3. Regression: font_policy 6/6, roles
+      7/7, integration 10/10, unit 64/64 all green (hot path undisturbed). audit shows
+      optical_calibration DEAD→LIVE-IMPORT (transitive via font_policy).
+- [x] **T25. `quality_gates` — RECONCILED, wired the genuine gap only (R-W1/R2).** DECISION (Naz, as
+      team lead): wire the ONE check not already live — PDF/A archival conformance — as an
+      INFORMATIONAL signal; do NOT re-wire the duplicates (gate_multi_engine/gate_pdf_syntax = live
+      pdf_validation+text_verification; gate_accessibility = live C4a accessibility pass, which is
+      stronger; gate_visual_qa = live VisualQaService; verify_deterministic = live RenderFingerprint).
+      Re-wiring those would be the double-gate R2 forbids. Added a `conformance` JSON CLI to
+      `quality_gates.py` (exposes only `gate_pdfa_conformance`); wired PHP `runConformanceSignal()`
+      post-render → `qa_report['conformance']`, recorded + non-blocking (PDF/A is aspirational for
+      picture books, never flips publishable). Config `bookstore.conformance.enabled` (default true).
+      PROOF: CLI emits `{gate:pdfa_conformance, passed, severity:info, issues}`;
+      `ConformanceAndAuditTest` 2/2 (runs + informational; config-disable no-op). quality_gates now
+      LIVE-SUBPROC. The superseded gates stay documented-as-covered (not deleted — the module hosts
+      the one live gate now).
+- [x] **T26. `audit_trail` — RECONCILED, wired the genuine gap (R-W1/R2).** DECISION (Naz): the live
+      `RenderFingerprint` is a point-in-time reproducibility HASH; it does NOT keep a HISTORY.
+      `audit_trail` provides that persistent per-book provenance log — a real, non-duplicated
+      capability a world-class engine needs. Wired PHP `logAuditTrail()` (calls `audit_trail.py
+      log-render`) after the fingerprint is computed, enriching the entry with engine_version + the
+      SAME RenderFingerprint (one provenance source, not two checksum schemes). Writes
+      `storage/app/audit/audit_<book>.json`. Best-effort + NON-BLOCKING: a logging failure never
+      affects the render/publish. Config `bookstore.audit_trail.enabled` (default true). PROOF:
+      `audit_trail.py log-render`+`show` persists & reads back a render entry;
+      `ConformanceAndAuditTest` 2/2 (appends a render entry with the language; config-disable no-op).
+      audit_trail now LIVE-SUBPROC.
+- [x] **T27. `inventory_layout` + `page_inventory` — RESOLVED (both wired, R-W1/R2).** DECISION
+      (Naz): both are ADDITIVE over page_manifest, not competing contracts — wire, don't delete.
+      `inventory_layout` (its own docstring: "ADDITIVE serializer over the DocumentScene"): wired
+      `serialize_inventory(scene)` + `validate_inventory` right after `build_document_scene` in
+      `replace_text_in_pdf`; the `inventory-layout-2` contract summary (schema/counts) → `report
+      ['inventory_layout']`; a structurally-invalid inventory (dup ids/cycle/bad geometry) → review
+      (fail closed). `page_inventory`: wired `build_document_inventory` → `report['object_inventory']`
+      (page complexity + object counts), informational. Both fail-safe (never raise into render).
+      PROOF (R4): integration 10/10 (full pipeline exercises both — the report now carries
+      inventory_layout + object_inventory), unit 64/64. audit reclassifies both DEAD/TEST-ONLY→
+      LIVE-IMPORT; totals 21/19/9/14 → 23/19/7/14.
+- [x] **T28. `typography_fingerprint` — decided + wired as a supplementary signal (R-W1).** DECISION
+      (Naz): don't leave it dormant — a world-class counterfeit guard uses metric identity, not just
+      the embedded name. Wired `build_fingerprint` into `font_integrity` on the COUNTERFEIT path:
+      when a font's embedded name is unreadable (so name-matching can't work), `_fingerprint_signal`
+      attaches the file's metric signature (`fingerprintSignal`) so a reviewer sees WHAT it actually
+      is. Supplementary only — never flips the verdict (the name mismatch already fails closed);
+      fail-safe when the module/attr is absent. PROOF: `test_font_integrity.py` 19/19 (no regression);
+      audit reclassifies typography_fingerprint DEAD→LIVE-IMPORT; totals 23/19/7/14 → 24/19/7/13.
+- [x] **T29. Finished R-W6 — `scene_graph` resolved (migrated tests, then deleted).** DONE. The two
+      HELD consumers were migrated off the dead module: `test_integration` Step 4 now exercises the
+      LIVE `document_model.build_document_scene` (which supersedes it); `test_unit` reading-order uses
+      a minimal namedtuple bbox holder (the test only exercised sort logic, not scene_graph behavior).
+      Both suites green AFTER migration (integration 10/10, unit 64/64), THEN `scripts/scene_graph.py`
+      deleted. VERIFIED: repo-wide grep shows zero `import scene_graph` / `from scene_graph`; audit no
+      longer lists it in any tier; the live manifest provenance tag `builder:"scene_graph"` (a string
+      literal in page_manifest, checked by PHP's freshness guard — unrelated to the file) correctly
+      SURVIVES. R-W6 is now truly closed. Totals 24/19/7/13 → 24/19/6/13.
+- [x] **T30. Final backlog reconciliation — DONE (R-W1 acceptance met).** Re-ran `wiring_audit.py`;
+      EVERY remaining non-live module is now accounted for with ZERO ambiguous LOST rows:
+      documented-DORMANT (content_cache, content_stream_surgery, incremental_render, script_detection,
+      raster_fallback, translation_variants, variable_fonts — all in the C5/T14 steering list) OR
+      KEEP dev-tool/test-infra (corpus_fixtures, make_gate_fixtures, wiring_audit, render_comparison,
+      analyze_page2, capture_evidence, get_translations, render_book, render_page*_check,
+      show_qa_report, view_pdf) OR deleted (scene_graph). Refreshed the CI baseline
+      (`scripts/.wiring_audit_baseline.json`, 27→19 allowed-inert — 8 modules wired/deleted this
+      phase), regenerated WIRING_AUDIT_MECHANICAL.md, `--check` green. Final totals: LIVE-IMPORT=24,
+      LIVE-SUBPROC=19, TEST-ONLY=6, DEAD=13. Full Laravel suite 226 passed. **All dev is wired —
+      Phase C6 (end-to-end testing) is now unblocked.**
+
+## Phase C6 — The now-MEANINGFUL full-engine book test (R-W9) — RUNS ONLY AFTER C7/T30
 
 - [ ] **T15. End-to-end render of My House #10000 (af) AND a second, different book** with the wired
       capability set; record in qa_report WHICH capabilities fired (font_integrity, text_layer,

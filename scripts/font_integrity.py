@@ -142,8 +142,13 @@ def check_font(requested_family: str, fonts_dir: str, language: str = "af",
 
     if not name_matches:
         # File lies about what it is (e.g. AdLibBT file whose internal name is "Bangers").
+        # SUPPLEMENTARY SIGNAL (C7-T28): when the embedded name is unreadable we cannot
+        # name-match at all; a typography fingerprint (metric signature) can still describe
+        # the file so a reviewer sees WHAT it actually is. Recorded, never flips the verdict
+        # on its own (the name mismatch already fails closed). Fail-safe.
         verdict["matches"] = False
         verdict["status"] = STATUS_MISMATCH
+        verdict["fingerprintSignal"] = _fingerprint_signal(font_path)
         verdict["uploadPrompt"] = _upload_prompt(
             requested_family,
             f"the file '{verdict['file']}' is internally '{internal or 'unreadable'}', "
@@ -178,6 +183,25 @@ def _language_probe(language: str) -> str:
         return BASIC_LATIN + LANGUAGE_CHARS.get(language, "")
     except Exception:
         return "The quick brown fox jumps over the lazy dog 0123456789"
+
+
+def _fingerprint_signal(font_path: str) -> dict:
+    """Metric-based typography fingerprint for a font file (C7-T28). Used ONLY as a
+    supplementary descriptor on the counterfeit path when the embedded name is unreadable,
+    so a reviewer can see the file's actual metric signature. Never changes the verdict.
+    Fail-safe: returns {available: False} on any error (typography_fingerprint missing, etc.)."""
+    try:
+        from typography_fingerprint import build_fingerprint
+        fp = build_fingerprint(font_path)
+        return {
+            "available": True,
+            "fontName": getattr(fp, "font_name", None),
+            "avgCharWidth": round(getattr(fp, "avg_char_width", 0.0), 3),
+            "xHeightRatio": round(getattr(fp, "x_height_ratio", 0.0), 3),
+            "weightClass": getattr(fp, "weight_class", None),
+        }
+    except Exception as e:
+        return {"available": False, "reason": str(e)}
 
 
 def preflight(fonts_dir: str, families, language: str = "af",

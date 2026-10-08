@@ -311,13 +311,17 @@ def test_14_column_width():
 def test_15_reading_order():
     """Reading order determination (top-to-bottom, left-to-right)."""
     print("  15. Reading order determination")
-    from scene_graph import SceneNode
+    # The live engine's region graph (document_model) supersedes the retired scene_graph.py
+    # (R-W6 / C7-T29). This unit only exercises reading-order SORT logic, so a minimal bbox
+    # holder stands in for the removed SceneNode — intent preserved, dead dep gone.
+    from collections import namedtuple
+    Node = namedtuple("Node", ["id", "kind", "bbox"])
     
     # Create nodes at different positions
     nodes = [
-        SceneNode("txt3", "text", [100, 200, 200, 220]),   # Lower
-        SceneNode("txt1", "text", [100, 50, 200, 70]),     # Top
-        SceneNode("txt2", "text", [100, 100, 200, 120]),   # Middle
+        Node("txt3", "text", [100, 200, 200, 220]),   # Lower
+        Node("txt1", "text", [100, 50, 200, 70]),     # Top
+        Node("txt2", "text", [100, 100, 200, 120]),   # Middle
     ]
     
     # Sort by Y then X (reading order)

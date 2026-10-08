@@ -261,6 +261,179 @@ class PdfTranslationService
     }
 
     /**
+     * PDF SECURITY PRE-FLIGHT (engine-wiring-and-activation R-W1 / C7-T23).
+     *
+     * Scans the SOURCE pdf with scripts/security.py BEFORE the engine processes it, for
+     * threats (JavaScript, /Launch actions, oversized/decompression-bomb files, corrupt
+     * structure, suspicious embedded files). An unsafe PDF fails closed: the edition routes
+     * to NEEDS_LAYOUT_REVIEW rather than being processed. Warnings (encrypted / many pages /
+     * embedded files) are recorded but do not block.
+     *
+     * Fail-SAFE on its own error: a scan that cannot run records ran=false and NEVER blocks
+     * the render. Config: bookstore.security.enabled (default true, no API). ⚠️ Must be ON
+     * before accepting untrusted/public uploads.
+     *
+     * @return array<string,mixed>
+     */
+    private function runSecurityPreflight(Book $book, string $sourcePath): array
+    {
+        if (! config('bookstore.security.enabled', true)) {
+            return ['ran' => false, 'reason' => 'disabled'];
+        }
+        if (! is_file($sourcePath)) {
+            return ['ran' => false, 'reason' => 'missing_inputs'];
+        }
+
+        try {
+            $process = new Process([
+                'python',
+                base_path('scripts/security.py'),
+                'scan',
+                '--input', $sourcePath,
+                '--json',
+            ]);
+            $process->setTimeout(120);
+            $process->run();
+
+            if (! $process->isSuccessful()) {
+                Log::warning('Security pre-flight could not run (non-fatal)', [
+                    'book' => $book->id,
+                    'stderr' => $process->getErrorOutput(),
+                ]);
+                return ['ran' => false, 'reason' => 'scan_error'];
+            }
+
+            $decoded = json_decode($process->getOutput(), true);
+            if (! is_array($decoded)) {
+                Log::warning('Security pre-flight returned unparseable output (non-fatal)', [
+                    'book' => $book->id,
+                    'stdout' => $process->getOutput(),
+                ]);
+                return ['ran' => false, 'reason' => 'unparseable'];
+            }
+
+            return array_merge(['ran' => true], $decoded);
+        } catch (\Throwable $e) {
+            Log::warning('Security pre-flight threw (non-fatal)', [
+                'book' => $book->id,
+                'error' => $e->getMessage(),
+            ]);
+            return ['ran' => false, 'reason' => 'exception'];
+        }
+    }
+
+    /**
+     * PDF/A ARCHIVAL-CONFORMANCE SIGNAL (engine-wiring-and-activation C7-T25).
+     *
+     * Runs scripts/quality_gates.py `conformance` on the final output for a PDF/A archival
+     * signal — the ONE quality check `quality_gates` offers that is NOT already covered by
+     * the live stack (pdf_validation/text_verification = syntax/extraction; the C4a
+     * accessibility pass = /Lang + tags; VisualQaService = perceptual; RenderFingerprint =
+     * determinism). Those duplicates are deliberately NOT re-wired (R2 — no double gate).
+     *
+     * INFORMATIONAL / NON-BLOCKING: PDF/A conformance is aspirational for children's books;
+     * a shortfall is recorded (qa_report['conformance']) for visibility but does NOT fail the
+     * edition. Config bookstore.conformance.enabled (default true, no API). Fail-safe.
+     *
+     * @return array<string,mixed>
+     */
+    private function runConformanceSignal(Book $book, string $outputPath): array
+    {
+        if (! config('bookstore.conformance.enabled', true)) {
+            return ['ran' => false, 'reason' => 'disabled'];
+        }
+        if (! is_file($outputPath)) {
+            return ['ran' => false, 'reason' => 'missing_inputs'];
+        }
+
+        try {
+            $process = new Process([
+                'python',
+                base_path('scripts/quality_gates.py'),
+                'conformance',
+                '--input', $outputPath,
+            ]);
+            $process->setTimeout(120);
+            $process->run();
+
+            if (! $process->isSuccessful()) {
+                return ['ran' => false, 'reason' => 'gate_error'];
+            }
+            $decoded = json_decode($process->getOutput(), true);
+            if (! is_array($decoded)) {
+                return ['ran' => false, 'reason' => 'unparseable'];
+            }
+            return array_merge(['ran' => true], $decoded);
+        } catch (\Throwable $e) {
+            Log::warning('Conformance signal threw (non-fatal)', [
+                'book' => $book->id,
+                'error' => $e->getMessage(),
+            ]);
+            return ['ran' => false, 'reason' => 'exception'];
+        }
+    }
+
+    /**
+     * AUDIT-TRAIL RENDER LOG (engine-wiring-and-activation C7-T26).
+     *
+     * Appends a timestamped provenance entry for this render to a per-book audit log
+     * (scripts/audit_trail.py `log-render`) under storage/app/audit. This is the persistent
+     * HISTORY the point-in-time RenderFingerprint does not keep; we enrich the report with
+     * the live engine_version + fingerprint before logging so there is ONE provenance
+     * source, not two competing checksum schemes.
+     *
+     * Best-effort + NON-BLOCKING: any failure is swallowed — audit logging must never affect
+     * whether an edition renders or publishes. Config bookstore.audit_trail.enabled.
+     */
+    private function logAuditTrail(Book $book, string $language, $report, ?string $fingerprint): void
+    {
+        if (! config('bookstore.audit_trail.enabled', true)) {
+            return;
+        }
+        try {
+            $payload = is_array($report) ? $report : [];
+            $payload['engine_version'] = (string) config('bookstore.engine_version', 'v8');
+            if ($fingerprint !== null) {
+                $payload['render_fingerprint'] = $fingerprint;
+            }
+            $storageDir = storage_path('app/audit');
+            if (! is_dir($storageDir)) {
+                @mkdir($storageDir, 0755, true);
+            }
+            $tmp = storage_path('app/temp/audit_' . $book->id . '_' . $language . '_' . uniqid() . '.json');
+            if (! is_dir(dirname($tmp))) {
+                @mkdir(dirname($tmp), 0755, true);
+            }
+            file_put_contents($tmp, json_encode($payload, JSON_UNESCAPED_UNICODE));
+
+            $process = new Process([
+                'python',
+                base_path('scripts/audit_trail.py'),
+                'log-render',
+                '--book-id', (string) $book->id,
+                '--language', $language,
+                '--report', $tmp,
+                '--storage', $storageDir,
+            ]);
+            $process->setTimeout(60);
+            $process->run();
+            @unlink($tmp);
+
+            if (! $process->isSuccessful()) {
+                Log::info('Audit-trail log-render non-fatal failure', [
+                    'book' => $book->id,
+                    'stderr' => $process->getErrorOutput(),
+                ]);
+            }
+        } catch (\Throwable $e) {
+            Log::info('Audit-trail logging threw (non-fatal)', [
+                'book' => $book->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
      * Robustly parse the engine's JSON report from a (possibly noisy) stderr stream.
      * The engine prints one JSON object, but real runs can wrap it in warnings / progress
      * lines / a UTF-8 BOM / a trailing object. A naive json_decode of the whole string then
@@ -549,6 +722,11 @@ class PdfTranslationService
         // ON by default. A book with no policy requests nothing specific → no-op.
         $fontIntegrity = $this->runFontIntegrityPreflight($book, $translation->language_code);
 
+        // PDF SECURITY PRE-FLIGHT (R-W1/C7-T23): scan the SOURCE pdf for threats (JS,
+        // /Launch, oversized/bomb, corrupt, suspicious embeds) BEFORE processing. Unsafe →
+        // fail closed to review. Warnings recorded, non-blocking. Cheap, no API, default on.
+        $security = $this->runSecurityPreflight($book, $originalPath);
+
         $scriptPath = $this->getScriptPath($book);
 
         $cmd = [
@@ -722,6 +900,34 @@ class PdfTranslationService
                 ['count' => count($report['overflow_warnings'])]);
         }
 
+        // PDF SECURITY (R-W1/C7-T23): fold the pre-render security scan verdict into the
+        // authoritative QA merge. An UNSAFE source (JS / launch action / oversized-bomb /
+        // corrupt) fails the edition closed; warnings are recorded but do not block. A scan
+        // that could not run (ran=false) leaves everything unchanged (fail-safe).
+        if (is_array($security) && ($security['ran'] ?? false)) {
+            if (is_array($report)) {
+                $report['security'] = $security;
+            }
+            if (! ($security['safe'] ?? true)) {
+                $publishable = false;
+                $renderStatus = 'NEEDS_LAYOUT_REVIEW';
+                $qaReport->fail('security', 'PDF_SECURITY_THREAT', 'preflight', [
+                    'threats' => $security['threats'] ?? [],
+                ]);
+                Log::warning('Security pre-flight flagged threats — routing edition to review', [
+                    'book' => $book->id,
+                    'threats' => array_map(fn ($t) => $t['type'] ?? 'unknown', $security['threats'] ?? []),
+                ]);
+                if (is_array($report)) {
+                    $report['publishable'] = false;
+                    $report['render_status'] = 'NEEDS_LAYOUT_REVIEW';
+                    $report['flags']['PDF_SECURITY_THREAT'] = $security['threats'] ?? [];
+                }
+            } else {
+                $qaReport->pass('security');
+            }
+        }
+
         // FONT-ASSET-INTEGRITY (R-W3/R-W3.1): fold the pre-render preflight verdict into
         // the authoritative QA merge. A required font that is counterfeit, glyph-short or
         // missing fails the edition closed and carries the actionable upload prompt(s), so
@@ -818,6 +1024,19 @@ class PdfTranslationService
             } else {
                 $qaReport->pass('accessibility');
             }
+        }
+
+        // PDF/A ARCHIVAL-CONFORMANCE SIGNAL (C7-T25): informational quality signal, recorded
+        // but never blocking (PDF/A is aspirational for children's picture books). The ONE
+        // quality_gates check not already covered by the live stack.
+        $conformance = $this->runConformanceSignal($book, $outputPath);
+        if (is_array($conformance) && ($conformance['ran'] ?? false)) {
+            if (is_array($report)) {
+                $report['conformance'] = $conformance;
+            }
+            // Non-blocking: record as a passing QA signal regardless; the issues list is
+            // carried for visibility. Never flips publishable (R-W design: informational).
+            $qaReport->pass('conformance');
         }
 
         // FIX C: even if the engine's own gate passed, unresolved spans (rendered
@@ -1106,6 +1325,10 @@ class PdfTranslationService
         $narrationFp = \App\Services\Qa\RenderFingerprint::hashTextComponent(
             $translation->item_translations ?? []
         );
+
+        // AUDIT TRAIL (C7-T26): append this render to the per-book provenance history,
+        // enriched with the fingerprint just computed. Best-effort, non-blocking.
+        $this->logAuditTrail($book, $translation->language_code, $report, $fingerprint);
         // Invalidate stored approvals if the fingerprint changed (R9.3): a new render of
         // different content must not inherit the prior edition's layout/artwork approvals.
         $priorFingerprint = $translation->getAttribute('render_fingerprint');

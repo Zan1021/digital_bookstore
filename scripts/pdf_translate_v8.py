@@ -1864,9 +1864,22 @@ def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_di
                 "id": u.id, "role": role, "resolvedBy": spec.get("resolvedBy"),
                 "family": spec.get("resolvedFamily"), "approved": spec.get("approved"),
                 "policyChoice": spec.get("policyChoice"),
+                "opticalSizeFactor": spec.get("opticalSizeFactor", 1.0),
             })
         except Exception:
             spec = None
+
+        # OPTICAL CALIBRATION (C7-T24): when the resolved font is a SUBSTITUTE, scale the
+        # source pt size by the measured optical factor so the substitute LOOKS the same
+        # visual size as the source. factor == 1.0 (the default / un-measurable case) is a
+        # no-op. Applied to the FIT source size only, so measurement and draw stay in sync.
+        calibrated_size = size
+        try:
+            _osf = float(spec.get("opticalSizeFactor", 1.0)) if spec else 1.0
+            if _osf and _osf > 0 and abs(_osf - 1.0) > 1e-6:
+                calibrated_size = size * _osf
+        except Exception:
+            calibrated_size = size
         if not font_file:
             font_file = _weight_aware_house_font([
                 {"font_size": size, "is_bold": (s.get("is_bold") if s else False),
@@ -1898,7 +1911,7 @@ def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_di
         constraints = FitConstraints(
             container_width=max(1.0, box.width),
             container_height=max(1.0, box.height),
-            source_font_size=size,
+            source_font_size=calibrated_size,
             min_font_size=6.0,
             max_shrink_ratio=0.2,
             allow_multiline=not single_line,
@@ -4403,6 +4416,29 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None, onl
     except Exception:
         document_scene = None  # Fall back to flat per-span record if unavailable.
 
+    # INVENTORY-LAYOUT-2 CONTRACT (engine-wiring-and-activation C7-T27): project the live
+    # DocumentScene into the stable `inventory-layout-2` contract (source_kind separate from
+    # semantic_role, per-region processing_policy, forward+inverse source↔render↔image
+    # transforms) and VALIDATE it. This is ADDITIVE over the scene graph (its own docstring),
+    # not a competing contract. A structurally-invalid inventory (dup ids / cycle / bad
+    # geometry) is recorded + routes to review (fail closed). Fail-safe: never raises into
+    # the render. Default on.
+    if document_scene is not None:
+        try:
+            from inventory_layout import serialize_inventory, validate_inventory
+            _inv = serialize_inventory(document_scene)
+            _inv_issues = validate_inventory(_inv)
+            report_inventory = {
+                "schema_version": _inv.get("schema_version"),
+                "page_count": len(_inv.get("pages", [])),
+                "region_count": len(_inv.get("regions", [])),
+                "issues": _inv_issues,
+            }
+        except Exception as _e:
+            report_inventory = {"skipped": True, "reason": str(_e)}
+    else:
+        report_inventory = {"skipped": True, "reason": "no_scene"}
+
     report = {
         "version": "v8",
         "pages_processed": 0,
@@ -4420,6 +4456,27 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None, onl
             "pages_with_gaps": [],
         },
     }
+
+    # Attach the inventory-layout-2 contract summary computed above (C7-T27). A structurally
+    # invalid inventory (dup ids / cycle / bad geometry) is a whole-document review signal.
+    report["inventory_layout"] = report_inventory
+    if isinstance(report_inventory, dict) and report_inventory.get("issues"):
+        report.setdefault("review_pages", [])
+        if 1 not in report["review_pages"]:
+            report["review_pages"].append(1)
+
+    # FULL OBJECT INVENTORY (C7-T27): a page-complexity/object signal (images, paths, clips,
+    # transparency) feeding confidence — informational, never blocking. Reuses
+    # page_inventory.build_document_inventory. Fail-safe.
+    try:
+        from page_inventory import build_document_inventory
+        _obj_inv = build_document_inventory(input_pdf)
+        report["object_inventory"] = {
+            "total_pages": _obj_inv.get("total_pages"),
+            "summary": _obj_inv.get("summary", {}),
+        }
+    except Exception as _e:
+        report["object_inventory"] = {"skipped": True, "reason": str(_e)}
 
     # Build translations map
     translations_map = {p["page_number"]: p.get("translated_text", "")
