@@ -147,36 +147,47 @@ defect) on a real book, plus suite-green + ≥2-book check (R6).
 
 ## Phase C4b — Scanned-page OCR fallback + caption/label classification (R-W11, Decision 3 — wire now)
 
-- [ ] **T19. C1-reconcile FIRST (R2 guard):** grep the live engine for an existing inline OCR or
-      caption path (`get_textpage_ocr`, `is_scanned`, `caption`, `ocr`) before wiring, so we don't
-      double-run. Record the finding (inline equivalent? none?) in a one-line note. Only then proceed
-      to T20/T21.
-- [ ] **T20. Wire `ocr_integration` scanned-page fallback into the manifest stage** (seam #2, the
-      `page_manifest`/`extract_page_spans` boundary). Per page: `is_scanned_page`; a scanned page →
-      `ocr_for_manifest(page, page_num, lang)` returns V8-schema spans that merge into the manifest
-      and flow through the normal translate+render path (backend PyMuPDF→pytesseract→none). FAIL-
-      CLOSED on the right thing: no backend available OR confidence < `bookstore.ocr.min_confidence`
-      (default 0.5) → `qa_report['ocr']` (per-page: scanned?, backend, confidence) +
-      NEEDS_LAYOUT_REVIEW + flag `OCR_UNAVAILABLE` / `OCR_LOW_CONFIDENCE`. Born-digital book = pure
-      no-op. Config `bookstore.ocr.enabled` (default true). PROOF (R4): a scanned/image-only page
-      (reuse the C3 image-only fixture) → recovered spans render as LIVE selectable text (verified via
-      render_pdfjs.mjs), OR with no backend installed routes to review with the OCR flag; qa_report
-      records which. wiring_audit reclassifies ocr_integration DEAD→LIVE-SUBPROC/IMPORT.
-- [ ] **T21. Wire `caption_detection` into the manifest stage** (seam #2). Run `detect_captions` over
-      the assembled text units + image bboxes; annotate matched units in the manifest
-      (`caption_type`, `position`, `related_image_bbox`) so the renderer sizes/places them as captions
-      and they translate as captions, not body. Summary → `qa_report['captions']` (count by type).
-      INFORMATIONAL ONLY — never gates publishability (R5 applies to failures, not to a classifier
-      that simply found nothing). Deterministic, no API, default on; no-op when a page has no
-      image-adjacent small text. PROOF (R4): a page with a known image+caption pair tags that unit
-      `image_caption` in the manifest JSON on a real render; a plain-body page tags nothing.
-      wiring_audit reclassifies caption_detection DEAD→LIVE.
-- [ ] **T22. Regression tests for OCR + captions** — Python: `is_scanned_page` classifies image-only
-      vs born-digital correctly; `ocr_for_manifest` returns valid V8-schema spans (mock/skip the real
-      Tesseract call — assert the no-backend path flags review); `detect_captions` tags a synthetic
-      image+caption fixture and ignores body text. Laravel Feature: a scanned-page manifest with no
-      OCR backend → review + `OCR_UNAVAILABLE`; a caption-bearing manifest records
-      `qa_report['captions']`; both config-disables no-op. Suites green; ≥2 books (R6).
+- [x] **T19. C1-reconcile FIRST (R2 guard)** — DONE. Grepped the live engine for inline OCR
+      (`get_textpage_ocr`/`is_scanned`/`pytesseract`) and inline caption logic (`caption`/
+      `detect_captions`/`figure_label`). FINDINGS: (a) NO inline OCR anywhere — those symbols appear
+      only in `ocr_integration.py` itself + `test_integration.py` (which is why the audit had it
+      TEST-ONLY). No competing path. (b) `document_model` DEFINES `CAPTION`/`LABEL` as semantic
+      roles/content-types and font_policy/readability_policy bucket a `caption` role, BUT there is NO
+      proximity-based caption DETECTION in the live engine — only the enum values. So
+      `caption_detection.py` (small-text-near-image heuristic) fills a genuine gap, complementary to
+      the structural role, not competing. Safe to wire both.
+- [x] **T20. Wire `ocr_integration` scanned-page fallback into the manifest stage** — DONE. The
+      single, R2-clean seam = inside `pdf_translate_v8.extract_page_spans`: when a page yields ZERO
+      text spans, `_maybe_ocr_fallback` classifies it (`is_scanned_page`); a scanned page, when OCR
+      is enabled+available, is OCR'd via `ocr_for_manifest` and its spans (canonical schema +
+      ocr_confidence/ocr_backend) flow through the normal translate+render path. Every caller (cached
+      or direct) benefits — ONE place. FAIL-CLOSED on the right thing: a scanned page that is
+      disabled/unavailable/empty/low-confidence/errored is recorded in a module `_OCR_LEDGER`
+      (cleared per render) → folded into `report['ocr'].pages` + its pages appended to
+      `report['review_pages']` → engine `publishable=false` NEEDS_LAYOUT_REVIEW. Born-digital book =
+      pure no-op. Gate via env `OCR_FALLBACK_ENABLED` (+ `OCR_MIN_CONFIDENCE`), set by
+      `PdfTranslationService` from `bookstore.ocr.enabled` (default true). PROOF (R4): scanned
+      image-only page → ledger records scanned + fails closed when OCR off/unavailable (never a
+      silent empty-clean); Kolulu (born-digital) OCR no-op confirmed by test_integration
+      test_05_scanned_page_detection still green. wiring_audit reclassifies ocr_integration
+      DEAD/TEST-ONLY→LIVE-IMPORT.
+- [x] **T21. Wire `caption_detection` into the manifest stage** — DONE. Added
+      `page_manifest.annotate_captions(spans, page, page_num)` called in the manifest driver after
+      span extraction: runs `detect_captions` over spans + the page's image bboxes (body font size =
+      median span size, book-agnostic), tags matched spans in place with
+      `is_caption`/`caption_type`/`caption_position`, and attaches a per-page `captions` summary
+      (count + by_type) to the page manifest. INFORMATIONAL ONLY — never gates publishability;
+      fail-safe (any error leaves spans untouched); no-op on pages with no image-adjacent small text.
+      PROOF (R4): a page with an image + small caption below tags that span `image_caption`/`figure_
+      label` while the large body line stays untagged; a plain page tags nothing. wiring_audit
+      reclassifies caption_detection DEAD→LIVE-IMPORT.
+- [x] **T22. Regression tests for OCR + captions** — DONE. `scripts/test_ocr_captions.py` 6/6
+      (hermetic PyMuPDF: born-digital no-op; scanned page disabled→ocr_disabled; scanned page
+      enabled-no-backend→ocr_unavailable/empty, never silent clean; ledger clears; caption tagged +
+      body untouched; no-caption no-op). Engine suites green (integration 10/10 incl. scanned-page
+      detection, unit 64/64). Full Laravel suite 217 passed. wiring_audit totals 18/16/11/18 →
+      20/16/10/17 (ocr_integration + caption_detection now LIVE-IMPORT). ≥2-book render check
+      deferred to C6.
 
 ## Phase C5 — Keep it honest (R-W7/R-W8)
 

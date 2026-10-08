@@ -19,27 +19,29 @@ It is the current, verified state. When it conflicts with older prose below, THI
 > flag+fail-closed+alias-preview+upload-prompt; accessibility = WIRE NOW; OCR/caption = IN SCOPE.
 > Phase **C4a** (accessibility) + **C4b** (OCR + captions) are now **PLANNED** (s10, tasks T17–T22,
 > reqs R-W10/R-W11, design C7/C8) — but NOT yet built.
-> **DO NEXT = implement, in design dependency order:** Phase **C4** illustration trio is now
-> RECLASSIFIED-LIVE (s11 — it was always wired via illustration_text; the audit was blind to the
-> transitive import chain, now fixed). Its only open item is **T12b** = PROVE the trio on a real
-> render with a baked-in-text book (needs a vision-API budget OK — gated OFF by default). Then
-> Phase **C4a** accessibility (T17–T18) → Phase **C4b** OCR+captions (T19 C1-reconcile grep FIRST,
-> then T20–T22). accessibility/caption_detection are confirmed GENUINELY DEAD by the fixed audit, so
-> C4a/C4b is real wiring work. Each task's exit bar = PROVEN on a real render (R4), not just tests.
-> **THEN:** C5 (CI audit + DORMANT docs, T13/T14) → C6 (full-book test My House + a 2nd book,
-> T15/T16 — the one honest proof gap: a full `createTranslatedPdf` with a PLANTED counterfeit +
-> corrupted text layer was deferred here).
-> **FIRST ACTION on resume:** run `python scripts/wiring_audit.py` to confirm the live/dead map
-> (s11 totals after the transitive fix: 18 import-live / 15 subproc-live / 11 test-only / 19 dead).
+> **DO NEXT = implement, in design dependency order:** Phase **C4** illustration trio is
+> RECLASSIFIED-LIVE (s11) — only open item is **T12b** (prove on a real render; needs vision-API
+> budget OK, gated OFF). Phase **C4a** accessibility (T17/T18) DONE+PROVEN (s12, 217 Laravel green,
+> accessibility now LIVE-SUBPROC). Phase **C4b** OCR fallback + caption classification (T19–T22)
+> DONE+PROVEN (s12 — OCR fallback in extract_page_spans fail-closed via report['ocr'] ledger;
+> caption tagging in page_manifest.annotate_captions; ocr_integration + caption_detection now
+> LIVE-IMPORT). Audit totals now 20/16/10/17.
+> **DO NEXT:** Phase **C5** = T13 add `python scripts/wiring_audit.py` to CI (assert no NEW dead
+> production module vs a committed baseline) + T14 document every DORMANT module in this LIVE SYSTEM
+> STATE. Then Phase **C6** = full-book test (My House + a 2nd book, T15/T16) — the honest proof gap:
+> a full `createTranslatedPdf` recording WHICH capabilities fired (font_integrity, text_layer,
+> accessibility, ocr, captions, illustration repair, visual_qa), with a PLANTED counterfeit +
+> corrupted text layer. T12b (the trio vision proof) folds naturally into C6.
+> **FIRST ACTION on resume:** run `python scripts/wiring_audit.py` (s12 totals: 20 import-live /
+> 16 subproc-live / 10 test-only / 17 dead).
 
 
 - **ONE live render engine:** `scripts/pdf_translate_v8.py` (invoked by `PdfTranslationService::
   createTranslatedPdf`) + `scripts/page_manifest.py` for extraction. There is NO second renderer;
   `v8_advanced.py` is only an admin FontManager helper, `scene_renderer.py` was removed.
 - **Authoritative module map is GENERATED, not remembered:** run `python scripts/wiring_audit.py`.
-  Latest totals (s11, after the transitive-liveness fix): 18 import-live, 15 subprocess-live,
-  11 test-only, 19 dead. The audit now propagates liveness TRANSITIVELY from LIVE-SUBPROC modules
-  through the Python import graph (earlier versions seeded only the 2 engine entrypoints and
+  Latest totals (s12, after C4a+C4b wiring): 20 import-live, 16 subprocess-live, 10 test-only,
+  17 dead. The audit now propagates liveness TRANSITIVELY from LIVE-SUBPROC modules through the Python import graph (earlier versions seeded only the 2 engine entrypoints and
   under-counted — the illustration-repair trio + font_registry/glyph_preflight/document_model/etc.
   were wrongly TEST-ONLY/DEAD). Reports:
   `.kiro/specs/unified-rendering-and-testing/WIRING_AUDIT_MECHANICAL.md` (the map) +

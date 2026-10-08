@@ -1,12 +1,13 @@
 # Engine Wiring Audit (mechanical)
 
 Entry points (invoked by PHP): ['page_manifest', 'pdf_translate_v8']
-Totals: LIVE-IMPORT=18, LIVE-SUBPROC=16, TEST-ONLY=11, DEAD=18
+Totals: LIVE-IMPORT=20, LIVE-SUBPROC=16, TEST-ONLY=10, DEAD=17
 
 | Tier | Module | Note |
 |------|--------|------|
 | LIVE-IMPORT | artwork_repair | transitively imported by a live module |
 | LIVE-IMPORT | borderless_table | transitively imported by a live module |
+| LIVE-IMPORT | caption_detection | transitively imported by a live module |
 | LIVE-IMPORT | crop_transform | transitively imported by a live module |
 | LIVE-IMPORT | document_model | transitively imported by a live module |
 | LIVE-IMPORT | font_policy | transitively imported by a live module |
@@ -14,6 +15,7 @@ Totals: LIVE-IMPORT=18, LIVE-SUBPROC=16, TEST-ONLY=11, DEAD=18
 | LIVE-IMPORT | glyph_preflight | transitively imported by a live module |
 | LIVE-IMPORT | image_inpainting | transitively imported by a live module |
 | LIVE-IMPORT | international_text | transitively imported by a live module |
+| LIVE-IMPORT | ocr_integration | transitively imported by a live module |
 | LIVE-IMPORT | pdf_validation | transitively imported by a live module |
 | LIVE-IMPORT | readability_policy | transitively imported by a live module |
 | LIVE-IMPORT | render_gate | transitively imported by a live module |
@@ -45,14 +47,12 @@ Totals: LIVE-IMPORT=18, LIVE-SUBPROC=16, TEST-ONLY=11, DEAD=18
 | TEST-ONLY | incremental_render |  |
 | TEST-ONLY | inventory_layout |  |
 | TEST-ONLY | make_gate_fixtures | [test_fixtures/make_gate_fixtures.py] |
-| TEST-ONLY | ocr_integration |  |
 | TEST-ONLY | page_inventory |  |
 | TEST-ONLY | scene_graph |  |
 | TEST-ONLY | script_detection |  |
 | TEST-ONLY | security |  |
 | DEAD | analyze_page2 |  |
 | DEAD | audit_trail |  |
-| DEAD | caption_detection |  |
 | DEAD | capture_evidence |  |
 | DEAD | get_translations |  |
 | DEAD | optical_calibration |  |

@@ -44,6 +44,65 @@ import pymupdf
 
 
 # =============================================================================
+# CAPTION / LABEL ANNOTATION (engine-wiring-and-activation R-W11/T21)
+# =============================================================================
+
+def annotate_captions(spans, page, page_num):
+    """Tag spans that are captions/labels/credits (small text near an image, bottom-of-page
+    credits, figure labels) using the existing caption_detection heuristic, so the renderer
+    can size/place them as captions and they translate as captions rather than body.
+
+    INFORMATIONAL ONLY — never gates publishability; a page with no image-adjacent small
+    text is a pure no-op. Fail-SAFE: any error leaves spans untouched. Mutates spans in
+    place (adds caption_type/caption_position/is_caption to matched spans) and returns a
+    per-page summary {count, by_type} for the manifest.
+    """
+    summary = {"count": 0, "by_type": {}}
+    try:
+        from caption_detection import detect_captions
+    except Exception:
+        return summary
+    if not spans:
+        return summary
+
+    try:
+        # Image bboxes on the page (PDF points) — the proximity anchor for captions.
+        image_bboxes = []
+        for img in page.get_images(full=True):
+            xref = img[0]
+            try:
+                for r in page.get_image_rects(xref):
+                    image_bboxes.append((r.x0, r.y0, r.x1, r.y1))
+            except Exception:
+                continue
+
+        # Body font size = median of non-page-number spans (book-agnostic, no constant).
+        sizes = sorted(s["font_size"] for s in spans
+                       if s.get("font_size", 0) > 0 and not s.get("is_page_number"))
+        body_fs = sizes[len(sizes) // 2] if sizes else 12.0
+
+        page_rect = page.rect
+        captions = detect_captions(
+            spans, page_rect.width, page_rect.height,
+            image_bboxes=image_bboxes or None, body_font_size=body_fs,
+        )
+    except Exception:
+        return summary
+
+    by_id = {s.get("id"): s for s in spans}
+    for cap in captions:
+        s = by_id.get(cap.unit_id)
+        if s is None:
+            continue
+        s["is_caption"] = True
+        s["caption_type"] = cap.caption_type
+        s["caption_position"] = cap.position
+        summary["count"] += 1
+        summary["by_type"][cap.caption_type] = summary["by_type"].get(cap.caption_type, 0) + 1
+    return summary
+
+
+# =============================================================================
 # PAGE CLASSIFICATION
 # =============================================================================
 
@@ -513,6 +572,10 @@ def build_document_manifest(pdf_path: str, legacy: bool = False) -> dict:
         # Extract all spans
         spans = _extract_spans(page, page_num)
 
+        # CAPTION/LABEL ANNOTATION (R-W11/T21): tag caption spans in place + collect a
+        # per-page summary. Informational, never gates; no-op on pages with no captions.
+        caption_summary = annotate_captions(spans, page, page_num)
+
         # Classify page
         page_type = classify_page_from_spans(spans, page_num, total_pages)
 
@@ -529,6 +592,9 @@ def build_document_manifest(pdf_path: str, legacy: bool = False) -> dict:
             page_manifest = build_copyright_manifest(page, page_num, spans)
         else:
             page_manifest = {"page_number": page_num, "page_type": page_type, "regions": []}
+
+        if caption_summary.get("count"):
+            page_manifest["captions"] = caption_summary
 
         manifest["pages"].append(page_manifest)
 

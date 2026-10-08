@@ -40,6 +40,101 @@ import pymupdf
 
 _GEOM_CACHE = {}
 
+# =============================================================================
+# OCR FALLBACK LEDGER (engine-wiring-and-activation R-W11/T20)
+# Scanned (image-only) pages yield zero text spans. When ILLUSTRATION/OCR fallback is
+# enabled we OCR them so their text flows through the normal translate+render pipeline.
+# A scanned page we CANNOT read (no backend / low confidence) is recorded here so the PHP
+# layer can fail the edition closed (NEEDS_LAYOUT_REVIEW) — a scanned page's text is never
+# silently dropped. The ledger is read back out via get_ocr_ledger() after a render.
+# =============================================================================
+
+_OCR_LEDGER = []  # list of per-page dicts: {page, scanned, backend, confidence, status}
+
+
+def _ocr_enabled():
+    """OCR fallback is OFF unless explicitly enabled (env, set by the PHP service from
+    config bookstore.ocr.enabled). Keeps born-digital renders a pure no-op and avoids any
+    Tesseract cost/latency unless asked for."""
+    return os.environ.get("OCR_FALLBACK_ENABLED", "").strip().lower() in ("1", "true", "yes")
+
+
+def _ocr_min_confidence():
+    try:
+        return float(os.environ.get("OCR_MIN_CONFIDENCE", "0.5"))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def get_ocr_ledger():
+    """Return (and the caller may serialize) the per-page OCR ledger for this process."""
+    return list(_OCR_LEDGER)
+
+
+def _maybe_ocr_fallback(page, page_num):
+    """When a page produced no text spans, decide if it is a SCANNED page and, if OCR is
+    enabled and available, return OCR'd spans in the canonical schema. Records the outcome
+    in _OCR_LEDGER either way. Returns a list of spans (possibly empty). Fail-SAFE: any
+    error degrades to an empty list + a recorded 'ocr_error' (never raises into the render).
+    """
+    try:
+        from ocr_integration import is_scanned_page, ocr_for_manifest, check_ocr_dependencies
+    except Exception as e:  # module missing — cannot OCR, do not block
+        _OCR_LEDGER.append({"page": page_num, "scanned": None, "backend": None,
+                            "confidence": 0.0, "status": "ocr_module_unavailable",
+                            "detail": str(e)})
+        return []
+
+    try:
+        detection = is_scanned_page(page)
+    except Exception as e:
+        _OCR_LEDGER.append({"page": page_num, "scanned": None, "backend": None,
+                            "confidence": 0.0, "status": "ocr_error", "detail": str(e)})
+        return []
+
+    if not detection.get("is_scanned"):
+        # Empty page that is NOT scanned (truly blank / vector-only) — not an OCR case.
+        return []
+
+    # It IS a scanned page. If OCR is disabled, record and fail closed (review).
+    if not _ocr_enabled():
+        _OCR_LEDGER.append({"page": page_num, "scanned": True, "backend": None,
+                            "confidence": detection.get("confidence", 0.0),
+                            "status": "ocr_disabled"})
+        return []
+
+    deps = check_ocr_dependencies()
+    if not deps.get("available_backend"):
+        _OCR_LEDGER.append({"page": page_num, "scanned": True, "backend": None,
+                            "confidence": detection.get("confidence", 0.0),
+                            "status": "ocr_unavailable"})
+        return []
+
+    try:
+        spans = ocr_for_manifest(page, page_num)
+    except Exception as e:
+        _OCR_LEDGER.append({"page": page_num, "scanned": True,
+                            "backend": deps.get("available_backend"), "confidence": 0.0,
+                            "status": "ocr_error", "detail": str(e)})
+        return []
+
+    if not spans:
+        _OCR_LEDGER.append({"page": page_num, "scanned": True,
+                            "backend": deps.get("available_backend"), "confidence": 0.0,
+                            "status": "ocr_empty"})
+        return []
+
+    # Mean OCR confidence across recovered spans; below threshold → still return the spans
+    # (better than losing the text) but mark the page for review.
+    confs = [s.get("ocr_confidence", 0.0) for s in spans]
+    mean_conf = sum(confs) / max(len(confs), 1)
+    status = "ocr_ok" if mean_conf >= _ocr_min_confidence() else "ocr_low_confidence"
+    _OCR_LEDGER.append({"page": page_num, "scanned": True,
+                        "backend": deps.get("available_backend"),
+                        "confidence": round(mean_conf, 3), "status": status,
+                        "span_count": len(spans)})
+    return spans
+
 
 def _source_hash(pdf_path):
     import hashlib
@@ -153,6 +248,14 @@ def extract_page_spans(page, page_num):
                     "is_rotated": rotated,
                     "text_direction": direction,
                 })
+
+    # OCR FALLBACK (R-W11/T20): a page with no extractable text spans may be a SCANNED
+    # (image-only) page. _maybe_ocr_fallback detects that, and when OCR is enabled+available
+    # returns recovered spans in this same schema; otherwise it records the page in the OCR
+    # ledger so the edition fails closed to review. Born-digital pages never reach here with
+    # empty spans, so this is a no-op for them.
+    if not spans:
+        spans = _maybe_ocr_fallback(page, page_num)
 
     return spans
 
@@ -4284,6 +4387,7 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None, onl
     doc = pymupdf.open(input_pdf)
     total_pages = len(doc)
     _src_hash = _source_hash(input_pdf)  # for geometry caching (§19)
+    _OCR_LEDGER.clear()  # fresh OCR ledger per render (R-W11/T20)
 
     # =====================================================================
     # REGION-GRAPH MODEL (§2.1) — build the canonical DocumentScene ONCE and
@@ -4691,6 +4795,21 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None, onl
         _check_translation_consistency(input_pdf, translations, report)
     except Exception as e:
         report.setdefault("consistency", {})["error"] = str(e)
+
+    # OCR FALLBACK LEDGER (R-W11/T20): attach the per-page OCR outcomes and fail closed if
+    # a SCANNED page could not be read (disabled/unavailable/empty/error) or came back below
+    # the confidence threshold. A scanned page's text is never silently dropped.
+    ocr_ledger = get_ocr_ledger()
+    if ocr_ledger:
+        report["ocr"] = {"pages": ocr_ledger}
+        _ocr_review_statuses = {"ocr_disabled", "ocr_unavailable", "ocr_empty",
+                                "ocr_error", "ocr_low_confidence", "ocr_module_unavailable"}
+        ocr_review_pages = sorted({e["page"] for e in ocr_ledger
+                                   if e.get("scanned") and e.get("status") in _ocr_review_statuses})
+        if ocr_review_pages:
+            report["ocr"]["review_pages"] = ocr_review_pages
+            existing = report.get("review_pages") or []
+            report["review_pages"] = sorted(set(existing) | set(ocr_review_pages))
 
     # Fail-closed publication signal: engine reports whether the render is
     # publishable. The caller MUST NOT approve when publishable is False.

@@ -579,6 +579,17 @@ class PdfTranslationService
 
         $process = new Process($cmd);
 
+        // OCR FALLBACK (R-W11/T20): hand the engine the OCR gate via env so a scanned
+        // (image-only) page is OCR'd into the normal pipeline when enabled, or recorded in
+        // the engine's report['ocr'] ledger + routed to review when it cannot be read.
+        // Symfony Process inherits the parent env; we add only the OCR keys.
+        if (config('bookstore.ocr.enabled', true)) {
+            $process->setEnv([
+                'OCR_FALLBACK_ENABLED' => '1',
+                'OCR_MIN_CONFIDENCE' => (string) config('bookstore.ocr.min_confidence', 0.5),
+            ]);
+        }
+
         $process->setTimeout(300);
         $process->run();
 

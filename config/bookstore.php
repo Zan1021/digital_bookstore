@@ -131,6 +131,24 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Scanned-page OCR fallback (engine-wiring-and-activation R-W11)
+    |--------------------------------------------------------------------------
+    | When a page yields no extractable text spans but is a scanned (image-only)
+    | page, the engine OCRs it (scripts/ocr_integration.py, PyMuPDF→pytesseract)
+    | so its text flows through the normal translate+render pipeline. A scanned
+    | page that cannot be read (no backend / low confidence) is recorded in the
+    | engine report['ocr'] ledger and routed to review — never silently dropped.
+    | No-op on born-digital books. Passed to the engine via the OCR_FALLBACK_ENABLED
+    | env var. Default on; costs nothing unless a backend is installed and a page is
+    | actually scanned.
+    */
+    'ocr' => [
+        'enabled' => env('OCR_FALLBACK_ENABLED', true),
+        'min_confidence' => (float) env('OCR_MIN_CONFIDENCE', 0.5),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Illustration-text vision module (text baked into artwork)
     |--------------------------------------------------------------------------
     | Some books bake text (a title, a label) INTO a raster illustration, so it
