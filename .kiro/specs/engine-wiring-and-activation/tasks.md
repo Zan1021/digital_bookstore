@@ -313,8 +313,8 @@ defect) on a real book, plus suite-green + ≥2-book check (R6).
 
 ## Phase C6 — The now-MEANINGFUL full-engine book test (R-W9) — RUNS ONLY AFTER C7/T30
 
-- [~] **T15. End-to-end render of My House #10000 (af) AND a second, different book** — PARTIAL
-      (primary book PROVEN; second book + generative still open). Ran a FULL `createTranslatedPdf` on
+- [x] **T15. End-to-end render of My House #10000 (af) AND a second, different book** — DONE
+      (BOTH books PROVEN; generative path proven; R-W9 ≥2-book bar met 2026-10-10). Ran a FULL `createTranslatedPdf` on
       #10000 (af, 16 pages) with ALL gates on (vision budget approved by Captain Zan). Completed in
       83s. CAPABILITIES THAT FIRED (recorded in the live qa_report, not asserted): security (safe),
       text_layer (searchable+clean), accessibility (/Lang=af-ZA — verified IN THE OUTPUT FILE),
@@ -331,15 +331,46 @@ defect) on a real book, plus suite-green + ≥2-book check (R6).
       correct fail-closed verdict (generative is mandatory-review by design — never auto-ships an
       AI-painted background). Output = real 16-page/43MB PDF. Report:
       storage/app/temp/c6_report_10000_af_gen.json. BOTH the non-generative (83s) and generative
-      (701s) paths are now proven. (2) ⏳ The SECOND book #10001 still has 0 item_translations — only
-      proves fail-closed, not capabilities; still needs translations before it meets R-W9's ≥2-book
-      bar. ALSO ADDED (Captain Zan, this session): upload-time text-on-illustration scan in
+      (701s) paths are now proven. (2) ✅ CLOSED (2026-10-10): the SECOND book #10001 "Play with Me"
+      (Kolulu S2 BK2, en→af, 16 pages) was translated via `book:retranslate 10001 af` (manifest path,
+      vision budget approved by Captain Zan) → **136 item_translations** (was 0), 16 translated pages,
+      a real 55.7 MB / 16-page rendered PDF (fingerprint c5458da8…, output_sha256 6830c917…).
+      CAPABILITIES THAT FIRED on #10001 (live qa_report, not asserted): security=passed,
+      text_layer=passed, accessibility=passed (**/Lang=af-ZA re-read from the saved PDF catalog**, not
+      a return value), conformance(PDF/A)=passed, fit/target_mapping/visual=passed, inventory_layout +
+      object_inventory populated. Correct no-ops (same honest pattern as #10000): ocr absent
+      (born-digital), captions absent, font_integrity absent (no typography policy). FAIL-CLOSED
+      WORKED: structure+artwork failed → render_status=NEEDS_LAYOUT_REVIEW, review_pages [1,2,16,15],
+      flags[ILLUSTRATION_TEXT_REVIEW]=[1] — routed to review, did not ship. Regression: `wiring_audit
+      --check` green (no new unwired module), full Laravel suite **226 passed** (C6 was pure
+      data/render — no code touched). R-W9's ≥2-book acceptance is now genuinely met.
+      ALSO ADDED (Captain Zan, earlier session): upload-time text-on-illustration scan in
       `PdfService::processUpload` (reuses illustration_text.py `candidates`), storing which pages have
       baked-in artwork text on `book.metadata['artwork_text_pages']` from the moment of upload —
       verified on My House (13/16 pages flagged, matching a picture book).
-- [ ] **T16. Completion report** — pending: fold the C6 result into the steering LIVE SYSTEM STATE +
-      regenerate the audit, and close out generative + the 2nd-book gap (or record them as accepted
-      limitations) once Captain Zan decides on the generative full run.
+- [x] **T16. Completion report — DONE (2026-10-10). Spec COMPLETE.** The engine-wiring-and-activation
+      spec is closed: every capability the brief promised is now (a) wired + proven on a real render,
+      (b) documented-DORMANT behind a config flag, or (c) deleted — zero "built but inert" modules.
+      **Final audit (wiring_audit.py):** LIVE-IMPORT=24, LIVE-SUBPROC=19, TEST-ONLY=6, DEAD=13; CI gate
+      (`WiringAuditGateTest` → `--check` against `.wiring_audit_baseline.json`, 19 allowed-inert) GREEN.
+      **Full Laravel suite 226 passed (580 assertions).**
+      **R-W9 ACCEPTANCE MET — two different books, full capability set, verified end-to-end:**
+      - #10000 "My House" (en→af, 16pp): non-generative render 83s + generative (gpt-image-1) render
+        701s; all gates fired; /Lang=af-ZA embedded; fail-closed to NEEDS_LAYOUT_REVIEW (review_pages
+        [1,2,3,16]). Reports: storage/app/temp/c6_report_10000_af{,_gen}.json.
+      - #10001 "Play with Me" (en→af, 16pp): 136 item_translations, 55.7 MB PDF, fingerprint
+        c5458da8…; security/text_layer/accessibility/conformance/fit/target_mapping/visual all passed;
+        /Lang=af-ZA re-read from the saved catalog; correct no-ops (ocr/captions/font_integrity);
+        fail-closed to NEEDS_LAYOUT_REVIEW (review_pages [1,2,16,15]). Both books exhibit the SAME
+        capability-fires + honest-no-op + fail-closed behaviour → the engine is book-agnostic (R1), the
+        live path exercises the intended capability set (R-W2), and "done" = observed outcome (R4).
+      **ACCEPTED LIMITATIONS (recorded, not blockers):** (1) both proof books fail-closed to
+      NEEDS_LAYOUT_REVIEW on the illustration/structure track — correct engine behaviour for picture
+      books with baked-in artwork text, NOT a wiring defect; a clean full-publish still needs the
+      per-page human review the gate demands (out of scope for *wiring*). (2) generative background
+      inpaint stays mandatory-review + config-gated OFF by cost (never auto-ships an AI-painted page).
+      (3) PDF/A conformance is informational for picture books (never flips publishable).
+      Steering LIVE SYSTEM STATE updated to reflect C6 complete + the final audit totals.
 
 ---
 

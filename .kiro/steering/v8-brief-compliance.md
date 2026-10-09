@@ -4,40 +4,68 @@ inclusion: always
 
 # Steering: V8 Universal PDF Translation Engine — Full Compliance (SINGLE SOURCE OF TRUTH)
 
-## LIVE SYSTEM STATE (read FIRST — current truth, 2026-10-07)
+## LIVE SYSTEM STATE (read FIRST — current truth, 2026-10-10)
+
+> ⭐ **NEXT-SESSION STARTUP: read `.kiro/specs/engine-wiring-and-activation/START-HERE-NEXT-SESSION.md`
+> FIRST.** It has the one-line truth (wired ≠ working), what-to-read order, how to test (browser on
+> :8080 + gate), the confirmed-defect→task map, and the ordered task list (T-A done; **T-B dedup bug
+> is next**). Do not re-audit from scratch — that doc + the RECONCILIATION doc tell you what's going on.
 
 **This block exists so the engine's workings survive a cold session start — no re-briefing.**
 It is the current, verified state. When it conflicts with older prose below, THIS wins.
 
 > ### ►► RESUME POINTER (where to start next session) ◄◄
-> **Active spec:** `.kiro/specs/engine-wiring-and-activation/` (wire the brief's modules into the one
-> live engine; each proven on a REAL render, not just tests — R4).
-> **DONE:** font-counterfeit fixes + AI QA gate on (s5); mechanical wiring audit + triage (s6); Phase
-> C1 dead-code removal + this steering/spec (s7, `2d7cef9`); Phase **C2** font-asset-integrity
-> preflight (s9) + Phase **C3** output text-layer gate (s9) — both built, wired, PROVEN at unit+
-> integration level (Laravel 212 green). The **3 open decisions are RESOLVED** (s9): font-integrity =
-> flag+fail-closed+alias-preview+upload-prompt; accessibility = WIRE NOW; OCR/caption = IN SCOPE.
-> Phase **C4a** (accessibility) + **C4b** (OCR + captions) are now **PLANNED** (s10, tasks T17–T22,
-> reqs R-W10/R-W11, design C7/C8) — but NOT yet built.
-> **DO NEXT = implement, in design dependency order:** Phase **C4** illustration trio is
-> RECLASSIFIED-LIVE (s11) — only open item is **T12b** (prove on a real render; needs vision-API
-> budget OK, gated OFF). Phase **C4a** accessibility (T17/T18) DONE+PROVEN (s12, 217 Laravel green,
-> accessibility now LIVE-SUBPROC). Phase **C4b** OCR fallback + caption classification (T19–T22)
-> DONE+PROVEN (s12 — OCR fallback in extract_page_spans fail-closed via report['ocr'] ledger;
-> caption tagging in page_manifest.annotate_captions; ocr_integration + caption_detection now
-> LIVE-IMPORT). Audit totals now 20/16/10/17.
-> **DO NEXT:** Phase **C7** DONE (s13 — the full LOST backlog wired: T23 security preflight, T24
-> optical_calibration, T25 quality_gates/PDF-A conformance signal, T26 audit_trail provenance log,
-> T27 inventory_layout + page_inventory, T28 typography_fingerprint signal, T29 scene_graph deleted
-> (R-W6 closed), T30 reconciliation — ZERO ambiguous LOST rows, 226 Laravel green). **ALL DEV IS NOW
-> WIRED** — per Captain Zan, end-to-end testing (Phase C6) was gated behind this. Phase **C6** is the
-> only remaining phase = full-book test (My House + a 2nd book, T15/T16): a full `createTranslatedPdf`
-> recording WHICH capabilities fired (security, font_integrity, text_layer, accessibility, ocr,
-> captions, conformance, inventory, illustration repair, visual_qa), with a PLANTED counterfeit +
-> corrupted text layer. **T12b** (illustration-trio vision proof) folds into C6. ⚠️ C6/T12b need the
-> VISION-API budget OK (illustration path gated OFF for cost); counterfeit/text-layer parts are free.
-> **FIRST ACTION on resume:** run `python scripts/wiring_audit.py` (s13 totals: 24 import-live /
-> 19 subproc-live / 6 test-only / 13 dead; CI gate baseline = 19 allowed-inert).
+> ⚠️ **WIRED ≠ WORKING — READ THIS FIRST (corrected 2026-10-10).** Two specs track two different
+> definitions of "done" and they were conflated:
+>  - `engine-wiring-and-activation` = "are modules reachable from the live render path?" → **DONE.**
+>  - `v8-brief-compliance` (Phases 1–3, THIS FILE below) = "does a rendered page actually LOOK right
+>    — fit, typography, casing, no overflow/overlap?" → **NOT DONE. Phase 1–3 boxes all unchecked.**
+> Captain Zan put real eyes on a browser render of #10001 (2026-10-10) and found defects a
+> "COMPLETE/226-green" status had hidden: cover subtitle overflow, orphaned logo ®, mixed font
+> sizes + overlapping words on the copyright page, inconsistent/wrong fonts (script face on the back
+> cover vs sans interiors), and a context-blind title ("Speel saam met my" vs "Speel met my").
+> ROOT CAUSE: `render_gate.py` only strictly checks elements with a precise `cell_box` (roles
+> heading/table_header/merged_header/end_marker); cover/prose/artwork roles get PRESENCE+FONT only,
+> so those defects passed the gate. Full analysis + defect→task map:
+> `.kiro/specs/engine-wiring-and-activation/RECONCILIATION-wired-vs-working.md`.
+> **DO NEXT (in order):** (1) Phase 1.2 — make render_gate cover cover/prose/back-cover page types so
+> the defects are SEEN; (2) 1.1 clipping; (3) 2.4 font resolution/visual-size; (4) 2.6 hierarchy/peer;
+> (5) the IllustrationTextService dedup bug (region bbox from items) + title-context assembly. VERIFY
+> each the Section-6 way: render #10000 AND #10001, LOOK at the pages, run the gate — tick only when
+> the user-visible outcome is right on ≥2 books (R4/R6). The VisualQaService vision gate ALREADY
+> EXISTS — tighten it, do not rebuild it.
+>
+> **(historical) engine-wiring-and-activation COMPLETE (2026-10-10):**
+> Every brief capability is wired+proven on a real render, documented-DORMANT behind a flag, or
+> deleted — zero "built but inert" modules. All phases C1–C7 + C6 DONE. (Wiring only — NOT layout
+> compliance; see the WIRED≠WORKING note above.)
+> **FINAL STATE:** font-integrity preflight (C2), text-layer gate (C3), illustration trio
+> reclassified-live (C4), accessibility /Lang + check (C4a), OCR fallback + caption tagging (C4b),
+> CI wiring-audit gate + DORMANT docs (C5), the full LOST backlog — security, optical_calibration,
+> quality_gates/PDF-A, audit_trail, inventory_layout, page_inventory, typography_fingerprint,
+> scene_graph deleted (C7) — ALL done+proven.
+> **C6 (R-W9) ACCEPTANCE MET — TWO books, full capability set, end-to-end:**
+> #10000 "My House" (en→af, 16pp): non-generative 83s + generative gpt-image-1 701s renders; all
+> gates fired; /Lang=af-ZA embedded; fail-closed NEEDS_LAYOUT_REVIEW. #10001 "Play with Me"
+> (en→af, 16pp): 136 item_translations, 55.7 MB PDF, security/text_layer/accessibility/conformance/
+> fit/target_mapping/visual passed, /Lang=af-ZA re-read from the saved catalog, correct no-ops
+> (ocr/captions/font_integrity), fail-closed NEEDS_LAYOUT_REVIEW. Same book-agnostic behaviour on
+> both → R1/R-W2/R4 satisfied.
+> **ACCEPTED LIMITATIONS (not blockers):** both proof books fail-closed on the illustration/structure
+> track (correct for picture books with baked-in artwork text — needs the per-page human review the
+> gate demands, out of scope for *wiring*); generative inpaint stays mandatory-review + gated OFF by
+> cost; PDF/A conformance is informational.
+> **FIRST ACTION on resume:** this spec is closed — run `python scripts/wiring_audit.py` to confirm
+> (totals: 24 import-live / 19 subproc-live / 6 test-only / 13 dead; CI baseline = 19 allowed-inert)
+> and pick the NEXT spec. No open tasks remain here.
+
+
+- **ONE live render engine:** `scripts/pdf_translate_v8.py` (invoked by `PdfTranslationService::
+  createTranslatedPdf`) + `scripts/page_manifest.py` for extraction. There is NO second renderer;
+  `v8_advanced.py` is only an admin FontManager helper, `scene_renderer.py` was removed.
+- **Authoritative module map is GENERATED, not remembered:** run `python scripts/wiring_audit.py`.
+  Latest totals (s13, after C7 — all LOST backlog wired): 24 import-live, 19 subprocess-live,
+  6 test-only, 13 dead. The audit now propagates liveness TRANSITIVELY from LIVE-SUBPROC modules
 
 
 - **ONE live render engine:** `scripts/pdf_translate_v8.py` (invoked by `PdfTranslationService::
@@ -247,9 +275,20 @@ tests pass; existing suites green; verified on 2+ books.
       cover, copyright, vocabulary, back cover) rendered through an explicit clip to its
       region/cell safe box. `save -> clip -> draw -> restore`. (Done: vocab. TODO: verify/
       add for story/cover/copyright/back-cover htmlbox rects are true clips.)
-- [ ] **1.2 Post-render glyph-geometry gate (§4/§12.1)** covers ALL constraints for ALL
+- [~] **1.2 Post-render glyph-geometry gate (§4/§12.1)** covers ALL constraints for ALL
       page types (not just vocab): trim overflow, border cross, neighbour collision,
-      missing content, unresolved font fallback. (`render_gate.py` — extend coverage.)
+      missing content, unresolved font fallback. (`render_gate.py`.)
+      PROGRESS (2026-10-10): NEIGHBOUR-COLLISION now runs on ALL page types (was
+      vocabulary-only — the bug that let the #10001 copyright-page "self" overprint pass as
+      visual=passed). Added `_words_overprint` (flags a genuine stack: horizontal overlap +
+      vertical overlap >= 45% of the shorter word's height) so normal inter-line leading does
+      NOT false-positive. VERIFIED (R4): enhanced gate run on the REAL 10001_af.pdf now flags
+      page 2 `neighbourTextIntersections: 'hulle' overprints 'self.' (copyright)` +
+      `tableBorderIntersections` → review_pages=[2], fail-closed. Regression tests added
+      (test_render_gate.py: overprint-on-copyright flagged; normal-two-line-prose NOT flagged);
+      gate 47/47, unit 64/64, integration 10/10, Laravel 226/226 all green.
+      STILL TODO under 1.2: trim-overflow + border-cross are already all-pages; confirm
+      font-fallback coverage on cover/back-cover; peer-size/hierarchy is 2.6.
 - [ ] **1.3 Casing mirroring (R3) on ALL renderers** — apply `_source_text_transform` to
       story/cover/copyright too (currently only back cover + vocab).
 - [ ] **1.4 Fail-closed states (§13):** `render_status` + `qa_report` columns (DONE,

@@ -90,6 +90,47 @@ def test_missing_content_flagged():
           any(f["constraint"] == "missingContent" for f in res["failures"]))
 
 
+def test_overprint_flagged_on_non_vocabulary_page():
+    """Phase 1.2: a word printed ON TOP of another (overprint) must be flagged on
+    ANY page type — not just vocabulary. This reproduces the copyright/back-cover
+    defect where a word stacked on the line above and the gate (vocab-only) missed it.
+    Book-agnostic: synthetic stacked words, non-vocabulary page type."""
+    ff = _font()
+    doc = pymupdf.open()
+    page = doc.new_page(width=400, height=200)
+    # Two words drawn at nearly the SAME baseline + overlapping x -> genuine overprint.
+    if ff:
+        page.insert_text(pymupdf.Point(60, 100), "lees", fontsize=20, fontname="F0", fontfile=ff)
+        page.insert_text(pymupdf.Point(70, 103), "self", fontsize=20, fontname="F0", fontfile=ff)
+    else:
+        page.insert_text(pymupdf.Point(60, 100), "lees", fontsize=20)
+        page.insert_text(pymupdf.Point(70, 103), "self", fontsize=20)
+    res = validate_page(page, "copyright", expected_text="lees self")
+    doc.close()
+    check("overprint flagged on copyright page", not res["ok"] and
+          any(f["constraint"] == "neighbourTextIntersections" for f in res["failures"]))
+
+
+def test_normal_two_line_prose_not_flagged():
+    """Guard against false positives: ordinary consecutive lines of prose (whose only
+    vertical overlap is the few-pt leading kiss of ascenders/descenders) must NOT be
+    flagged as a collision on a story/prose page. This is the justified-text regression
+    the Phase 1.2 change had to avoid."""
+    ff = _font()
+    doc = pymupdf.open()
+    page = doc.new_page(width=400, height=200)
+    css = '* { font-size: 16px; } p { margin: 0; }'
+    page.insert_htmlbox(
+        pymupdf.Rect(20, 20, 380, 180),
+        "<p>Hierdie is die eerste reel van gewone prosa teks</p>"
+        "<p>en hierdie is die tweede reel direk daaronder</p>",
+        css=css)
+    res = validate_page(page, "story", expected_text="prosa")
+    doc.close()
+    check("normal two-line prose not flagged", res["ok"] or
+          not any(f["constraint"] == "neighbourTextIntersections" for f in res["failures"]))
+
+
 def test_golden_book2_backcover_ok():
     """Golden: the rendered book-2 back cover (p16) must pass the gate."""
     out = os.path.join(BASE, "storage", "app", "public", "books", "translated", "2_af.pdf")
@@ -365,6 +406,8 @@ if __name__ == "__main__":
     test_word_past_edge_flagged()
     test_border_crossing_flagged()
     test_missing_content_flagged()
+    test_overprint_flagged_on_non_vocabulary_page()
+    test_normal_two_line_prose_not_flagged()
     test_golden_book2_backcover_ok()
     test_publishable_logic()
     test_persisted_golden_good_passes()

@@ -258,6 +258,26 @@ def _words_overlap(a, b):
     return hx > _COLLISION_MARGIN and hy > _COLLISION_MARGIN
 
 
+def _words_overprint(a, b, min_vfrac=0.45):
+    """True when two word rects genuinely STACK (one printed on top of the other),
+    as opposed to the few-points of vertical kiss between consecutive lines caused by
+    normal leading (ascenders of one line vs descenders of the line above).
+
+    A real overprint overlaps horizontally beyond the collision margin AND overlaps
+    vertically by at least `min_vfrac` of the SHORTER word's height. Normal inter-line
+    leading overlaps by only a small fraction (a few pt on a ~16pt line ≈ 0.18), so it
+    passes; a word sitting on top of another overlaps by most of the glyph height and
+    is flagged. Book-agnostic (fraction of measured glyph height, no absolute px)."""
+    ax0, ay0, ax1, ay1 = a[0], a[1], a[2], a[3]
+    bx0, by0, bx1, by1 = b[0], b[1], b[2], b[3]
+    hx = min(ax1, bx1) - max(ax0, bx0)
+    hy = min(ay1, by1) - max(ay0, by0)
+    if hx <= _COLLISION_MARGIN or hy <= _COLLISION_MARGIN:
+        return False
+    short_h = max(1.0, min(ay1 - ay0, by1 - by0))
+    return (hy / short_h) >= min_vfrac
+
+
 def validate_raster(source_pdf, translated_pdf, page_index, text_bboxes=None, dpi=72):
     """
     Raster validation with masks (brief §12.2): render source vs translated page,
@@ -572,25 +592,37 @@ def validate_page(page, page_type, expected_text=""):
                 })
                 break
 
-    # 3. Neighbour collision (only meaningful for column/table pages).
-    if page_type in ("vocabulary",):
-        n = len(words)
-        collided = False
-        # Compare each word only against nearby words (same rough row) for speed.
-        by_row = sorted(range(n), key=lambda i: words[i][1])
-        for idx_pos, i in enumerate(by_row):
-            for j in by_row[idx_pos + 1:]:
-                if words[j][1] - words[i][1] > 6:  # different row band
-                    break
-                if _words_overlap(words[i], words[j]):
-                    failures.append({
-                        "constraint": "neighbourTextIntersections",
-                        "detail": f"'{words[i][4]}' overlaps '{words[j][4]}'",
-                    })
-                    collided = True
-                    break
-            if collided:
+    # 3. Neighbour collision — runs on ALL page types (Phase 1.2: previously this was
+    # restricted to vocabulary pages, so overlapping words on the cover / copyright /
+    # back-cover — e.g. a word printed on top of the line above it — passed the gate
+    # unseen). A "collision" is a GENUINE overlap: two words whose rects overlap BOTH
+    # horizontally AND vertically beyond the collision margin (see _words_overlap).
+    # Normal left-to-right word spacing never triggers this (adjacent words don't
+    # vertically-and-horizontally overlap); only stacked/overprinted text does — which
+    # is exactly the defect class we must catch. Book-agnostic, every page type.
+    n = len(words)
+    collided = False
+    # Compare each word only against words in a nearby vertical band (same rough row
+    # or an overlapping line) for speed; a tighter band than the vocab-only version
+    # since we now scan prose too and only care about true overlaps.
+    by_row = sorted(range(n), key=lambda i: words[i][1])
+    for idx_pos, i in enumerate(by_row):
+        for j in by_row[idx_pos + 1:]:
+            # Words whose top edges are more than one line-height apart cannot overlap;
+            # stop early. Use the taller of the two words' heights as the band.
+            band = max(words[i][3] - words[i][1], words[j][3] - words[j][1], 6.0)
+            if words[j][1] - words[i][1] > band:
                 break
+            if _words_overprint(words[i], words[j]):
+                failures.append({
+                    "constraint": "neighbourTextIntersections",
+                    "detail": f"'{words[i][4]}' overprints '{words[j][4]}' "
+                              f"(page_type={page_type})",
+                })
+                collided = True
+                break
+        if collided:
+            break
 
     # 4. Missing content: expected translated text but nothing rendered.
     if expected_text.strip() and not words:
