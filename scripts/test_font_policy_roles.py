@@ -63,10 +63,15 @@ if have_kalam and have_patrick:
     check("language override wins over book role (Kalam)",
           "kalam" in (r.get("resolvedFamily") or "").lower())
 
-# 4. No policy -> source font is honoured when it is an approved family.
+# 4. No policy -> source font is honoured when it is an approved family. Only meaningful
+#    when ComicSansMS actually ships in the fonts dir; skip cleanly otherwise (book-agnostic,
+#    like the empty-dir skip at the top — a missing optional fixture is not a failure).
 r = resolve_role_font("paragraph", FONTS, None, source_font="ComicSansMS")
-check("no policy -> source font honoured (ComicSansMS)",
-      "comicsansms" in (r.get("resolvedFamily") or "").lower())
+if any("comicsansms" in f for f in fams):
+    check("no policy -> source font honoured (ComicSansMS)",
+          "comicsansms" in (r.get("resolvedFamily") or "").lower())
+else:
+    print("  [SKIP] no policy -> source font honoured (ComicSansMS not installed)")
 
 # 5. Resolution always records provenance.
 check("resolution records family + hash + resolvedBy",

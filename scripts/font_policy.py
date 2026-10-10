@@ -35,11 +35,13 @@ _RETIRED_FONT_ALIASES = {
     "eduaid": "PlaywriteZA",
     "edusabeginner": "PlaywriteZA",
     # AdLibBT retired (the shipped AdLibBT-Regular.ttf was a counterfeit Bangers file,
-    # a comic display face that does NOT match the source). Use the approved house
-    # title weight instead (Captain Zan, 2026-10-07). Veto-able per-book via policy.
-    "adlibbt": "PlaypenSans-Bold",
-    "adlibbtregular": "PlaypenSans-Bold",
-    "adlib": "PlaypenSans-Bold",
+    # a comic display face that does NOT match the source). Alias to the house FAMILY
+    # (PlaypenSans) — NOT a fixed weight — so weight-aware resolution picks Regular vs Bold
+    # from the SOURCE span (2026-10-10 fix: mapping to PlaypenSans-Bold forced every
+    # AdLibBT span bold even though the source was regular). Veto-able per-book via policy.
+    "adlibbt": "PlaypenSans",
+    "adlibbtregular": "PlaypenSans",
+    "adlib": "PlaypenSans",
     # Calibri + OzHandicraftBT files were also counterfeits (Open Sans / Caveat inside).
     # Retire the mislabeled files and map their source names to genuine approved fonts:
     # Calibri (clean body sans) -> house body PlaypenSans; OzHandicraftBT (craft/hand
@@ -64,6 +66,42 @@ def _family_from_filename(filename: str) -> str:
     return name.rstrip("-_ ")
 
 
+# Weight ordering, lightest → heaviest, used to pick the nearest available weight.
+_WEIGHT_ORDER = ["light", "regular", "medium", "semibold", "bold"]
+
+
+def _weight_of_filename(filename: str) -> str:
+    """Derive the weight token from a font filename (defaults to 'regular')."""
+    low = filename.lower()
+    for w in ("semibold", "bold", "medium", "light", "regular"):
+        if w in low:
+            return w
+    return "regular"
+
+
+def _pick_weighted_path(family_norm: str, is_bold: bool, registry: dict):
+    """Pick the font FILE for a family at the requested weight (bold vs regular), falling
+    back to the nearest available weight. Returns a path, or None if the family is absent.
+
+    This is what makes a REGULAR source span render regular and a BOLD span render bold,
+    instead of every re-typeset span collapsing to whichever weight sorted first."""
+    weights = (registry.get("weights") or {}).get(family_norm)
+    if not weights:
+        return None
+    if is_bold:
+        # Prefer bold, then semibold, then anything heavier-to-lighter.
+        for w in ("bold", "semibold", "medium", "regular", "light"):
+            if w in weights:
+                return weights[w]
+    else:
+        # Prefer regular, then medium/light, and only use bold as a last resort.
+        for w in ("regular", "medium", "light", "semibold", "bold"):
+            if w in weights:
+                return weights[w]
+    # Any available weight as the final fallback.
+    return next(iter(weights.values()), None)
+
+
 def load_approved_fonts(fonts_dir: str) -> dict:
     """
     Build the approved-font registry from a fonts directory.
@@ -75,7 +113,7 @@ def load_approved_fonts(fonts_dir: str) -> dict:
         "allowlist": set(normalised_family)  # explicit, if approved_fonts.txt exists
       }
     """
-    registry = {"families": {}, "files": [], "allowlist": set()}
+    registry = {"families": {}, "files": [], "allowlist": set(), "weights": {}}
     if not fonts_dir or not os.path.isdir(fonts_dir):
         return registry
 
@@ -86,6 +124,13 @@ def load_approved_fonts(fonts_dir: str) -> dict:
         registry["files"].append(path)
         fam = _norm(_family_from_filename(f))
         registry["families"].setdefault(fam, path)
+        # WEIGHT-AWARE (2026-10-10): keep every weight file per family so resolution can
+        # pick Regular vs Bold from the SOURCE span's weight, instead of collapsing all
+        # weights to one file (which made every re-typeset span render Bold — the alias
+        # target PlaypenSans-Bold always won the setdefault).
+        registry["weights"].setdefault(fam, {})
+        weight = _weight_of_filename(os.path.basename(f))
+        registry["weights"][fam].setdefault(weight, path)
 
     allow_path = os.path.join(fonts_dir, "approved_fonts.txt")
     if os.path.isfile(allow_path):
@@ -161,7 +206,10 @@ def resolve_font_with_policy(requested_font: str, fonts_dir: str, is_bold: bool 
     chosen_family = None
     for fam, path in registry["families"].items():
         if req_norm and (req_norm in fam or fam in req_norm):
-            chosen_path, chosen_family = path, fam
+            # WEIGHT-AWARE: pick the Regular vs Bold file of this family per the source
+            # span's weight (is_bold), rather than the single collapsed family path.
+            chosen_family = fam
+            chosen_path = _pick_weighted_path(fam, is_bold, registry) or path
             break
 
     # 2. Bold preference if requested and unmatched.
