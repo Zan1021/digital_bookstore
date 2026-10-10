@@ -29,6 +29,14 @@ class ReviewQueue extends Component
     ];
     public ?string $selectedRegionId = null;
 
+    // G4 — per-page "Fix with AI" state machine (on-demand generative repair).
+    // idle → running → choose → applied | failed. Only ever touches the current page.
+    public string $fixState = 'idle';
+    public ?string $fixCandidateImage = null; // AI (generative) candidate preview
+    public ?string $fixCurrentImage = null;   // current (cheap) preview
+    public ?string $fixReason = null;          // failure/why text
+    public ?string $fixRecompare = null;       // re-compare verdict after apply
+
     public function mount(Book $book, ?string $language = null)
     {
         $this->book = $book;
@@ -115,6 +123,7 @@ class ReviewQueue extends Component
         $this->currentPage = $pageNum;
         $this->overlay = [];           // invalidate stale overlay for the previous page
         $this->selectedRegionId = null;
+        $this->resetFix();             // G4: clear any pending AI-fix state for the old page
         if ($this->showOverlay) {
             $this->loadOverlay();
         }
@@ -368,6 +377,123 @@ class ReviewQueue extends Component
             'Artwork approved once and now reusable across all languages of this book.');
     }
 
+    // =========================================================================
+    // G4 — "Fix with AI" per-page generative repair (on-demand-generative-repair spec C-C)
+    // =========================================================================
+
+    /** Is the current page flagged (yellow/red or a render deviation)? The button only
+     *  appears on flagged pages — a clean page never offers a paid AI fix. */
+    public function currentPageIsFlagged(): bool
+    {
+        $pd = collect($this->pages)->firstWhere('page_number', $this->currentPage);
+        if (!$pd) {
+            return false;
+        }
+        return in_array($pd['quality_flag'] ?? 'gray', ['yellow', 'red'], true)
+            || !empty($pd['has_deviation']);
+    }
+
+    /**
+     * Kick off the AI (generative) candidate for the current page — ASYNC (G6). Dispatches
+     * GeneratePageRepairJob so the ~1-min generative call does NOT block the request, then
+     * sets state to 'running'. The UI polls pollFix() for completion. The ONLY production
+     * trigger of a generative call. In tests the job runs sync for determinism.
+     */
+    public function fixWithAi(): void
+    {
+        if (!$this->translation || !$this->currentPage) {
+            return;
+        }
+        $this->resetFix();
+        $this->fixState = 'running';
+
+        $job = new \App\Jobs\GeneratePageRepairJob($this->book->id, $this->translation->id, $this->currentPage);
+        if (app()->environment('testing')) {
+            \App\Jobs\GeneratePageRepairJob::dispatchSync($this->book->id, $this->translation->id, $this->currentPage);
+            $this->pollFix(); // resolve immediately in tests
+        } else {
+            dispatch($job);
+        }
+    }
+
+    /**
+     * Poll the background repair job (G6). Called by the UI on a short interval while
+     * fixState === 'running'. Transitions running → choose (two images) or → failed.
+     */
+    public function pollFix(): void
+    {
+        if ($this->fixState !== 'running' || !$this->translation || !$this->currentPage) {
+            return;
+        }
+        $key = \App\Jobs\GeneratePageRepairJob::jobKey($this->translation->id, $this->currentPage);
+        $row = \App\Models\ProcessingJob::where('book_id', $this->book->id)
+            ->where('type', 'page_repair')->latest('updated_at')->first();
+
+        if (!$row || ($row->details['key'] ?? null) !== $key) {
+            return; // not our job yet
+        }
+        if ($row->status === 'completed' && ($row->details['ok'] ?? false)) {
+            $this->fixCurrentImage = $this->publicUrlForTemp($row->details['current_image'] ?? null);
+            $this->fixCandidateImage = $this->publicUrlForTemp($row->details['candidate_image'] ?? null);
+            $this->fixState = 'choose';
+        } elseif (in_array($row->status, ['completed', 'failed'], true)) {
+            $this->fixReason = $row->details['reason'] ?? $row->error_message ?? 'UNKNOWN';
+            $this->fixState = 'failed';
+        }
+        // else still processing — stay 'running', UI polls again.
+    }
+
+    /**
+     * Apply the publisher's pick for the current page: 'keep_cheap' or 'use_generative'.
+     * Delegates to applyPageVersion (G2), then reflects the outcome + re-compare verdict.
+     */
+    public function applyFix(string $choice): void
+    {
+        if (!$this->translation || !$this->currentPage) {
+            return;
+        }
+        $res = app(\App\Services\IllustrationTextService::class)
+            ->applyPageVersion($this->book, $this->translation, $this->currentPage, $choice);
+
+        if (!empty($res['ok'])) {
+            $this->fixRecompare = $res['recompare'] ?? null;
+            $this->fixState = 'applied';
+            if ($choice === 'use_generative' && ($res['recompare'] ?? null) !== \App\Services\VisualQaService::STATUS_PASSED) {
+                session()->flash('error', 'AI version applied but the page still failed the layout re-check — left flagged for manual review.');
+            } else {
+                session()->flash('success', 'Page updated and re-checked.');
+            }
+        } else {
+            $this->fixReason = $res['reason'] ?? 'APPLY_FAILED';
+            $this->fixState = 'failed';
+        }
+        $this->translation = $this->translation->fresh();
+        $this->loadTranslation();
+    }
+
+    /** Reset the Fix-with-AI panel back to idle (e.g. on page switch or cancel). */
+    public function resetFix(): void
+    {
+        $this->fixState = 'idle';
+        $this->fixCandidateImage = null;
+        $this->fixCurrentImage = null;
+        $this->fixReason = null;
+        $this->fixRecompare = null;
+    }
+
+    /** Expose a storage/app/temp artifact to the browser via a one-off public copy. The
+     *  candidate/current previews live in temp (not web-served); copy into the public disk
+     *  under a predictable, page-scoped name so the <img> can load it. */
+    private function publicUrlForTemp(?string $absPath): ?string
+    {
+        if (!$absPath || !is_file($absPath)) {
+            return null;
+        }
+        $rel = "books/fixpreview/{$this->book->id}_{$this->language}/" . basename($absPath);
+        Storage::disk('public')->put($rel, file_get_contents($absPath));
+        return Storage::disk('public')->url($rel);
+    }
+
     /**
      * Promote the edition to APPROVED once every page is approved and layout QA is
      * clear (spec Req 5.2). Narration for the edition unlocks only after this.
@@ -450,6 +576,12 @@ class ReviewQueue extends Component
             'editionCanApprove' => $this->translation?->allPagesApproved() && $this->translation?->canBePublished(),
             'editionRenderStatus' => $this->translation?->render_status,
             'readinessReport' => $this->readinessReport(),
+            'fixState' => $this->fixState,
+            'fixCandidateImage' => $this->fixCandidateImage,
+            'fixCurrentImage' => $this->fixCurrentImage,
+            'fixReason' => $this->fixReason,
+            'fixRecompare' => $this->fixRecompare,
+            'currentPageFlagged' => $this->currentPageIsFlagged(),
             'overlay' => $this->overlay,
             'overlayToggles' => $this->overlayToggles,
             'showOverlay' => $this->showOverlay,

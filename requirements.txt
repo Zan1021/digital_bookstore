@@ -1,0 +1,29 @@
+# Digital Bookstore — Python engine dependencies
+# =================================================
+# The Laravel app shells out to scripts/*.py (the V8 re-typeset engine, font
+# integrity preflight, illustration pipeline, QA gates). Those scripts are invoked
+# as the bare command `python` from PHP (see app/Services/PdfTranslationService.php
+# and IllustrationTextService.php), so the interpreter FOUND ON PATH must have these
+# installed. Install with:  python -m pip install -r requirements.txt
+#
+# Pinned to the versions verified working on Python 3.14 (Windows, 2026-10-10).
+
+# PDF read/measure/render — the core of the engine (imported as both `pymupdf` and `fitz`).
+pymupdf==1.28.2
+
+# Raster image handling for the illustration repair / artwork pipeline.
+pillow==12.3.0
+
+# Font table inspection + subsetting (font policy / integrity).
+fonttools==4.66.1
+
+# HarfBuzz text shaping (complex-script / ligature-correct layout).
+uharfbuzz==0.56.3
+
+# HTTP (font asset fetches, external lookups).
+requests==2.34.2
+
+# OCR wrapper. NOTE: this is only the Python binding. OCR-dependent features ALSO
+# require the Tesseract engine executable installed separately (not a pip package):
+#   winget install UB-Mannheim.TesseractOCR   (then ensure tesseract.exe is on PATH)
+pytesseract==0.3.13

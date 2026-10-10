@@ -108,6 +108,69 @@
                     </div>
                 @endif
 
+                {{-- G4 — "Fix with AI" per-page generative repair (on-demand, publisher-driven).
+                     Button shows ONLY on a flagged page. idle → running → choose → applied|failed. --}}
+                @if($currentPageFlagged || $fixState !== 'idle')
+                    <div class="mb-4 p-4 rounded-lg border border-purple-200 bg-purple-50">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <span class="font-semibold text-sm text-purple-900">✨ Fix this page with AI</span>
+                                <p class="text-xs text-purple-700 mt-0.5">Regenerates the illustration background behind baked-in text, then you pick. Uses a paid AI image call.</p>
+                            </div>
+                            @if($fixState === 'idle')
+                                <button wire:click="fixWithAi" wire:loading.attr="disabled"
+                                        class="bg-purple-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-purple-700 transition">
+                                    Fix with AI →
+                                </button>
+                            @endif
+                        </div>
+
+                        @if($fixState === 'running')
+                            <div class="mt-3 flex items-center gap-2 text-sm text-purple-800" wire:poll.2s="pollFix">
+                                <span class="animate-spin rounded-full h-4 w-4 border-b-2 border-purple-600"></span>
+                                Generating AI version… this can take up to a minute.
+                            </div>
+                        @elseif($fixState === 'choose')
+                            <div class="mt-4 grid grid-cols-2 gap-4">
+                                <div class="text-center">
+                                    <p class="text-xs font-medium text-gray-600 mb-1">Current (cheap)</p>
+                                    @if($fixCurrentImage)
+                                        <img src="{{ $fixCurrentImage }}" class="w-full rounded border border-gray-200">
+                                    @else
+                                        <div class="text-xs text-gray-400 py-8">no preview</div>
+                                    @endif
+                                    <button wire:click="applyFix('keep_cheap')"
+                                            class="mt-2 w-full bg-gray-200 text-gray-800 px-3 py-2 rounded-lg text-sm hover:bg-gray-300">Keep current</button>
+                                </div>
+                                <div class="text-center">
+                                    <p class="text-xs font-medium text-purple-700 mb-1">AI version</p>
+                                    @if($fixCandidateImage)
+                                        <img src="{{ $fixCandidateImage }}" class="w-full rounded border border-purple-300">
+                                    @else
+                                        <div class="text-xs text-gray-400 py-8">no preview</div>
+                                    @endif
+                                    <button wire:click="applyFix('use_generative')"
+                                            class="mt-2 w-full bg-purple-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-purple-700">Use AI version</button>
+                                </div>
+                            </div>
+                            <button wire:click="resetFix" class="mt-3 text-xs text-gray-400 hover:text-gray-600">Cancel</button>
+                        @elseif($fixState === 'applied')
+                            <div class="mt-3 p-2 rounded bg-green-100 text-green-800 text-sm">
+                                ✓ Applied.
+                                @if($fixRecompare)
+                                    Re-check: <strong>{{ $fixRecompare }}</strong>.
+                                @endif
+                                <button wire:click="resetFix" class="ml-2 text-xs text-green-700 underline">Done</button>
+                            </div>
+                        @elseif($fixState === 'failed')
+                            <div class="mt-3 p-2 rounded bg-red-100 text-red-800 text-sm">
+                                Could not produce an AI fix: {{ $fixReason }}.
+                                <button wire:click="resetFix" class="ml-2 text-xs text-red-700 underline">Dismiss</button>
+                            </div>
+                        @endif
+                    </div>
+                @endif
+
                 {{-- Readiness summary (D3): AUTOMATED check status + coverage, distinct from
                      the human approvals below. Read-only — shows WHY the edition is ready or
                      blocked. --}}

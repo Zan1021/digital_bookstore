@@ -7,46 +7,43 @@ task at a time; suite green after each; the generative call is MOCKED in automat
 
 ---
 
-- [ ] **G1. Per-page generative candidate — `repairPageGenerative(Book,Translation,page)`**
-      (R2/R3, design C-A). New method on `IllustrationTextService`: run detect + GENERATIVE
-      inpaint + overlay for ONE page; write the result to a scratch CANDIDATE artifact keyed
-      by (book,lang,page,fingerprint); return {ok, candidate_image, current_image, reason}.
-      MUST NOT touch the live edition PDF. Independent of the global
-      `ILLUSTRATION_TEXT_GENERATIVE` flag. Fail-closed on error. PROOF: Feature test (mocked
-      generative) — produces a candidate image, live PDF untouched (bytes unchanged), error
-      path returns ok=false without side effects.
+- [x] **G1. Per-page generative candidate — `repairPageGenerative(Book,Translation,page)`**
+      (R2/R3, design C-A). DONE + PROVEN: `IllustrationTextService::repairPageGenerative` runs
+      detect + generative inpaint on a COPY, writes a candidate image + retained candidate PDF
+      keyed by (book,lang,page,fingerprint), returns {ok,candidate_image,current_image,
+      candidate_pdf,reason}. Live edition byte-identical (hash guard). Independent of the global
+      flag; fail-closed. TEST: `GenerativeRepairCandidateTest` (4/4, generative mocked = no spend).
 
-- [ ] **G2. Apply the pick — `applyPageVersion(Book,Translation,page,choice)`** (R3/R5,
-      design C-B). choice ∈ {keep_cheap, use_generative}. keep_cheap = discard candidate,
-      mark page publisher-accepted. use_generative = splice the single candidate page into
-      the edition (reuse the engine's page-level write), then re-run
-      `VisualQaService::review` on JUST that page; update page status; recompute edition
-      readiness. PROOF: Feature test — keep_cheap leaves PDF unchanged; use_generative
-      replaces exactly ONE page (other pages byte-stable) + triggers a single-page
-      re-compare (mocked) + updates status; readiness recomputes.
+- [x] **G2. Apply the pick — `applyPageVersion(Book,Translation,page,choice)`** (R3/R5,
+      design C-B). DONE + PROVEN. choice ∈ {keep_cheap, use_generative}. keep_cheap = no PDF
+      change + page approved. use_generative = single-page splice (pymupdf delete+insert at the
+      same index) + per-page `VisualQaService::review` re-compare + approve only on pass; backs
+      up the edition and rolls back on error. TEST: `ApplyPageVersionTest` (5/5): keep_cheap
+      no-op; use_generative splices exactly 1 page + re-compare + status; failing re-compare
+      leaves page unapproved; fail-closed on missing candidate / invalid choice.
 
-- [ ] **G3. R1 guard — generative stays off the auto path.** Confirm/ensure `process()` does
-      NOT call the generative route in normal production (only the deliberate full-book flag
-      path does). PROOF: test asserts a default render makes ZERO generative calls; grep
-      shows the per-page button is the only production producer of a generative call.
+- [x] **G3. R1 guard — generative stays off the auto path.** DONE + PROVEN. TEST:
+      `GenerativeAutoPathGuardTest` (2/2): `process()` with the global flag off makes ZERO
+      generative calls; the per-page button path is the one and only producer.
 
-- [ ] **G4. Review-queue UI — "Fix with AI" button + two-version picker** (R4, design C-C).
-      In `ReviewQueue`: show the button ONLY on flagged pages; press → queued
-      `repairPageGenerative` (button → running); on completion show the two images
-      (current vs AI) with Keep/Use buttons → `applyPageVersion`; reflect applied/failed.
-      Button state machine idle→running→choose→applied|failed. PROOF: Livewire test drives
-      idle→running→choose→applied; button absent on a clean page.
+- [x] **G4. Review-queue UI — "Fix with AI" button + two-version picker** (R4, design C-C).
+      DONE + PROVEN. `ReviewQueue` shows the button ONLY on flagged pages; state machine
+      idle→running→choose→applied|failed; two-image picker (Keep current / Use AI version) →
+      `applyPageVersion`. TEST: `ReviewQueueFixWithAiTest` (3/3): button present on flagged /
+      absent on clean; full state machine; page-switch resets the panel.
 
-- [ ] **G5. Audit + cost trail** (R6, design C-D). Each repairPageGenerative + an
-      applyPageVersion(use_generative) appends an audit_trail entry (reuse C7 logAuditTrail):
-      page, user id, compare verdict before/after, generative_spent=true. PROOF: test asserts
-      the audit entry is written with the page + spend marker.
+- [x] **G5. Audit + cost trail** (R6, design C-D). DONE + PROVEN. Each `applyPageVersion`
+      appends a qa_report['audit'] entry (page, action, recompare verdict, generative_spent,
+      user id). TEST: `GenerativeAuditTrailTest` (3/3): spend entry w/ user; no-spend entry;
+      entries accumulate across pages.
 
-- [ ] **G6. Fail-safe/reversibility + verification sweep** (R7). Keep the pre-apply edition
-      artifact so a bad apply rolls back to cheap. API failure = non-blocking UI error.
-      Final: full Laravel suite green; a MANUAL live smoke (one real generative page from the
-      queue on My House page 1) confirms end-to-end, cost noted. Update steering if the
-      production illustration behaviour changed.
+- [~] **G6. Fail-safe/reversibility + verification sweep** (R7). ASYNC DONE + PROVEN; manual
+      smoke still OPEN. Generative call now QUEUED (`GeneratePageRepairJob`, locked per
+      edition+page so a double-click can't double-spend); ReviewQueue dispatches + polls
+      (`wire:poll.2s="pollFix"`). Edition backed up before a use_generative splice; rolls back
+      on error. TESTS: `GeneratePageRepairJobTest` (3/3) + full suite 37/37. ⚠️ STILL OPEN: the
+      MANUAL live smoke — one REAL generative page on My House p1 — needs Captain Zan's
+      OpenAI-spend go-ahead (first real spend). Update steering if production behaviour changed.
 
 ---
 

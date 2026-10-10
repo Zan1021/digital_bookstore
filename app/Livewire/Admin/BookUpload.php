@@ -16,13 +16,39 @@ class BookUpload extends Component
     public bool $processing = false;
     public int $processed = 0;
     public int $total = 0;
-    public string $currentStep = 'upload'; // upload, crop, processing, done
+    public string $currentStep = 'upload'; // upload, crop, fonts, translate, processing, done
 
     // Settings
     public bool $hasCropMarks = false;
     public int $cropPercent = 5;
     public string $previewPdfUrl = '';
     public ?array $detectedCrop = null;
+
+    // TYPOGRAPHY POLICY (chosen in-wizard, step 'fonts'). Per-role font choices applied
+    // to every book created in this batch right after creation. Empty = source/house font.
+    public array $approvedFonts = [];
+    public string $bodyFont = '';
+    public string $titleFont = '';
+    public string $artworkLabelFont = '';
+
+    // TRANSLATE step: the language chosen in-wizard. Translation itself is a deliberate,
+    // PAID action triggered AFTER the book is created (not silently during upload), so the
+    // wizard records the choice and the 'done' step offers to run it. Empty = translate later.
+    public string $targetLanguage = '';
+
+    /** Supported target languages (value => label), mirrors the book Translate tab. */
+    public array $languageOptions = [
+        'af' => 'Afrikaans', 'zu' => 'isiZulu', 'xh' => 'isiXhosa', 'st' => 'Sesotho',
+        'nso' => 'Sepedi', 'tn' => 'Setswana', 'fr' => 'French', 'de' => 'German',
+        'es' => 'Spanish', 'pt' => 'Portuguese', 'nl' => 'Dutch', 'it' => 'Italian',
+        'sw' => 'Swahili', 'ar' => 'Arabic', 'zh' => 'Chinese (Simplified)',
+    ];
+
+    public function mount()
+    {
+        // Approved fonts = the families shipped in storage/app/fonts (validated set).
+        $this->approvedFonts = Book::approvedFontAssets();
+    }
 
     public function updatedFiles()
     {
@@ -47,7 +73,7 @@ class BookUpload extends Component
 
     public function nextStep()
     {
-        $steps = ['upload', 'crop', 'processing', 'done'];
+        $steps = ['upload', 'crop', 'fonts', 'translate', 'processing', 'done'];
         $currentIdx = array_search($this->currentStep, $steps);
         if ($currentIdx !== false && $currentIdx < count($steps) - 1) {
             $nextStep = $steps[$currentIdx + 1];
@@ -61,7 +87,7 @@ class BookUpload extends Component
 
     public function prevStep()
     {
-        $steps = ['upload', 'crop', 'processing', 'done'];
+        $steps = ['upload', 'crop', 'fonts', 'translate', 'processing', 'done'];
         $currentIdx = array_search($this->currentStep, $steps);
         if ($currentIdx !== false && $currentIdx > 0) {
             $this->currentStep = $steps[$currentIdx - 1];
@@ -125,12 +151,28 @@ class BookUpload extends Component
                     'status' => 'draft',
                 ]);
 
+                // Apply the in-wizard typography policy (step 'fonts'). Validated against
+                // the approved fonts dir by setRoleFont; empty = source/house font. A bad
+                // value is skipped rather than failing the whole upload.
+                try {
+                    $book->setRoleFont('body', $this->bodyFont ?: null);
+                    $book->setRoleFont('title', $this->titleFont ?: null);
+                    $book->setRoleFont('artwork_label', $this->artworkLabelFont ?: null);
+                } catch (\InvalidArgumentException $e) {
+                    // Non-fatal: keep the book, note the policy was not applied.
+                    \Illuminate\Support\Facades\Log::warning('BookUpload: font policy not applied', [
+                        'book' => $book->id, 'error' => $e->getMessage(),
+                    ]);
+                }
+
                 $this->results[] = [
                     'success' => true,
                     'filename' => $file->getClientOriginalName(),
                     'book_id' => $book->id,
                     'title' => $book->title,
                     'pages' => $book->page_count,
+                    'target_language' => $this->targetLanguage,
+                    'translation_started' => false,
                 ];
             } catch (\Throwable $e) {
                 $this->results[] = [
@@ -148,9 +190,42 @@ class BookUpload extends Component
         $this->files = [];
     }
 
+    /**
+     * Deliberate, PAID action from the 'done' step: dispatch translation for the books
+     * just created, into the language chosen in the wizard. Mirrors BookManager::translate
+     * (creates/updates the Translation edition + dispatches TranslateEditionJob). Kept OUT
+     * of startProcessing so upload itself never spends — the publisher clicks this.
+     */
+    public function translateCreated()
+    {
+        if ($this->targetLanguage === '') {
+            return;
+        }
+        $langName = \App\Services\TranslationService::SUPPORTED_LANGUAGES[$this->targetLanguage]
+            ?? $this->targetLanguage;
+
+        foreach ($this->results as $i => $result) {
+            if (empty($result['success']) || !empty($result['translation_started'])) {
+                continue;
+            }
+            $edition = \App\Models\Translation::updateOrCreate(
+                ['book_id' => $result['book_id'], 'language_code' => $this->targetLanguage],
+                ['language_name' => $langName, 'status' => 'processing']
+            );
+            if (app()->environment('testing')) {
+                \App\Jobs\TranslateEditionJob::dispatchSync($edition->id);
+            } else {
+                \App\Jobs\TranslateEditionJob::dispatch($edition->id);
+            }
+            $this->results[$i]['translation_started'] = true;
+        }
+        session()->flash('success', "{$langName} translation queued for the new book(s).");
+    }
+
     public function uploadMore()
     {
-        $this->reset(['files', 'results', 'processed', 'total', 'currentStep']);
+        $this->reset(['files', 'results', 'processed', 'total', 'currentStep',
+                      'bodyFont', 'titleFont', 'artworkLabelFont', 'targetLanguage']);
         $this->currentStep = 'upload';
     }
 

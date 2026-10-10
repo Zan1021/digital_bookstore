@@ -1,6 +1,6 @@
 <div>
     @php
-        $steps = ['upload' => 'Upload', 'crop' => 'Crop & Bleed', 'processing' => 'Processing', 'done' => 'Done'];
+        $steps = ['upload' => 'Upload', 'crop' => 'Crop & Bleed', 'fonts' => 'Fonts', 'translate' => 'Translate', 'processing' => 'Processing', 'done' => 'Done'];
         $stepKeys = array_keys($steps);
         $currentIdx = array_search($currentStep, $stepKeys);
     @endphp
@@ -123,6 +123,86 @@
             @endif
         </div>
 
+    @elseif($currentStep === 'fonts')
+        {{-- STEP 3: Fonts — choose the typography for this book (same card as crop). --}}
+        <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-8">
+            <div class="text-center max-w-lg mx-auto">
+                <div class="w-16 h-16 bg-brand-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg class="w-8 h-8 text-brand-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7V4h16v3M9 20h6M12 4v16" /></svg>
+                </div>
+                <h2 class="text-2xl font-bold text-gray-800">Choose the Fonts</h2>
+                <p class="text-gray-500 mt-2">Pick the font for each role. Leave as default to keep the book's original font. Only approved fonts are shown.</p>
+
+                <div class="mt-6 space-y-4 text-left max-w-sm mx-auto">
+                    <div>
+                        <label class="text-sm font-medium text-gray-700 block mb-1">Body text</label>
+                        <select wire:model="bodyFont" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:border-brand-500 focus:ring-brand-500">
+                            <option value="">— source / house default —</option>
+                            @foreach($approvedFonts as $f)
+                                <option value="{{ $f }}">{{ $f }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-sm font-medium text-gray-700 block mb-1">Title / Heading</label>
+                        <select wire:model="titleFont" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:border-brand-500 focus:ring-brand-500">
+                            <option value="">— source / house default —</option>
+                            @foreach($approvedFonts as $f)
+                                <option value="{{ $f }}">{{ $f }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-sm font-medium text-gray-700 block mb-1">Artwork labels</label>
+                        <select wire:model="artworkLabelFont" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:border-brand-500 focus:ring-brand-500">
+                            <option value="">— source / house default —</option>
+                            @foreach($approvedFonts as $f)
+                                <option value="{{ $f }}">{{ $f }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                </div>
+
+                @if(count($approvedFonts) === 0)
+                    <p class="mt-4 text-sm text-yellow-600">No approved fonts installed yet — the book will use its source font. You can set fonts later in Font Manager.</p>
+                @endif
+
+                <div class="mt-8">
+                    <button wire:click="nextStep" class="bg-brand-500 text-white px-8 py-3 rounded-lg font-medium hover:bg-brand-600 transition text-lg">Next: Translate →</button>
+                </div>
+                <button wire:click="prevStep" class="mt-4 text-sm text-gray-400 hover:text-gray-600">← Back</button>
+            </div>
+        </div>
+
+    @elseif($currentStep === 'translate')
+        {{-- STEP 4: Translate — choose a target language (same card style). Translation is
+             a PAID action and does NOT run here; it is triggered after the book is created. --}}
+        <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-8">
+            <div class="text-center max-w-lg mx-auto">
+                <div class="w-16 h-16 bg-brand-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg class="w-8 h-8 text-brand-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129" /></svg>
+                </div>
+                <h2 class="text-2xl font-bold text-gray-800">Translate the Book</h2>
+                <p class="text-gray-500 mt-2">Choose a target language. You can also skip and translate later from the book page.</p>
+
+                <div class="mt-6 text-left max-w-sm mx-auto">
+                    <label class="text-sm font-medium text-gray-700 block mb-1">Target language</label>
+                    <select wire:model="targetLanguage" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:border-brand-500 focus:ring-brand-500">
+                        <option value="">— skip / translate later —</option>
+                        @foreach($languageOptions as $code => $label)
+                            <option value="{{ $code }}">{{ $label }}</option>
+                        @endforeach
+                    </select>
+                    <p class="text-xs text-gray-400 mt-2">Translation runs after the book is created. Text translation is inexpensive; layout rendering may use AI checks.</p>
+                </div>
+
+                <div class="mt-8">
+                    <button wire:click="nextStep" class="bg-brand-500 text-white px-8 py-3 rounded-lg font-medium hover:bg-brand-600 transition text-lg">Create ebook →</button>
+                </div>
+                <button wire:click="prevStep" class="mt-4 text-sm text-gray-400 hover:text-gray-600">← Back</button>
+            </div>
+        </div>
+
     @elseif($currentStep === 'processing')
         {{-- STEP 3: Processing --}}
         <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-8 text-center">
@@ -142,6 +222,22 @@
                 <h2 class="text-xl font-semibold text-green-800">Ebook(s) Created!</h2>
                 <p class="text-green-600 mt-1">{{ count(array_filter($results, fn($r) => $r['success'])) }} book(s) ready. Open a book to translate or narrate.</p>
             </div>
+
+            @if($targetLanguage !== '')
+                @php $langLabel = $languageOptions[$targetLanguage] ?? $targetLanguage; @endphp
+                @php $alreadyStarted = collect($results)->where('success', true)->every(fn($r) => !empty($r['translation_started'])); @endphp
+                <div class="bg-brand-50 border border-brand-200 rounded-xl p-5 flex items-center justify-between">
+                    <div class="text-left">
+                        <p class="font-medium text-gray-800">Translate to {{ $langLabel }}</p>
+                        <p class="text-xs text-gray-500 mt-0.5">You chose {{ $langLabel }} in the wizard. Translation runs on the server when you start it.</p>
+                    </div>
+                    @if($alreadyStarted)
+                        <span class="bg-green-100 text-green-700 px-4 py-2 rounded-lg text-sm font-medium">✓ Translation queued</span>
+                    @else
+                        <button wire:click="translateCreated" class="bg-brand-500 text-white px-5 py-2.5 rounded-lg text-sm font-medium hover:bg-brand-600 transition">Translate now →</button>
+                    @endif
+                </div>
+            @endif
             @foreach($results as $result)
                 <div class="bg-white rounded-xl border p-4 {{ $result['success'] ? 'border-gray-100' : 'border-red-200' }}">
                     @if($result['success'])

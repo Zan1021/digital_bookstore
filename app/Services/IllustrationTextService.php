@@ -655,6 +655,360 @@ SYS;
     }
 
     /**
+     * G1 (on-demand generative repair, spec Req 2/3) — produce a GENERATIVE repair
+     * CANDIDATE for ONE page, WITHOUT touching the live edition PDF.
+     *
+     * Flow: locate the page's artwork-text regions (native geometry preferred, vision
+     * fallback), attach the already-stored translations by id, measure/gate, then run the
+     * deterministic erase+overlay WITH the generative background route — but against a
+     * COPY of the edition so the live PDF stays byte-identical. The candidate page is
+     * rendered to a PNG keyed by (book, lang, page, fingerprint); the current (live) page
+     * is rendered to a second PNG for side-by-side display.
+     *
+     * Independent of the global ILLUSTRATION_TEXT_GENERATIVE flag — this is the deliberate,
+     * publisher-invoked per-page route. Fail-closed: on ANY error it returns ok=false with
+     * no side effects (and never mutates the live edition).
+     *
+     * @param int $page 1-based page number (matches the review-queue UI).
+     * @return array{ok:bool, candidate_image:?string, current_image:?string, candidate_pdf:?string, reason:?string}
+     */
+    public function repairPageGenerative(Book $book, Translation $translation, int $page): array
+    {
+        $fail = fn (string $reason) => [
+            'ok' => false, 'candidate_image' => null, 'current_image' => null,
+            'candidate_pdf' => null, 'reason' => $reason,
+        ];
+
+        $pageIndex = $page - 1;
+        if ($pageIndex < 0) {
+            return $fail('INVALID_PAGE');
+        }
+
+        // The LIVE edition PDF. We copy it; we never pass it as a repair --output.
+        $translatedRel = $translation->rendered_pdf_path
+            ?? "books/translated/{$book->id}_{$translation->language_code}.pdf";
+        $livePath = Storage::disk('public')->path($translatedRel);
+        if (!is_file($livePath)) {
+            return $fail('MISSING_EDITION_PDF');
+        }
+        $liveHashBefore = @md5_file($livePath);
+
+        $ppi = (int) config('bookstore.illustration_text.ppi', 300);
+        $model = (string) config('bookstore.illustration_text.model', 'gpt-4o');
+        $temp = storage_path('app/temp');
+        if (!is_dir($temp)) {
+            @mkdir($temp, 0755, true);
+        }
+
+        $workCopy = null;
+        try {
+            // 1. Locate + target the page's artwork-text regions (reuse the proven path).
+            $regions = $this->locateRegionsForGenerative($livePath, $pageIndex, $ppi, $translation);
+            if (empty($regions)) {
+                return $fail('NO_ARTWORK_TEXT_ON_PAGE');
+            }
+
+            // 2. Repair on a COPY with the generative background route. The live PDF is
+            //    never the --output; the copy absorbs all writes.
+            $workCopy = "{$temp}/genrepair_copy_{$book->id}_{$translation->language_code}_{$page}_" . uniqid() . '.pdf';
+            if (!@copy($livePath, $workCopy)) {
+                return $fail('COPY_FAILED');
+            }
+            $report = $this->runGenerativeRepairOnCopy($workCopy, $pageIndex, $ppi, $regions);
+            if (!($report['modified'] ?? false)) {
+                return $fail('GENERATIVE_REPAIR_PRODUCED_NO_CHANGE');
+            }
+
+            // 3. Render the candidate page (from the copy) + the current page (from live).
+            $candRender = $this->renderPageForTest($workCopy, $pageIndex, $ppi);
+            $curRender = $this->renderPageForTest($livePath, $pageIndex, $ppi);
+            if ($candRender === null || $curRender === null) {
+                return $fail('CANDIDATE_RENDER_FAILED');
+            }
+
+            // Persist the candidate image under a deterministic (book,lang,page,fingerprint) key.
+            $fingerprint = substr((string) ($translation->render_fingerprint ?? 'nofp'), 0, 16);
+            $candKeyName = "candidate_{$book->id}_{$translation->language_code}_p{$page}_{$fingerprint}.png";
+            $candFinal = "{$temp}/{$candKeyName}";
+            @rename($candRender[0], $candFinal);
+            if (!is_file($candFinal)) {
+                $candFinal = $candRender[0]; // rename across volumes can fail; keep the render
+            }
+
+            // RETAIN the candidate PDF (the repaired work copy) under a deterministic key so
+            // applyPageVersion (G2) can splice the single page into the edition on 'use_generative'.
+            // This is still a SCRATCH artifact — the live edition is never written here.
+            $candPdf = "{$temp}/candidate_{$book->id}_{$translation->language_code}_p{$page}_{$fingerprint}.pdf";
+            @copy($workCopy, $candPdf);
+
+            return [
+                'ok' => true,
+                'candidate_image' => $candFinal,
+                'current_image' => $curRender[0],
+                'candidate_pdf' => is_file($candPdf) ? $candPdf : null,
+                'reason' => null,
+            ];
+        } catch (\Throwable $e) {
+            Log::warning('IllustrationText: repairPageGenerative failed (fail-closed)', [
+                'book' => $book->id, 'page' => $page, 'error' => $e->getMessage(),
+            ]);
+            return $fail('EXCEPTION: ' . $e->getMessage());
+        } finally {
+            // The work copy is scratch — remove it. The live PDF must be byte-identical.
+            if ($workCopy && is_file($workCopy)) {
+                @unlink($workCopy);
+            }
+            if ($liveHashBefore !== null && is_file($livePath)
+                && @md5_file($livePath) !== $liveHashBefore) {
+                // Defensive: this must never happen (we only ever wrote the copy). Loud if it does.
+                Log::error('IllustrationText: LIVE EDITION MUTATED during generative candidate — investigate', [
+                    'book' => $book->id, 'page' => $page, 'path' => $livePath,
+                ]);
+            }
+        }
+    }
+
+    /**
+     * Seam: run the deterministic erase+overlay WITH the generative background on a COPY
+     * PDF (never the live edition). Isolated so tests can override it to avoid any real
+     * OpenAI/image-model spend. Returns the Python repair report (['modified'=>bool,...]).
+     *
+     * $copyPath is BOTH the input and the --output (writes land on the scratch copy).
+     */
+    protected function runGenerativeRepairOnCopy(string $copyPath, int $pageIndex, int $ppi, array $regions): array
+    {
+        $regionsPath = storage_path('app/temp/illus_regions_gen_' . uniqid() . '.json');
+        file_put_contents($regionsPath, json_encode(['ppi' => $ppi, 'regions' => $regions], JSON_UNESCAPED_UNICODE));
+
+        $cmd = ['python', base_path('scripts/illustration_text.py'), 'repair',
+            '--input', $copyPath, '--page', (string) $pageIndex,
+            '--regions', $regionsPath, '--fonts-dir', $this->fontsDir,
+            '--output', $copyPath, '--ppi', (string) $ppi];
+
+        // The generative background PNG (OpenAI image edit) — the ONLY paid step. Null-safe:
+        // if it can't be produced the Python side falls back to deterministic inpaint.
+        $bg = $this->generativeBackground($copyPath, $pageIndex, $ppi, $regions);
+        if ($bg !== null) {
+            $cmd[] = '--generative-bg';
+            $cmd[] = $bg;
+        }
+
+        $proc = new Process($cmd);
+        $proc->setTimeout(300);
+        $proc->run();
+        @unlink($regionsPath);
+        if ($bg !== null && is_file($bg)) {
+            @unlink($bg);
+        }
+
+        if (!$proc->isSuccessful()) {
+            Log::warning('IllustrationText: generative repair-on-copy failed (non-fatal)', [
+                'page' => $pageIndex, 'stderr' => $proc->getErrorOutput(),
+            ]);
+            return ['modified' => false];
+        }
+        return json_decode($proc->getErrorOutput(), true) ?: ['modified' => false];
+    }
+
+    /**
+     * G2 (on-demand generative repair, spec C-B) — APPLY the publisher's per-page pick.
+     *
+     * choice ∈ {keep_cheap, use_generative}:
+     *  - keep_cheap     → the cheap (deterministic) result already in the edition is accepted.
+     *                     No PDF change at all; the page is marked publisher-approved.
+     *  - use_generative → splice the retained candidate PDF's single page into the live
+     *                     edition (ONLY that page; all others byte-stable), then re-run the
+     *                     visual QA compare on JUST that page. The page is approved only if
+     *                     the re-compare passes; otherwise it stays flagged (escalate).
+     *
+     * Reversibility (R7): before a use_generative splice we back up the live edition so a bad
+     * apply can be rolled back. Fail-closed: any error leaves the edition unchanged.
+     *
+     * @param int    $page   1-based page number.
+     * @param string $choice keep_cheap | use_generative
+     * @return array{ok:bool, applied:string, recompare:?string, reason:?string}
+     */
+    public function applyPageVersion(Book $book, Translation $translation, int $page, string $choice): array
+    {
+        $fail = fn (string $reason) => ['ok' => false, 'applied' => 'none', 'recompare' => null, 'reason' => $reason];
+
+        if (!in_array($choice, ['keep_cheap', 'use_generative'], true)) {
+            return $fail('INVALID_CHOICE');
+        }
+        if ($page < 1) {
+            return $fail('INVALID_PAGE');
+        }
+
+        // ---- keep_cheap: accept the existing cheap result; NO PDF mutation. ----
+        if ($choice === 'keep_cheap') {
+            $this->discardCandidate($book, $translation, $page);
+            $translation->setPageApproval($page, true);
+            $this->logAudit($book, $translation, $page, 'keep_cheap', null, false);
+            return ['ok' => true, 'applied' => 'keep_cheap', 'recompare' => null, 'reason' => null];
+        }
+
+        // ---- use_generative: splice the candidate page, then re-compare that page. ----
+        $translatedRel = $translation->rendered_pdf_path
+            ?? "books/translated/{$book->id}_{$translation->language_code}.pdf";
+        $livePath = Storage::disk('public')->path($translatedRel);
+        if (!is_file($livePath)) {
+            return $fail('MISSING_EDITION_PDF');
+        }
+
+        $fingerprint = substr((string) ($translation->render_fingerprint ?? 'nofp'), 0, 16);
+        $candPdf = storage_path("app/temp/candidate_{$book->id}_{$translation->language_code}_p{$page}_{$fingerprint}.pdf");
+        if (!is_file($candPdf)) {
+            return $fail('NO_CANDIDATE_TO_APPLY');
+        }
+
+        // Reversibility: keep a pre-apply backup of the live edition.
+        $backup = $livePath . '.preapply-' . uniqid() . '.bak';
+        if (!@copy($livePath, $backup)) {
+            return $fail('BACKUP_FAILED');
+        }
+
+        $otherPagesStable = null;
+        try {
+            $spliced = $this->splicePageIntoEdition($candPdf, $livePath, $page - 1);
+            if (!$spliced) {
+                // Restore and bail.
+                @copy($backup, $livePath);
+                return $fail('SPLICE_FAILED');
+            }
+
+            // Re-run visual QA on JUST this page (mockable; no spend in tests).
+            $verdict = $this->recomparePage($book, $translation, $page);
+            $passed = ($verdict === VisualQaService::STATUS_PASSED);
+            $translation->setPageApproval($page, $passed);
+
+            $this->discardCandidate($book, $translation, $page);
+            $this->logAudit($book, $translation, $page, 'use_generative', $verdict, true);
+
+            return [
+                'ok' => true,
+                'applied' => 'use_generative',
+                'recompare' => $verdict,
+                'reason' => $passed ? null : 'RECOMPARE_NOT_PASSED',
+            ];
+        } catch (\Throwable $e) {
+            @copy($backup, $livePath); // roll back on any error
+            Log::warning('IllustrationText: applyPageVersion failed (rolled back)', [
+                'book' => $book->id, 'page' => $page, 'error' => $e->getMessage(),
+            ]);
+            return $fail('EXCEPTION: ' . $e->getMessage());
+        } finally {
+            @unlink($backup);
+        }
+    }
+
+    /**
+     * Seam: replace ONE page of the edition PDF with the same page from the candidate PDF,
+     * leaving every other page byte-stable. Deterministic PyMuPDF op (delete + insert the
+     * single page at the same index). Isolated so tests can override without a subprocess.
+     * Returns true on success.
+     */
+    protected function splicePageIntoEdition(string $candidatePdf, string $editionPath, int $pageIndex): bool
+    {
+        $py = sprintf(
+            'import pymupdf,os,sys;' .
+            'ed=pymupdf.open(r"%s");cand=pymupdf.open(r"%s");i=%d;' .
+            'ed.delete_page(i);ed.insert_pdf(cand,from_page=i,to_page=i,start_at=i);' .
+            'tmp=r"%s"+".tmp";ed.save(tmp);ed.close();cand.close();os.replace(tmp,r"%s")',
+            $editionPath, $candidatePdf, $pageIndex, $editionPath, $editionPath
+        );
+        $proc = new Process(['python', '-c', $py]);
+        $proc->setTimeout(120);
+        $proc->run();
+        if (!$proc->isSuccessful()) {
+            Log::warning('IllustrationText: single-page splice failed', [
+                'page' => $pageIndex, 'stderr' => $proc->getErrorOutput(),
+            ]);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Seam: re-run the visual QA compare on a single page. Returns a VisualQaService status
+     * string. Isolated so tests can mock the (paid) vision call.
+     */
+    protected function recomparePage(Book $book, Translation $translation, int $page): string
+    {
+        $result = $this->visualQa->review($book, $translation, [$page]);
+        $rec = $result['pages'][$page] ?? null;
+        return $rec['status'] ?? VisualQaService::STATUS_NOT_RUN;
+    }
+
+    /** Remove the retained candidate artifacts for a page (both the PDF and the PNG). */
+    protected function discardCandidate(Book $book, Translation $translation, int $page): void
+    {
+        $fp = substr((string) ($translation->render_fingerprint ?? 'nofp'), 0, 16);
+        $base = storage_path("app/temp/candidate_{$book->id}_{$translation->language_code}_p{$page}_{$fp}");
+        foreach ([$base . '.pdf', $base . '.png'] as $f) {
+            if (is_file($f)) {
+                @unlink($f);
+            }
+        }
+    }
+
+    /**
+     * Append an audit/cost-trail entry (spec C-D). Records the page, the acting user (when
+     * available), the re-compare verdict, and whether a generative call was spent. Isolated
+     * so tests can assert it; writes to the edition's qa_report->audit list.
+     */
+    protected function logAudit(Book $book, Translation $translation, int $page, string $action,
+                                ?string $recompare, bool $generativeSpent): void
+    {
+        try {
+            $report = $translation->qa_report ?? [];
+            $report['audit'] = $report['audit'] ?? [];
+            $report['audit'][] = [
+                'at' => now()->toIso8601String(),
+                'page' => $page,
+                'action' => $action,
+                'recompare' => $recompare,
+                'generative_spent' => $generativeSpent,
+                'user_id' => optional(auth()->user())->id,
+            ];
+            $translation->qa_report = $report;
+            $translation->save();
+        } catch (\Throwable $e) {
+            Log::warning('IllustrationText: audit log failed (non-fatal)', ['error' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * Seam: locate + target the artwork-text regions for ONE page (native geometry
+     * preferred, vision fallback), then tag + attach stored translations + measure/gate.
+     * Isolated as a protected method so tests can supply synthetic regions without running
+     * the detect/native subprocesses. Returns the gated region list (possibly empty).
+     */
+    protected function locateRegionsForGenerative(string $pdfPath, int $pageIndex, int $ppi, Translation $translation): array
+    {
+        $model = (string) config('bookstore.illustration_text.model', 'gpt-4o');
+        $regions = $this->nativeTextRegions($pdfPath, $pageIndex, $ppi, $translation);
+        if (empty($regions)) {
+            $regions = $this->detect($pdfPath, $pageIndex, $ppi, $model);
+        }
+        if (empty($regions)) {
+            return [];
+        }
+        $regions = $this->tagRegions($regions, $pageIndex + 1, false, $pdfPath, $pageIndex, $ppi);
+        $regions = $this->attachTargetsById($translation, $regions);
+        [$regions, ] = $this->measureAndGate($pdfPath, $pageIndex, $ppi, $regions);
+        return $regions;
+    }
+
+    /**
+     * Seam: render ONE page of a PDF to a PNG. Thin wrapper over the private renderPage so
+     * tests can override the PyMuPDF call. Returns [pngPath, width, height] or null.
+     */
+    protected function renderPageForTest(string $pdfPath, int $pageIndex, int $ppi): ?array
+    {
+        return $this->renderPage($pdfPath, $pageIndex, $ppi);
+    }
+
+    /**
      * Measure real background colour from proposed sample regions and gate on uniformity.
      * Returns [regions(with color_rgb + text_color_rgb + align), needsReview].
      */

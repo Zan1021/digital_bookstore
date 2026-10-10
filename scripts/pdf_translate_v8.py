@@ -1710,6 +1710,47 @@ def _vocab_manifest_from_scene(page_scene, page_num):
     }
 
 
+# Roles whose SOURCE line, when it sits on the page midline, must be re-centred on the
+# PAGE midline (not its own narrow ink box). Shared by the generic placer + its test.
+_PAGE_CENTRED_ROLES = ("book_title", "subtitle", "heading", "label")
+
+# A source line counts as "page-centred" when its centre is within this fraction of the
+# page width from the true page midline.
+_PAGE_CENTRE_TOLERANCE = 0.08
+
+
+def page_centered_title_box(src_bbox, page_w, box_top, box_bottom, semantic_role):
+    """Decide whether a scene unit is a page-centred title and, if so, return the
+    page-SYMMETRIC placement box so "center" alignment lands on the PAGE midline.
+
+    Pure geometry, book-agnostic, no PyMuPDF object required (so it is unit-testable
+    without a real page). This is the extracted core of the page-centred-title fix
+    (the "63px-left subtitle" bug, vault 2026-10-07): the alignment inference mis-tags a
+    short centred title as "left" because its ink box is narrow and sits where the glyphs
+    were, which left the translated subtitle off-centre. We instead detect page-centring
+    from SOURCE GEOMETRY and build a symmetric box around the midline.
+
+    Args:
+        src_bbox:      (x0, y0, x1, y1) of the source unit's ink box.
+        page_w:        page width in points.
+        box_top/bottom: vertical extent to preserve for the returned box.
+        semantic_role: the unit's role string (case-insensitive).
+
+    Returns:
+        (is_centered: bool, box: (x0, top, x1, bottom) | None)
+        box is None when the unit is NOT a page-centred title (caller keeps its box).
+    """
+    role = (semantic_role or "").lower()
+    if role not in _PAGE_CENTRED_ROLES:
+        return False, None
+    src_cx = (src_bbox[0] + src_bbox[2]) / 2.0
+    if abs(src_cx - page_w / 2.0) > page_w * _PAGE_CENTRE_TOLERANCE:
+        return False, None
+    half = min(page_w / 2.0 - 20.0,
+               max((src_bbox[2] - src_bbox[0]) / 2.0 + 40.0, 120.0))
+    return True, (page_w / 2.0 - half, box_top, page_w / 2.0 + half, box_bottom)
+
+
 def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_dir,
                                    page_num, report, page_spans=None,
                                    typography_policy=None, language=None):
@@ -1829,22 +1870,17 @@ def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_di
         box = pymupdf.Rect(bx0, box_top, bx1, box_bottom) & page.rect
 
         # PAGE-CENTRED TITLE FIX: a unit whose SOURCE line was centred on the page must
-        # centre on the PAGE midline. We detect this from SOURCE GEOMETRY (bbox centre ≈
-        # page centre) rather than trusting the scene's align_h — the alignment inference
-        # mis-tags a short centred title as "left" (its ink box is narrow and sits where
-        # the glyphs were), which left the translated subtitle off-centre. When the source
-        # is page-centred we force center alignment AND a page-symmetric box so "center"
-        # lands on the page midline. Book-agnostic: pure geometry, no per-title constants.
+        # centre on the PAGE midline (not its own narrow ink box). Detected from SOURCE
+        # GEOMETRY via the pure, unit-tested page_centered_title_box() helper. When the
+        # source is page-centred we force center alignment AND a page-symmetric box so
+        # "center" lands on the page midline. Book-agnostic: pure geometry, no constants.
         page_w = page.rect.width
-        src_cx = (u.bbox[0] + u.bbox[2]) / 2.0
-        role_for_center = (getattr(u, "semantic_role", "") or "").lower()
-        is_titleish = role_for_center in ("book_title", "subtitle", "heading", "label")
-        if is_titleish and abs(src_cx - page_w / 2.0) <= page_w * 0.08:
+        _is_centered, _centered_box = page_centered_title_box(
+            u.bbox, page_w, box_top, box_bottom,
+            getattr(u, "semantic_role", ""))
+        if _is_centered:
             align = "center"
-            half = min(page_w / 2.0 - 20.0,
-                       max((u.bbox[2] - u.bbox[0]) / 2.0 + 40.0, 120.0))
-            box = pymupdf.Rect(page_w / 2.0 - half, box_top,
-                               page_w / 2.0 + half, box_bottom) & page.rect
+            box = pymupdf.Rect(*_centered_box) & page.rect
 
         # FONT POLICY (spec Req 4): resolve this unit's font through the ONE shared
         # role-based resolver — honouring any per-book/edition/role/unit policy — instead
@@ -3110,7 +3146,24 @@ def render_cover_page_v8(page, page_spans, translations_map, fonts_dir, page_num
 # BACK COVER — Replace title list
 # =============================================================================
 
-def render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num, report):
+def line_step_for_metrics(shared_size, ascender, descender):
+    """Minimum vertical step (points) between stacked lines for a given font size and
+    the font's real glyph metrics, so a TALL substitute face (e.g. Playwrite ZA, whose
+    ascenders/descenders exceed the source rhythm) does not overlap the next line
+    (vault 2026-10-07 back-cover follow-up).
+
+    Pure + book-agnostic (no PyMuPDF object, no per-title constant), so it is unit-
+    testable. Mirrors the inline guard: at least 1.3x the size, or (ascender+descender)
+    x1.05, whichever is larger. ascender/descender are font-unit ratios (0..~1.5);
+    out-of-range or unreadable values fall back to safe defaults (0.8 / 0.3).
+    """
+    asc = ascender if (isinstance(ascender, (int, float)) and 0 < ascender <= 1.5) else 0.8
+    desc = abs(descender) if (isinstance(descender, (int, float)) and 0 < abs(descender) <= 1.0) else 0.3
+    return shared_size * max(1.3, (asc + desc) * 1.05)
+
+
+def render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num, report,
+                         typography_policy=None):
     """
     V8 back cover: mask original text against the TRUE page background, then
     render the translated series-title list as stacked lines (one entry per row),
@@ -3187,8 +3240,12 @@ def render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num
     line_size = round(src_size)
     # FONT POLICY: resolve through the ONE shared role-based resolver so retired-font
     # aliases + per-book policy apply here too (not just the generic path). The back
-    # cover is a series-title list, role 'label'. Falls back to the house picker only
-    # if the policy yields nothing. Uses the dominant SOURCE font name of the content.
+    # cover is a series-title list → role 'book_title' (the TITLE bucket), so it gets the
+    # book's title font, not the body font. The book's typography_policy is threaded in
+    # (previously hardcoded None here, which silently discarded a configured back-cover
+    # font and resolved off the source font name instead — "wrong font on the back
+    # cover", Captain Zan 2026-10-10). Falls back to the house picker only if the policy
+    # + source yield nothing. Uses the dominant SOURCE font name of the content.
     font_file = None
     try:
         from font_policy import resolve_role_font
@@ -3196,13 +3253,13 @@ def render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num
         _src_names = [s.get("font_name", "") for s in content_spans if s.get("font_name")]
         _dom = _Counter(_src_names).most_common(1)[0][0] if _src_names else None
         _spec = resolve_role_font(
-            role="label", fonts_dir=fonts_dir, typography_policy=None,
+            role="book_title", fonts_dir=fonts_dir, typography_policy=typography_policy,
             source_font=_dom, is_bold=(_source_weight(content_spans) == "bold"))
         font_file = _spec.get("fontFile")
         report.setdefault("font_policy", {}).setdefault(str(page_num), []).append({
-            "id": "back_cover", "role": "label", "resolvedBy": _spec.get("resolvedBy"),
+            "id": "back_cover", "role": "book_title", "resolvedBy": _spec.get("resolvedBy"),
             "family": _spec.get("resolvedFamily"), "approved": _spec.get("approved"),
-            "aliasFrom": _spec.get("aliasFrom"),
+            "policyChoice": _spec.get("policyChoice"), "aliasFrom": _spec.get("aliasFrom"),
         })
     except Exception:
         font_file = None
@@ -3250,7 +3307,7 @@ def render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num
         _desc = abs(_probe.descender) if (0 < abs(getattr(_probe, "descender", 0)) <= 1.0) else 0.3
     except Exception:
         _asc, _desc = 0.8, 0.3
-    min_step = shared_size * max(1.3, (_asc + _desc) * 1.05)
+    min_step = line_step_for_metrics(shared_size, _asc, _desc)
     if len(row_tops) >= 2:
         tight = any((row_tops[i + 1] - row_tops[i]) < min_step for i in range(len(row_tops) - 1))
         if tight:
@@ -4660,7 +4717,8 @@ def replace_text_in_pdf(input_pdf, output_pdf, translations, fonts_dir=None, onl
                                           allow_legacy_flat=allow_legacy_flat,
                                           page_scene=page_scene_obj)
         elif page_type == 'back_cover':
-            render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num, report)
+            render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num, report,
+                                 typography_policy=typography_policy)
         elif page_type == 'copyright':
             # BOOK-AGNOSTIC scene-driven placement: the copyright page's scene units each
             # carry their OWN detected bbox (publisher lines, ISBN, ©, www, email at their
