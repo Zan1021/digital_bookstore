@@ -15,6 +15,11 @@ class BookManager extends Component
     public Book $book;
     public string $selectedLanguage = '';
     public string $selectedVoice = '';
+
+    // Auto-open-review (2026-10-10): the edition we just dispatched a translation for, so
+    // pollTranslationStatus() can redirect to its review queue once it finishes.
+    public ?int $watchEditionId = null;
+    public ?string $watchLanguage = null;
     public array $availableVoices = [];
     public bool $translating = false;
     public bool $narrating = false;
@@ -94,9 +99,47 @@ class BookManager extends Component
             \App\Jobs\TranslateEditionJob::dispatch($edition->id);
         }
 
+        // Remember the edition we just kicked off so pollTranslationStatus() can auto-open
+        // the review page for THIS edition once it finishes (Captain Zan, 2026-10-10).
+        $this->watchEditionId = $edition->id;
+        $this->watchLanguage = $this->selectedLanguage;
+
         $this->book->refresh()->load(['translations.translatedPages']);
         $this->selectedLanguage = '';
-        session()->flash('success', "{$langName} translation queued. This page updates as it progresses.");
+        session()->flash('success', "{$langName} translation queued. This page updates as it progresses — it'll open the review page when done.");
+    }
+
+    /**
+     * Poll hook (G: auto-open review). While a translation we started is in flight, the view
+     * polls this. When the watched edition settles into a review-ready state
+     * (READY_FOR_REVIEW / NEEDS_LAYOUT_REVIEW), redirect to its review queue so the publisher
+     * lands on the compare page automatically. A failed edition stays put (shown in place).
+     */
+    public function pollTranslationStatus()
+    {
+        if (!$this->watchEditionId) {
+            return null;
+        }
+        $edition = Translation::find($this->watchEditionId);
+        if (!$edition) {
+            $this->watchEditionId = null;
+            return null;
+        }
+        $reviewReady = in_array($edition->render_status, [
+            Translation::STATE_READY_FOR_REVIEW,
+            Translation::STATE_NEEDS_LAYOUT_REVIEW,
+        ], true);
+        if ($reviewReady) {
+            $lang = $this->watchLanguage ?: $edition->language_code;
+            $this->watchEditionId = null;
+            $this->watchLanguage = null;
+            return $this->redirect(route('admin.review-queue', [
+                'book' => $this->book->id, 'language' => $lang,
+            ]), navigate: true);
+        }
+        // Still processing (or failed → stay here). Refresh so the UI reflects progress.
+        $this->book->refresh()->load(['translations.translatedPages']);
+        return null;
     }
 
     /**

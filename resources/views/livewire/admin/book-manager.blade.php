@@ -5,6 +5,16 @@
             {{ session('success') }}
         </div>
     @endif
+
+    {{-- Auto-open review (2026-10-10): while a translation we started is in flight, poll for
+         completion; pollTranslationStatus redirects to the review queue when it's ready. --}}
+    @if($watchEditionId)
+        <div wire:poll.3s="pollTranslationStatus"
+             class="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-700 flex items-center gap-2">
+            <span class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></span>
+            Translating… this page will open the review screen automatically when it's done.
+        </div>
+    @endif
     @if(session('error'))
         <div class="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
             {{ session('error') }}

@@ -1375,7 +1375,76 @@ class PdfTranslationService
             @unlink($policyPath);
         }
 
+        // Generate the side-by-side comparison images the ReviewQueue displays (source vs
+        // translated, per page). Previously lost in the engine overhaul — ReviewQueue read
+        // books/comparison/.../*.png but nothing produced them, so the review panels were
+        // blank. Fail-safe: never let image generation break a successful render.
+        try {
+            $this->generateComparisonImages($book, $translation);
+        } catch (\Throwable $e) {
+            Log::warning('Comparison image generation failed (non-fatal)', [
+                'book' => $book->id, 'language' => $translation->language_code,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
         return $finalRel;
+    }
+
+    /**
+     * Render each page of the SOURCE and TRANSLATED PDFs to the comparison PNGs the
+     * ReviewQueue displays, at the exact paths it reads:
+     *   books/comparison/{bookId}_{lang}/source/source_%03d.png
+     *   books/comparison/{bookId}_{lang}/translated/translated_%03d.png
+     * Book-agnostic, deterministic (PyMuPDF pixmaps, no AI). Overwrites prior renders so a
+     * re-render refreshes the panels. Non-fatal on any single-page failure.
+     */
+    private function generateComparisonImages(Book $book, Translation $translation): void
+    {
+        $disk = Storage::disk('public');
+        $sourceAbs = $disk->path($book->pdf_path);
+        $translatedRel = $translation->rendered_pdf_path
+            ?? "books/translated/{$book->id}_{$translation->language_code}.pdf";
+        $translatedAbs = $disk->path($translatedRel);
+        if (!is_file($sourceAbs) || !is_file($translatedAbs)) {
+            Log::info('Comparison skipped: a PDF is missing', [
+                'source' => $sourceAbs, 'translated' => $translatedAbs,
+            ]);
+            return;
+        }
+
+        $outDir = $disk->path("books/comparison/{$book->id}_{$translation->language_code}");
+        // Fresh regeneration — clear stale panels first.
+        $disk->deleteDirectory("books/comparison/{$book->id}_{$translation->language_code}");
+        @mkdir("{$outDir}/source", 0755, true);
+        @mkdir("{$outDir}/translated", 0755, true);
+
+        // One Python call renders BOTH PDFs' pages at a review-friendly scale (110dpi).
+        $py = <<<'PYCODE'
+import sys, pymupdf
+src, trans, out = sys.argv[1], sys.argv[2], sys.argv[3]
+zoom = 110.0 / 72.0
+mat = pymupdf.Matrix(zoom, zoom)
+for label, path in (("source", src), ("translated", trans)):
+    try:
+        doc = pymupdf.open(path)
+    except Exception:
+        continue
+    for i in range(doc.page_count):
+        try:
+            pix = doc[i].get_pixmap(matrix=mat, alpha=False)
+            pix.save(f"{out}/{label}/{label}_{i+1:03d}.png")
+        except Exception:
+            pass
+    doc.close()
+print("ok")
+PYCODE;
+        $proc = new Process(['python', '-c', $py, $sourceAbs, $translatedAbs, $outDir]);
+        $proc->setTimeout(300);
+        $proc->run();
+        if (!$proc->isSuccessful()) {
+            Log::warning('Comparison image render failed', ['stderr' => $proc->getErrorOutput()]);
+        }
     }
 
     /**
