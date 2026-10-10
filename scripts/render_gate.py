@@ -238,6 +238,33 @@ def _horizontal_gridlines_and_verticals(page):
     return horizontals, verticals
 
 
+# A vertical segment counts as a TABLE/COLUMN divider (for the border-intersection
+# check) only when it is a REAL grid line, not a glyph stroke fragment or a decorative
+# page frame. The discriminator is LENGTH: a column divider spans multiple rows, so it
+# is long (>= _GRID_MIN_VLEN); glyph strokes inside baked artwork are only a few points
+# tall. (The genuine vocabulary-grid dividers are 76-537pt; the artwork-title strokes
+# that caused false positives are <20pt.)
+_GRID_MIN_VLEN = 50.0   # pts; a real column divider spans multiple rows (>=50pt). Glyph
+                        # strokes inside baked artwork are <20pt; this cleanly excludes them
+                        # while keeping true table dividers (p15: 76-537pt) and plain borders.
+_GRID_JOIN_TOL = 3.0    # pts; how close a crossing horizontal must come to the vertical
+
+
+def _table_grid_verticals(horizontals, verticals):
+    """Filter detected verticals down to genuine table/column dividers.
+
+    Book-agnostic, pure geometry: a real column divider spans multiple text rows, so it
+    is a SUBSTANTIAL vertical line (>= _GRID_MIN_VLEN). The spurious verticals that caused
+    false `tableBorderIntersections` failures on baked-artwork pages (a decorative cover
+    title crossing a letter's own vertical stroke) are short glyph-stroke fragments
+    (<20pt) emitted by the drawing extractor — well under the threshold. Real tables
+    (e.g. the vocabulary grid) keep their 76-537pt dividers; a plain page border is long
+    too and is handled by the separate page-boundary check, not treated as a column.
+    `horizontals` is unused now but kept in the signature for callers/future mesh logic."""
+    return [(vx, vy0, vy1) for (vx, vy0, vy1) in verticals
+            if (vy1 - vy0) >= _GRID_MIN_VLEN]
+
+
 def _word_crosses_vertical(word, verticals):
     """A word crosses a vertical grid line if the line's x is strictly inside the
     word's x-span and the line's y-range overlaps the word's y-span."""
@@ -580,8 +607,11 @@ def validate_page(page, page_type, expected_text=""):
             })
             break
 
-    # 2. Table border intersection (glyph crosses a vertical grid line).
-    _, verticals = _horizontal_gridlines_and_verticals(page)
+    # 2. Table border intersection (glyph crosses a vertical grid line). Only genuine
+    # table/column dividers count — glyph-stroke fragments from baked artwork and
+    # decorative page-frame edges are filtered out (they are not column boundaries).
+    horizontals, verticals = _horizontal_gridlines_and_verticals(page)
+    verticals = _table_grid_verticals(horizontals, verticals)
     if verticals:
         for w in words:
             vx = _word_crosses_vertical(w, verticals)

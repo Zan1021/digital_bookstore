@@ -80,6 +80,30 @@ def test_border_crossing_flagged():
           any(f["constraint"] == "tableBorderIntersections" for f in res["failures"]))
 
 
+def test_short_glyph_stroke_not_treated_as_grid_line():
+    """A SHORT vertical segment (a glyph stroke inside baked artwork, not a table
+    divider) must NOT trigger a tableBorderIntersections failure when a large display
+    title overlaps it. Regression for the Colours cover-title "Kleure crosses vertical
+    grid line" false positive: the extractor emits <20pt vertical strokes from the
+    decorative letters; only substantial (>=50pt) verticals are real column dividers."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=200)
+    # Short vertical strokes (12pt) like glyph fragments — well under the divider length.
+    page.draw_line(pymupdf.Point(150, 92), pymupdf.Point(150, 104), width=1)
+    page.draw_line(pymupdf.Point(170, 90), pymupdf.Point(170, 106), width=1)
+    ff = _font()
+    # A big display title spanning across those strokes.
+    if ff:
+        page.insert_text(pymupdf.Point(110, 100), "Kleure", fontsize=36,
+                         fontname="F0", fontfile=ff)
+    else:
+        page.insert_text(pymupdf.Point(110, 100), "Kleure", fontsize=36)
+    res = validate_page(page, "cover", expected_text="Kleure")
+    doc.close()
+    check("short glyph-stroke vertical is NOT a grid line",
+          not any(f["constraint"] == "tableBorderIntersections" for f in res["failures"]))
+
+
 def test_missing_content_flagged():
     """Expected translation but empty page must be flagged (missingContent)."""
     doc = pymupdf.open()
@@ -405,6 +429,7 @@ if __name__ == "__main__":
     test_clean_page_passes()
     test_word_past_edge_flagged()
     test_border_crossing_flagged()
+    test_short_glyph_stroke_not_treated_as_grid_line()
     test_missing_content_flagged()
     test_overprint_flagged_on_non_vocabulary_page()
     test_normal_two_line_prose_not_flagged()

@@ -683,6 +683,113 @@ def _merge_continuation_spans(spans, page_type):
     return out
 
 
+def _merge_display_glyph_runs(spans, page_type):
+    """Merge a horizontal run of single-letter display spans on ONE baseline into a
+    single word span (e.g. a cover title set as "C","o","l","o","u","r","s" → "Colours").
+
+    Why: a decorative title split one-span-per-letter makes each letter its OWN
+    translation unit. A lone letter has no translatable meaning, so the translator
+    returns noise and the title renders mangled. Reassembling the word lets it translate
+    and place as a single unit.
+
+    Book-agnostic + conservative. A set of spans is merged only when ALL hold:
+      - page is a title-bearing type (cover / back_cover / copyright);
+      - they share a baseline (top within a small tolerance of the run's) AND the same
+        font size (within 5%) AND the same font;
+      - they are left-to-right ABUTTING (next.x0 is within a glyph-width-scaled gap of
+        prev.x1) — a real inter-letter advance, not two separate words far apart;
+      - the run has >= 2 members and at least one single-character fragment (so normal
+        multi-char word spans are never merged);
+      - the font is DISPLAY-sized (>= 24pt) — body text is already span-per-word.
+    A larger horizontal gap inside an otherwise-contiguous run inserts a SPACE (word
+    break), so "A B" style titles keep their spaces. Spans that don't qualify pass
+    through untouched.
+    """
+    if not spans or page_type not in ("cover", "back_cover", "copyright"):
+        return spans
+
+    DISPLAY_MIN = 24.0
+
+    def _alnum(s):
+        return any(ch.isalnum() for ch in (s.get("text_stripped", "") or ""))
+
+    # Candidate display spans: large font, carries a real character.
+    cands = [s for s in spans
+             if s.get("font_size", 0) >= DISPLAY_MIN and _alnum(s)
+             and not s.get("is_page_number")]
+    others = [s for s in spans if s not in cands]
+    if len(cands) < 2:
+        return spans
+
+    # Group candidates into baseline rows: same top (within tol) + same size + font.
+    rows = []
+    for s in sorted(cands, key=lambda z: (round(z["bbox"][1]), z["bbox"][0])):
+        h = max(1.0, s["bbox"][3] - s["bbox"][1])
+        placed = False
+        for r in rows:
+            rh = max(1.0, r["h"])
+            same_base = abs(s["bbox"][1] - r["y0"]) <= 0.25 * rh
+            same_size = abs(s["font_size"] - r["size"]) <= 0.05 * r["size"]
+            same_font = (s.get("font_name") or "") == r["font"]
+            if same_base and same_size and same_font:
+                r["spans"].append(s)
+                placed = True
+                break
+        if not placed:
+            rows.append({"y0": s["bbox"][1], "h": h, "size": s["font_size"],
+                         "font": s.get("font_name") or "", "spans": [s]})
+
+    merged_out = []
+    changed = False
+    for r in rows:
+        row_spans = sorted(r["spans"], key=lambda z: z["bbox"][0])
+        # Only merge rows that actually contain a single-char fragment (the split-title
+        # signature). A row of already-whole words is left alone.
+        if not any(len((s.get("text_stripped") or "").strip()) == 1 for s in row_spans):
+            merged_out.extend(row_spans)
+            continue
+
+        acc = None
+        for s in row_spans:
+            if acc is None:
+                acc = dict(s)
+                acc["text_stripped"] = (s.get("text_stripped") or "")
+                acc["bbox"] = list(s["bbox"])
+                continue
+            prev_x1 = acc["bbox"][2]
+            gap = s["bbox"][0] - prev_x1
+            glyph_h = max(1.0, acc["bbox"][3] - acc["bbox"][1])
+            # Abutting if the gap is a normal inter-letter advance; a bigger (but still
+            # same-row) gap is a word break → join with a space; a huge gap breaks run.
+            if gap <= 0.35 * glyph_h:
+                sep = ""
+            elif gap <= 1.2 * glyph_h:
+                sep = " "
+            else:
+                # Too far apart: close the current word, start a new one.
+                merged_out.append(acc)
+                acc = dict(s)
+                acc["text_stripped"] = (s.get("text_stripped") or "")
+                acc["bbox"] = list(s["bbox"])
+                continue
+            acc["text_stripped"] = (acc["text_stripped"] + sep + (s.get("text_stripped") or ""))
+            acc["text"] = acc["text_stripped"]
+            acc["bbox"] = [min(acc["bbox"][0], s["bbox"][0]),
+                           min(acc["bbox"][1], s["bbox"][1]),
+                           max(acc["bbox"][2], s["bbox"][2]),
+                           max(acc["bbox"][3], s["bbox"][3])]
+            changed = True
+        if acc is not None:
+            acc["text"] = acc.get("text_stripped", acc.get("text", ""))
+            merged_out.append(acc)
+
+    if not changed:
+        return spans
+
+    out = sorted(others + merged_out, key=lambda z: (round(z["bbox"][1] / 2), z["bbox"][0]))
+    return out
+
+
 def _infer_align_h(source_box, cell_box, tol_frac=0.12):
     """Infer horizontal alignment of source text within its cell from glyph geometry
     (spec Req 3.2: mirror the source, don't impose). Book-agnostic."""
@@ -968,6 +1075,16 @@ def _build_page_scene(page, page_num: int, total_pages: int) -> PageScene:
     # single logical span so a unit reflects the logical entry, not the line break.
     # Book-agnostic: pure geometry + content-shape heuristics, no per-title constants.
     spans = _merge_continuation_spans(spans, page_type)
+    page_type = classify_page(spans, page_num, total_pages)
+
+    # DISPLAY GLYPH-RUN MERGE (§8.1): some covers/titles set a decorative word as ONE
+    # SPAN PER LETTER on a single baseline (e.g. "C","o","l","o","u","r","s"). Left as
+    # separate units each letter is sent to the translator ALONE — a single char has no
+    # translatable meaning, so the model returns garbage and the title renders mangled
+    # ("K l  es"). Merge a horizontal run of adjacent same-baseline, same-size letter
+    # fragments back into ONE word span so it translates + places as a unit. Book-
+    # agnostic: pure geometry (baseline + abutting x), only on title-bearing page types.
+    spans = _merge_display_glyph_runs(spans, page_type)
     page_type = classify_page(spans, page_num, total_pages)
 
     # Flag a document end-marker (e.g. "The End"/"Die Einde") as its own element so it

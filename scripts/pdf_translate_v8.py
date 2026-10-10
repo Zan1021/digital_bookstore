@@ -1751,6 +1751,180 @@ def page_centered_title_box(src_bbox, page_w, box_top, box_bottom, semantic_role
     return True, (page_w / 2.0 - half, box_top, page_w / 2.0 + half, box_bottom)
 
 
+def _merge_paragraph_units(placeable, resolved):
+    """Collapse continuation-line units that share a `paragraph_id` into ONE logical
+    paragraph unit, so the generic placer draws the whole paragraph with a single flowing
+    `draw_paragraph_text` call inside the shared layout_container (instead of placing each
+    source line at its own y, which makes a longer translated upper line collide into the
+    box of the line below — the My House p2 bio "self." overlap).
+
+    Book-agnostic:
+      * Grouping key is the scene builder's `paragraph_id`. Units with no paragraph_id (or
+        a group of one) are returned UNCHANGED — single lines/labels/titles keep today's
+        exact per-unit behaviour.
+      * A merged group's translation is the member translations concatenated in
+        `reading_order` (fallback: top-to-bottom by bbox) with single spaces.
+      * The merged unit inherits identity/role/alignment from the TOP member and uses the
+        shared `layout_container`/`safe_box` as its box; its `bbox` is the UNION of member
+        ink boxes (so the placer's box_top/box_bottom span the whole paragraph).
+      * `redaction_bboxes` carries EVERY member's source box so PASS 2 erases them all.
+      * `resolved[merged.id]` is set to the concatenated text so the existing
+        `resolved.get(u.id)` lookups keep working downstream.
+    """
+    groups = {}
+    order = []
+    for u in placeable:
+        pid = getattr(u, "paragraph_id", None)
+        key = pid if pid else f"__solo__{id(u)}"
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(u)
+
+    out = []
+    for key in order:
+        members = groups[key]
+        if len(members) == 1:
+            out.append(members[0])
+            continue
+
+        # Order members by the source reading order, falling back to geometry.
+        members_sorted = sorted(
+            members,
+            key=lambda m: (getattr(m, "reading_order", 0) or 0,
+                           round(m.bbox[1]), m.bbox[0]))
+
+        # A shared paragraph_id is necessary but NOT sufficient to merge: the scene's
+        # block-splitter also groups a STACK of independent short entries (publisher
+        # name, PO box, ISBN, email, the legal notice) under one id. Concatenating those
+        # into one flowing paragraph produces a blob that cannot fit the block's box, so
+        # the fit fails and the SOURCE (untranslated English) is kept — the p2 copyright
+        # "wrong font / still English" regression. So split the group into RUNS of lines
+        # that genuinely form one wrapping paragraph, and merge only those runs. A lone
+        # line (or a non-continuing entry) stays a solo unit = today's per-line behaviour.
+        runs = _split_into_prose_runs(members_sorted, resolved)
+        for run in runs:
+            if len(run) == 1:
+                out.append(run[0])
+                continue
+            parts = [str(resolved.get(m.id)).strip()
+                     for m in run if resolved.get(m.id) and str(resolved.get(m.id)).strip()]
+            merged_text = " ".join(parts).strip()
+            if not merged_text:
+                out.extend(run)
+                continue
+            head = run[0]
+            union_bbox = (
+                min(m.bbox[0] for m in run),
+                min(m.bbox[1] for m in run),
+                max(m.bbox[2] for m in run),
+                max(m.bbox[3] for m in run),
+            )
+            merged = _MergedParagraphUnit(head, union_bbox,
+                                          [tuple(m.bbox) for m in run],
+                                          merged_text)
+            resolved[merged.id] = merged_text
+            out.append(merged)
+
+    # Keep the stable top-to-bottom placement order the caller relied on.
+    out.sort(key=lambda u: (round(u.bbox[1]), u.bbox[0]))
+    return out
+
+
+def _split_into_prose_runs(members_sorted, resolved):
+    """Split paragraph-id members into maximal RUNS that form ONE continuous wrapping
+    paragraph. The scene builder ALREADY merges genuine multi-line prose into a single
+    TALL unit (e.g. the bio bulk, the legal-notice block) and deliberately leaves a
+    stack of distinct short FIELDS (publisher name, PO box, ISBN, email, "Story by: …")
+    as separate single-line units. We honour that decision:
+
+      * Start a run from each member. Append the NEXT member to the current run only when
+        it is a genuine continuation of a MULTI-LINE prose unit — i.e. the current run's
+        last member is already multi-line (its source spanned >1 line) OR ends with an
+        open clause connector (a comma), AND the next member is its tight, same-column
+        trailing fragment (the "themselves." / "self." wrap word that scene-build placed
+        as its own unit).
+      * A single-line field followed by another single-line field (the publisher/ISBN/
+        email stack) is NEVER merged — each stays a solo unit = exact pre-fix placement.
+
+    Book-agnostic: pure geometry (line height + gap + column) + punctuation shape, no
+    per-book constants. Conservative: anything ambiguous stays its own run."""
+    def _src(m):
+        return (getattr(m, "source_text", "") or "").strip()
+
+    def _single_line_h(m):
+        # The source single-line height for this font (the merged tall units carry the
+        # paragraph height, so derive the unit line height from the shortest member).
+        return min((x.bbox[3] - x.bbox[1]) for x in members_sorted if x.bbox[3] > x.bbox[1])
+
+    base_line_h = _single_line_h(members_sorted) if members_sorted else 10.0
+
+    def _is_multiline(m):
+        # A unit whose source box is clearly taller than one line = pre-merged prose.
+        return (m.bbox[3] - m.bbox[1]) > base_line_h * 1.8
+
+    def _continues(a, b):
+        at, bt = _src(a), _src(b)
+        if not at or not bt:
+            return False
+        # Only a MULTI-LINE prose unit (or a clause left open by a trailing comma) can
+        # absorb a following fragment. A standalone single-line field never continues.
+        upper_is_prose = _is_multiline(a) or at.endswith(",")
+        if not upper_is_prose:
+            return False
+        # The upper line must not be a terminated sentence or a labelled/url field.
+        if at[-1] in ".!?:;":
+            return False
+        import re as _re
+        if _re.search(r"https?://|www\.|@|\bISBN\b", at):
+            return False
+        # Tight, same-column stacking (a wrap, not a blank-line separation).
+        a_h = max(1.0, b.bbox[1] - a.bbox[1])  # top-to-top within the block
+        vgap = b.bbox[1] - a.bbox[3]
+        line_h = max(base_line_h, b.bbox[3] - b.bbox[1])
+        if not (-1.0 * line_h <= vgap <= 0.9 * line_h):
+            return False
+        if abs(a.bbox[0] - b.bbox[0]) > max(6.0, base_line_h * 0.9):
+            return False
+        return True
+
+    runs = []
+    cur = [members_sorted[0]]
+    for prev, nxt in zip(members_sorted, members_sorted[1:]):
+        if _continues(cur[-1], nxt):
+            cur.append(nxt)
+        else:
+            runs.append(cur)
+            cur = [nxt]
+    runs.append(cur)
+    return runs
+
+
+class _MergedParagraphUnit:
+    """Lightweight stand-in for a group of paragraph continuation-line units merged into
+    one logical paragraph. Mirrors the TextUnit attributes the generic placer reads, so
+    the placement/fit/draw passes work unchanged. Geometry comes from the shared
+    layout_container; `redaction_bboxes` lists every member's source box to erase."""
+
+    __slots__ = ("id", "bbox", "redaction_bboxes", "source_text", "semantic_role",
+                 "align_h", "safe_box", "layout_container", "translation_policy",
+                 "reading_order", "paragraph_id")
+
+    def __init__(self, head, union_bbox, member_bboxes, merged_text):
+        self.id = head.id  # inherit the top line's stable id (keeps contract lookups valid)
+        self.bbox = union_bbox
+        self.redaction_bboxes = member_bboxes
+        self.source_text = merged_text
+        self.semantic_role = getattr(head, "semantic_role", "")
+        self.align_h = getattr(head, "align_h", None)
+        # Shared container drives the placement box: the paragraph flows within it.
+        self.safe_box = getattr(head, "safe_box", None)
+        self.layout_container = getattr(head, "layout_container", None)
+        self.translation_policy = getattr(head, "translation_policy", "translate")
+        self.reading_order = getattr(head, "reading_order", 0)
+        self.paragraph_id = getattr(head, "paragraph_id", None)
+
+
 def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_dir,
                                    page_num, report, page_spans=None,
                                    typography_policy=None, language=None):
@@ -1841,6 +2015,17 @@ def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_di
 
     placeable = [u for u in units if resolved.get(u.id)]
     placeable.sort(key=lambda u: (round(u.bbox[1]), u.bbox[0]))
+
+    # --- PASS 0: MERGE CONTINUATION LINES OF ONE PARAGRAPH (spec Req 2). ---------------
+    # The scene builder splits a source paragraph into one TextUnit per source LINE and
+    # groups them under a shared `paragraph_id` + shared `layout_container`. Placing each
+    # line-unit at its OWN source y is wrong once translated: a longer target line in an
+    # UPPER unit flows down into the box of the LOWER unit, so the two collide (the My
+    # House p2 bio "self." overlap). The paragraph is ONE logical block — render it with a
+    # SINGLE flowing draw inside the shared container so all wrapped lines step evenly and
+    # the whole block shrinks-to-fit together. Book-agnostic: driven purely by the
+    # paragraph_id/layout_container the scene builder already assigns.
+    placeable = _merge_paragraph_units(placeable, resolved)
 
     # --- PASS 1: build a placement plan per unit and solve fit (no mutation yet). ---
     plans = []  # {unit, box, size, color, align, font_file, tr, fits}
@@ -1972,12 +2157,14 @@ def render_page_from_scene_generic(page, page_scene, id_to_translation, fonts_di
                       "align": align, "font_file": font_file, "tr": tr, "fits": fits})
 
     # --- PASS 2: redact ONLY the units whose translation fits (FIT BEFORE ERASE,
-    # spec Req 3.2). A non-fitting unit keeps its SOURCE text and is flagged. ---
+    # spec Req 3.2). A non-fitting unit keeps its SOURCE text and is flagged. A MERGED
+    # paragraph erases EVERY member line's source box (redaction_bboxes), not just one. ---
     for p in plans:
         if p["fits"]:
-            rect = pymupdf.Rect(p["unit"].bbox)
-            if not (rect.is_empty or rect.is_infinite):
-                page.add_redact_annot(rect, fill=False)
+            for _bb in getattr(p["unit"], "redaction_bboxes", None) or [p["unit"].bbox]:
+                rect = pymupdf.Rect(_bb)
+                if not (rect.is_empty or rect.is_infinite):
+                    page.add_redact_annot(rect, fill=False)
     try:
         page.apply_redactions(images=getattr(pymupdf, "PDF_REDACT_IMAGE_NONE", 0),
                               graphics=getattr(pymupdf, "PDF_REDACT_LINE_ART_NONE", 0),
@@ -3309,10 +3496,29 @@ def render_back_cover_v8(page, page_spans, translations_map, fonts_dir, page_num
         _asc, _desc = 0.8, 0.3
     min_step = line_step_for_metrics(shared_size, _asc, _desc)
     if len(row_tops) >= 2:
-        tight = any((row_tops[i + 1] - row_tops[i]) < min_step for i in range(len(row_tops) - 1))
-        if tight:
-            top0 = row_tops[0]
-            row_tops = [top0 + i * min_step for i in range(len(row_tops))]
+        # Determine the SOURCE row rhythm (median gap between consecutive source tops).
+        gaps = [row_tops[i + 1] - row_tops[i] for i in range(len(row_tops) - 1)]
+        src_rhythm = sorted(gaps)[len(gaps) // 2] if gaps else min_step
+
+        # If the font's non-overlap min_step exceeds the source rhythm, stacking at the
+        # source tops would overlap, and re-stacking wider would DRIFT the list downward
+        # out of its block (Colours p16 "6 - Wilde Getalle" fell out of its cell). The
+        # book-agnostic fix is to SHRINK the whole list vertically so its min_step fits
+        # the source rhythm — then every row lands on its source top (no overlap, no
+        # drift, stays inside the source block). Mirrors the paragraph fit-ladder idea.
+        if min_step > src_rhythm + 0.5:
+            fit_size = shared_size
+            while fit_size > line_size * 0.5 and \
+                    line_step_for_metrics(fit_size, _asc, _desc) > src_rhythm + 0.5:
+                fit_size -= 0.5
+            shared_size = max(fit_size, line_size * 0.5)
+            min_step = line_step_for_metrics(shared_size, _asc, _desc)
+
+        # Residual safety: if any pair is STILL tighter than min_step (e.g. shrink hit the
+        # floor), nudge only that row down locally so glyphs never overlap.
+        for i in range(1, len(row_tops)):
+            if (row_tops[i] - row_tops[i - 1]) < min_step:
+                row_tops[i] = row_tops[i - 1] + min_step
 
     row_h = shared_size * 1.3
     drew_any = False

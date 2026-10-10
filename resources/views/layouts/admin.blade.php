@@ -27,7 +27,12 @@
             }
         }
     </script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+    {{-- NOTE: Do NOT load a standalone Alpine (e.g. the unpkg CDN build) here.
+         @livewireScripts (below) ships its OWN Alpine bundle INCLUDING the `navigate`
+         plugin. Loading a second Alpine wins `window.Alpine` first but lacks
+         `Alpine.navigate`, which made Livewire redirect()/wire:navigate throw
+         "Alpine.navigate is not a function" and silently killed the auto-open-review
+         redirect after a translation. Livewire's Alpine covers x-data / Alpine.data too. --}}
     @livewireStyles
 </head>
 <body class="bg-gray-50 min-h-screen">
