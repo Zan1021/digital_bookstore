@@ -1068,12 +1068,14 @@ def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num
         block_h = size * _story_line_factor * len(lines)
         return container_rect.height - block_h
 
-    def _largest_fitting_size():
+    def _largest_fitting_size(apply_floor=True):
         """Binary-search the largest size (<= source avg) that fits this container.
-        VISUAL PARITY FLOOR: never shrink below 0.8x the source size — a longer translation
-        that genuinely cannot fit at that floor is left at the floor (slightly tight leading)
-        rather than dropping to a size that no longer looks like the same book. The upward
-        box expansion above already granted maximum vertical room before this point."""
+        VISUAL PARITY FLOOR (render only): never shrink below 0.8x the source size, so a
+        longer translation never drops to a size that looks like a different book. The floor
+        is a RENDER concern — the book-wide consistency pre-pass (measure_only) must get the
+        TRUE largest-fitting size (apply_floor=False) so its cross-page min() is a size that
+        genuinely fits every page; applying the floor during measurement would inflate a
+        page's reported size and break page-to-page uniformity."""
         parity_floor = font_size * 0.8
         if _fits_at(font_size) >= 0:
             return font_size
@@ -1084,16 +1086,20 @@ def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num
                 low = mid
             else:
                 high = mid
-        return max(low, parity_floor)
+        return max(low, parity_floor) if apply_floor else low
 
-    # MEASURE-ONLY: return the largest size that fits, no rendering.
+    # MEASURE-ONLY: return the TRUE largest size that fits (no parity floor), so the
+    # book-wide consistency pass can pick a single size that fits every story page.
     if measure_only:
-        return _largest_fitting_size()
+        return _largest_fitting_size(apply_floor=False)
 
     # Choose the render size: a book-wide forced size (consistency) if given and it
-    # fits; otherwise this page's own largest fitting size.
+    # Choose render size. BOOK-WIDE CONSISTENCY: forced_size is the min TRUE-fitting size
+    # across all story pages (measured without the parity floor), so it fits every page and
+    # every story page renders at the SAME size — no page-to-page size drift. Use it directly;
+    # only fall back if it is wildly off (should not happen, guards against a bad measure).
     if forced_size is not None:
-        font_size = forced_size if _fits_at(forced_size) >= 0 else _largest_fitting_size()
+        font_size = forced_size if _fits_at(forced_size) >= -1.0 else _largest_fitting_size()
     else:
         font_size = _largest_fitting_size()
 
