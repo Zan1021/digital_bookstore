@@ -1,0 +1,5 @@
+# Phonics real-word validity assets are SHIPPED resources, not user data.
+# The parent storage/app/private/.gitignore ignores everything; re-include the
+# wordlist assets (and this file) so the gate works on a fresh checkout.
+!*.txt
+!.gitignore

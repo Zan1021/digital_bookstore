@@ -690,7 +690,7 @@ PROMPT;
         $result = $this->chatWithRetry(['messages' => $messages, 'temperature' => 0.3]);
 
         for ($pass = 0; $pass < 2; $pass++) {
-            $bad = $this->invalidPhonicsLines($result);
+            $bad = $this->invalidPhonicsLines($result, $langCode);
             if (empty($bad)) {
                 break;
             }
@@ -720,12 +720,13 @@ PROMPT;
      * word MUST literally contain the pattern (case-insensitive, spaces ignored).
      *
      * Returns a list of offending lines: [['line'=>..., 'pattern'=>..., 'bad_words'=>[...]]].
-     * Empty list == all phonics examples are valid. Book-agnostic — no language-specific
-     * assumptions, just substring containment.
+     * Empty list == all phonics examples are valid. Book-agnostic. Each example word must
+     * contain its taught pattern AND — when a wordlist asset exists for $langCode — be a
+     * real target-language word; with no asset the real-word half is skipped (substring only).
      *
      * @return array<int,array{line:string,pattern:string,bad_words:array<int,string>}>
      */
-    private function invalidPhonicsLines(string $translatedPage): array
+    private function invalidPhonicsLines(string $translatedPage, string $langCode = ''): array
     {
         // Normalise into logical phonics entries. Source phonics come in two shapes:
         //   (A) one line: "br - broek, breek"  OR  "- kk lekker, bakker"
@@ -780,6 +781,7 @@ PROMPT;
         }
 
         $offenders = [];
+        $checkRealWord = $langCode !== '' && PhonicsWordlist::hasWordlist($langCode);
         foreach ($entries as $e) {
             $pattern = mb_strtolower(str_replace(' ', '', $e['pattern']));
             if (mb_strlen($pattern) < 1 || mb_strlen($pattern) > 4) {
@@ -794,6 +796,8 @@ PROMPT;
                 }
                 if (mb_strpos($word, $pattern) === false) {
                     $badWords[] = trim($wordRaw);
+                } elseif ($checkRealWord && !PhonicsWordlist::isRealWord($word, $langCode)) {
+                    $badWords[] = trim($wordRaw); // contains the pattern but is not a real word
                 }
             }
             if (!empty($badWords)) {
@@ -1221,7 +1225,7 @@ PROMPT;
         for ($pass = 0; $pass < 2; $pass++) {
             $bad = [];
             foreach ($byId as $id => $text) {
-                if (!$this->phonicsRowIsValid($text)) {
+                if (!$this->phonicsRowIsValid($text, $langCode)) {
                     $bad[] = ['id' => $id, 'text' => $text];
                 }
             }
@@ -1231,16 +1235,25 @@ PROMPT;
             Log::warning("Phonics regeneration invalid; requesting correction", [
                 'page' => $pageNumber, 'pass' => $pass + 1, 'invalid' => array_column($bad, 'text'),
             ]);
+            // Explain WHY each row failed (patternless vs. not-a-real-word) so the model
+            // fixes the right thing instead of swapping one fake word for another.
+            $reasons = implode("\n", array_map(function ($b) use ($langCode) {
+                $r = $this->phonicsRowProblems($b['text'], $langCode);
+                return "  id {$b['id']}: \"{$b['text']}\" — {$r}";
+            }, $bad));
             try {
                 $fix = $this->chatWithRetry([
                     'messages' => [
                         ['role' => 'system', 'content' => $system],
                         ['role' => 'user', 'content' =>
-                            "These {$langName} phonics rows are INVALID: at least one example word does "
-                            . "NOT literally contain the pattern (the token before the first space/dash). "
+                            "These {$langName} phonics rows are INVALID. For each, every example word must "
+                            . "BOTH (a) literally contain the pattern (the token before the first space/dash) "
+                            . "AND (b) be a REAL, common {$langName} word (no invented or borrowed non-words). "
+                            . "Problems:\n{$reasons}\n\n"
                             . "Return ONLY a JSON array [{\"id\",\"translation\"}] for THESE ids, fixing each "
-                            . "so EVERY example word contains its pattern — replace the word, or pick a "
-                            . "different valid {$langName} pattern with real, common, age-appropriate words. "
+                            . "so every example word contains its pattern AND is a real {$langName} word — "
+                            . "replace the offending word, or pick a different valid {$langName} pattern with "
+                            . "real, common, age-appropriate words. "
                             . "Do NOT reuse the English pattern if {$langName} has no good words for it.\n\n"
                             . json_encode(array_map(
                                 fn ($b) => ['id' => $b['id'], 'text' => $b['text']],
@@ -1273,7 +1286,7 @@ PROMPT;
         foreach ($byId as $id => $text) {
             // Any row still invalid after the retries → flag the page for human review,
             // but keep the best text so the page is not left blank.
-            if (!$this->phonicsRowIsValid($text)) {
+            if (!$this->phonicsRowIsValid($text, $langCode)) {
                 $this->phonicsNeedsReview[] = $pageNumber;
             }
             $out[$id] = $text;
@@ -1283,11 +1296,22 @@ PROMPT;
 
 
     /**
-     * A phonics row "[- ] pattern w1, w2, ..." is valid when every example word contains
-     * the pattern (case-insensitive). Non-pattern rows (headings/instructions with no
-     * comma-separated example list) are accepted as-is. Deterministic, language-agnostic.
+     * A phonics row "[- ] pattern w1, w2, ..." is valid when every example word
+     *   (1) literally CONTAINS the taught pattern (case-insensitive), AND
+     *   (2) is a REAL word of the target language — but only when a wordlist asset
+     *       exists for that language (see {@see PhonicsWordlist}). When no list exists
+     *       the real-word check is skipped and validity falls back to the substring
+     *       rule alone, so no language is penalised for a missing asset.
+     *
+     * Non-pattern rows (headings/instructions with no example list) are accepted as-is.
+     * Deterministic and book-agnostic. $langCode is optional: omit it (or pass '') to
+     * run the substring-only check, which preserves the original behaviour.
+     *
+     * The real-word half closes the gap the substring check alone cannot: invented or
+     * borrowed words that happen to contain the pattern — e.g. "kraft"/"klipfisk" under
+     * "ft", or "priek" under "iek" — contain the substring yet are not real words.
      */
-    private function phonicsRowIsValid(string $text): bool
+    private function phonicsRowIsValid(string $text, string $langCode = ''): bool
     {
         $t = trim($text);
         // strip a leading bullet dash
@@ -1303,6 +1327,8 @@ PROMPT;
         if (count($words) < 1) {
             return true;
         }
+        // The real-word gate only runs if a wordlist asset exists for this language.
+        $checkRealWord = $langCode !== '' && PhonicsWordlist::hasWordlist($langCode);
         foreach ($words as $w) {
             $w = preg_replace('/[^\p{L}]/u', '', $w);
             if ($w === '') {
@@ -1311,8 +1337,48 @@ PROMPT;
             if (mb_strpos($w, $pattern) === false) {
                 return false; // an example word that doesn't contain the pattern = invalid
             }
+            if ($checkRealWord && !PhonicsWordlist::isRealWord($w, $langCode)) {
+                return false; // contains the pattern but is not a real target-language word
+            }
         }
         return true;
+    }
+
+    /**
+     * Human-readable explanation of why a phonics row fails validation, used to steer
+     * the correction prompt. Returns a short phrase naming the offending words and the
+     * reason (patternless vs. not-a-real-word). Mirrors {@see phonicsRowIsValid}'s rules.
+     */
+    private function phonicsRowProblems(string $text, string $langCode = ''): string
+    {
+        $t = preg_replace('/^\s*[-–—]\s*/u', '', trim($text));
+        if (!preg_match('/^(\S{1,5})\s+(.+)$/u', $t, $m)) {
+            return 'not a pattern row';
+        }
+        $pattern = mb_strtolower($m[1]);
+        $words = preg_split('/[,\s]+/u', mb_strtolower($m[2]), -1, PREG_SPLIT_NO_EMPTY);
+        $checkRealWord = $langCode !== '' && PhonicsWordlist::hasWordlist($langCode);
+        $noPattern = [];
+        $notWord = [];
+        foreach ($words as $w) {
+            $w = preg_replace('/[^\p{L}]/u', '', $w);
+            if ($w === '') {
+                continue;
+            }
+            if (mb_strpos($w, $pattern) === false) {
+                $noPattern[] = $w;
+            } elseif ($checkRealWord && !PhonicsWordlist::isRealWord($w, $langCode)) {
+                $notWord[] = $w;
+            }
+        }
+        $parts = [];
+        if ($noPattern) {
+            $parts[] = implode(', ', $noPattern) . " do not contain the pattern \"{$pattern}\"";
+        }
+        if ($notWord) {
+            $parts[] = implode(', ', $notWord) . ' are not real words';
+        }
+        return $parts ? implode('; ', $parts) : 'invalid';
     }
 
     /**

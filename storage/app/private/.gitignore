@@ -1,2 +1,5 @@
 *
 !.gitignore
+# Ship the phonics real-word wordlist assets (not user data). Re-include the
+# directory here so git descends into it and honours its own .gitignore.
+!phonics_wordlists/
