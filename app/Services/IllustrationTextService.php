@@ -75,11 +75,22 @@ class IllustrationTextService
             return [];
         }
         $ownedRegionsByPage = $this->contractOwnedRegions($book);
+        // PAGE-LEVEL OWNERSHIP (cover-collision fix): the cover + back-cover pages are
+        // rendered end-to-end by their OWN dedicated renderers (render_cover_page_v8 /
+        // render_back_cover_v8), which already place the translated title/subtitle and the
+        // series list. The artwork-inventory pass must NOT also claim text on those pages,
+        // or two subsystems draw the same strings and collide (the Colours cover: a second
+        // "MTHOMBOTHI STUDIOS"/"Kleure"/"®" stamped over the title). Skip them wholesale —
+        // book-agnostic, driven by the manifest's own page_type, no per-book constants.
+        $rendererOwnedPages = $this->rendererOwnedPages($book);
 
         $items = [];
         foreach ($candidates as $cand) {
             $pageIndex = (int) $cand['page'];
             $pageNumber = $pageIndex + 1;
+            if (in_array($pageNumber, $rendererOwnedPages, true)) {
+                continue; // cover / back_cover — owned by a dedicated renderer
+            }
             $ownedBoxes = $ownedRegionsByPage[$pageNumber] ?? [];
 
             // Prefer native text-layer geometry; fall back to vision only for baked pixels.
@@ -277,6 +288,38 @@ class IllustrationTextService
         }
 
         return $result;
+    }
+
+    /**
+     * Pages owned END-TO-END by a dedicated renderer (cover / back_cover), which already
+     * place the translated title/subtitle and series list. The artwork-inventory pass must
+     * skip these entirely so it does not emit a duplicate set of items for the same text
+     * and collide with the dedicated renderer's output. Page types come from the manifest
+     * (book-agnostic; no per-book constants). Returns a list of 1-based page numbers.
+     */
+    private function rendererOwnedPages(Book $book): array
+    {
+        try {
+            $disk = Storage::disk('public');
+            if (!$book->manifest_path || !$disk->exists($book->manifest_path)) {
+                return [];
+            }
+            $manifest = json_decode($disk->get($book->manifest_path), true) ?: [];
+            $owned = [];
+            foreach (($manifest['pages'] ?? []) as $pg) {
+                $pageNum = $pg['page_number'] ?? null;
+                $type = strtolower((string) ($pg['page_type'] ?? ''));
+                if ($pageNum !== null && in_array($type, ['cover', 'back_cover'], true)) {
+                    $owned[] = (int) $pageNum;
+                }
+            }
+            return $owned;
+        } catch (\Throwable $e) {
+            Log::warning('IllustrationText: rendererOwnedPages failed; treating none as owned', [
+                'error' => $e->getMessage(),
+            ]);
+            return [];
+        }
     }
 
     /**

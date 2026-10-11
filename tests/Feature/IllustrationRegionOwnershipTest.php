@@ -6,6 +6,7 @@ use App\Models\Book;
 use App\Models\Translation;
 use App\Services\IllustrationTextService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use ReflectionMethod;
 use Tests\TestCase;
 
@@ -86,6 +87,64 @@ class IllustrationRegionOwnershipTest extends TestCase
         $this->assertCount(1, $issues);
         $this->assertSame('MISSING_TARGET', $issues[0]['code']);
         $this->assertSame('p01_art02', $issues[0]['region_id']);
+    }
+
+    /**
+     * cover-collision fix: the artwork-inventory pass must NOT claim text on pages owned
+     * end-to-end by a dedicated renderer (cover / back_cover). rendererOwnedPages() reads
+     * the manifest page_type and returns those 1-based page numbers so the inventory loop
+     * skips them. Guards against two subsystems drawing the same cover strings (the Colours
+     * "MTHOMBOTHI STUDIOS"/"Kleure"/"®" collision).
+     */
+    public function test_renderer_owned_pages_returns_cover_and_back_cover(): void
+    {
+        Storage::fake('public');
+        $book = Book::create([
+            'title' => 'Colours', 'original_language' => 'en', 'page_count' => 16,
+            'status' => 'ready', 'pdf_path' => 'books/pdfs/colours.pdf',
+            'manifest_path' => 'books/manifests/colours_manifest.json',
+        ]);
+        // Colours-shaped manifest: cover p1, back_cover p16, story/other in between.
+        $pages = [['page_number' => 1, 'page_type' => 'cover']];
+        for ($p = 2; $p <= 15; $p++) {
+            $pages[] = ['page_number' => $p, 'page_type' => $p === 2 ? 'copyright' : 'story'];
+        }
+        $pages[] = ['page_number' => 16, 'page_type' => 'back_cover'];
+        Storage::disk('public')->put(
+            'books/manifests/colours_manifest.json',
+            json_encode(['pages' => $pages])
+        );
+
+        $owned = $this->invokePrivate('rendererOwnedPages', [$book]);
+
+        $this->assertSame([1, 16], $owned, 'only cover + back_cover are renderer-owned');
+    }
+
+    public function test_renderer_owned_pages_handles_mixed_case_and_fails_safe(): void
+    {
+        Storage::fake('public');
+
+        // page_type casing must not matter (strtolower in the resolver).
+        $book = Book::create([
+            'title' => 'Casing', 'original_language' => 'en', 'page_count' => 2,
+            'status' => 'ready', 'pdf_path' => 'books/pdfs/c.pdf',
+            'manifest_path' => 'books/manifests/casing_manifest.json',
+        ]);
+        Storage::disk('public')->put('books/manifests/casing_manifest.json', json_encode([
+            'pages' => [
+                ['page_number' => 1, 'page_type' => 'COVER'],
+                ['page_number' => 2, 'page_type' => 'Back_Cover'],
+            ],
+        ]));
+        $this->assertSame([1, 2], $this->invokePrivate('rendererOwnedPages', [$book]));
+
+        // No manifest => fail safe (treat NO page as owned, never throw).
+        $noManifest = Book::create([
+            'title' => 'No Manifest', 'original_language' => 'en', 'page_count' => 1,
+            'status' => 'ready', 'pdf_path' => 'books/pdfs/n.pdf',
+            'manifest_path' => null,
+        ]);
+        $this->assertSame([], $this->invokePrivate('rendererOwnedPages', [$noManifest]));
     }
 
     public function test_preserve_region_is_never_erased(): void
