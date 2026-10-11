@@ -3411,7 +3411,13 @@ def render_cover_page_v8(page, page_spans, translations_map, fonts_dir, page_num
     # subtitle font/weight so the cover subtitle keeps the original typeface, and
     # mirror source casing. Book-agnostic: font chosen from the source spans.
     subtitle_text = _source_text_transform_apply(subtitle_text, subtitle_spans)
-    font_file = _weight_aware_house_font(subtitle_spans, fonts_dir)
+    # COVER BOOK-NAME BOLD (Captain Zan): the cover subtitle (the book name) renders in the
+    # BOLD house-font weight for a stronger cover, regardless of the source weight. Scoped to
+    # the COVER subtitle ONLY — story/vocab/back-cover still follow source weight. Toggle via
+    # COVER_SUBTITLE_BOLD=false. Falls back to source-weight resolution if no bold font exists.
+    _cover_bold = os.environ.get("COVER_SUBTITLE_BOLD", "true").strip().lower() not in ("false", "0", "no")
+    font_file = (_house_font_file(fonts_dir, prefer_bold=True) if _cover_bold else None) \
+        or _weight_aware_house_font(subtitle_spans, fonts_dir)
     src_size = max((s["font_size"] for s in subtitle_spans), default=44)
     # Use the SOURCE subtitle's own colour so the translation matches the original
     # design exactly, instead of a hardcoded purple. Book-agnostic: read from the
