@@ -1013,6 +1013,27 @@ def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num
     avg_font_size = sum(s["font_size"] for s in story_spans) / len(story_spans)
     font_size = avg_font_size
 
+    # VISUAL SIZE PARITY (Phase 2): the body text should render at the SOURCE size. When the
+    # translation is longer (more wrapped lines) it previously shrank to fit the box between
+    # the source text-top and the page number — so Afrikaans came out smaller than English.
+    # Instead, EXPAND the text box UPWARD into the whitespace between the illustration and the
+    # text before shrinking. We find the illustration's bottom edge (lowest image rect that
+    # sits above the text block) and let the box grow up to just below it. Book-agnostic:
+    # derived from the page's own image geometry, no per-book constants.
+    illustration_bottom = 0.0
+    try:
+        for img in page.get_images(full=True):
+            for r in page.get_image_rects(img[0]):
+                # An illustration ABOVE the text block: its bottom is above the text top.
+                if r.y1 <= min_y + 2 and r.y1 > illustration_bottom:
+                    illustration_bottom = r.y1
+    except Exception:
+        illustration_bottom = 0.0
+    # Allowed top: just below the illustration (small gap), but never below the source text top
+    # and never above the page top. If no illustration found, fall back to the source top.
+    expand_gap = 10.0
+    expandable_top = min(min_y, illustration_bottom + expand_gap) if illustration_bottom > 0 else min_y
+
     # ASCENDER HEADROOM: insert_htmlbox aligns the first line's cap/ascender to the
     # box TOP, so with a tall-ascender (cursive) font the top of the first line gets
     # clipped when the box top sits on the source glyph top. Add headroom above the
@@ -1020,9 +1041,11 @@ def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num
     # illustration above). Book-agnostic: derived from font size + available gap.
     top_gap_available = min_y  # space between page top and the text block
     headroom = min(max(6.0, avg_font_size * 0.45), max(0.0, top_gap_available - 2))
-    box_top = max(0.0, min_y - headroom)
+    # box_top can now reach up to just below the illustration (parity expansion), not only
+    # min_y - headroom. Take the HIGHER box (smaller y) of the two so there's maximum room.
+    box_top = max(0.0, min(min_y - headroom, expandable_top))
 
-    # Build container rect (with top headroom for ascenders).
+    # Build container rect (expanded upward into available whitespace).
     container_rect = pymupdf.Rect(min_x, box_top, max_x, container_bottom)
 
     # Font resolution: use the house font FILE selected by detected source weight.
@@ -1032,16 +1055,26 @@ def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num
     font_file = _weight_aware_house_font(story_spans, fonts_dir)
     font_probe = pymupdf.Font(fontfile=font_file) if font_file else pymupdf.Font("helv")
 
+    # Slightly TIGHTER leading than the glyph default so a longer translation fits more lines
+    # per unit height → less shrink → closer size parity with the source. 1.08 keeps lines
+    # legible without touching (ascender+descender ~ 1.0em). Used for BOTH fit and render.
+    _story_line_factor = 1.08
+
     def _fits_at(size):
         """Return spare height (>=0 fits) for the given size, WITHOUT touching page.
         Measures a real wrap with the actual font file."""
         words = clean_text.split()
         lines = _wrap_paragraph(words, font_file, font_probe, size, container_rect.width)
-        block_h = size * 1.17 * len(lines)
+        block_h = size * _story_line_factor * len(lines)
         return container_rect.height - block_h
 
     def _largest_fitting_size():
-        """Binary-search the largest size (<= source avg) that fits this container."""
+        """Binary-search the largest size (<= source avg) that fits this container.
+        VISUAL PARITY FLOOR: never shrink below 0.8x the source size — a longer translation
+        that genuinely cannot fit at that floor is left at the floor (slightly tight leading)
+        rather than dropping to a size that no longer looks like the same book. The upward
+        box expansion above already granted maximum vertical room before this point."""
+        parity_floor = font_size * 0.8
         if _fits_at(font_size) >= 0:
             return font_size
         low, high = font_size * 0.6, font_size
@@ -1051,7 +1084,7 @@ def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num
                 low = mid
             else:
                 high = mid
-        return low
+        return max(low, parity_floor)
 
     # MEASURE-ONLY: return the largest size that fits, no rendering.
     if measure_only:
@@ -1064,6 +1097,7 @@ def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num
     else:
         font_size = _largest_fitting_size()
 
+
     # Remove all story text spans (only now that we're actually rendering).
     for span in story_spans:
         remove_span(page, span, fill_color=(1, 1, 1))  # white bg for story pages
@@ -1071,11 +1105,21 @@ def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num
         remove_span(page, span, fill_color=(1, 1, 1))  # also mask the source end-marker
     page.apply_redactions()
 
-    # Vertical centering based on spare height at the chosen size.
-    spare_height = _fits_at(font_size)
-    vertical_offset = max(0, spare_height / 2) if spare_height and spare_height > 0 else 0
+    # VERTICAL ANCHOR (parity): center the rendered block on the SOURCE text's vertical
+    # center so short text stays where the source had it (not floated up into the newly
+    # expanded whitespace). The expanded box only provides ROOM for larger/taller text; it
+    # must not relocate text that fits. Clamp the block within the container so a tall block
+    # grows upward into the expansion rather than overflowing the bottom.
+    words_fit = clean_text.split()
+    _lines_fit = _wrap_paragraph(words_fit, font_file, font_probe, font_size, container_rect.width)
+    block_h = font_size * _story_line_factor * max(1, len(_lines_fit))
+    source_center = (min_y + max_y) / 2.0
+    desired_top = source_center - block_h / 2.0
+    # Clamp within the container (can rise up to container top = just below illustration).
+    block_top = max(container_rect.y0, min(desired_top, container_rect.y1 - block_h))
+    block_top = max(container_rect.y0, block_top)
     final_rect = pymupdf.Rect(
-        container_rect.x0, container_rect.y0 + vertical_offset,
+        container_rect.x0, block_top,
         container_rect.x1, container_rect.y1
     )
 
@@ -1086,7 +1130,7 @@ def render_story_page_v8(page, page_spans, translations_map, fonts_dir, page_num
     prose_align = _infer_source_alignment(story_spans, final_rect.x0, final_rect.x1)
     used = draw_paragraph_text(
         page, final_rect, clean_text, font_file, font_size,
-        color=(0, 0, 0), line_height=1.17, align=prose_align,
+        color=(0, 0, 0), line_height=_story_line_factor, align=prose_align,
     )
     if used is not None:
         report["spans_replaced"] += 1
@@ -2283,6 +2327,30 @@ def render_vocabulary_page_from_scene(page, page_scene, id_to_translation, fonts
         except Exception:
             return len(s) * size * 0.5  # rough fallback
 
+    def _wrapped_line_count(text, avail_w, size):
+        """Count the display lines `text` occupies at `size` within `avail_w`, honouring
+        explicit newlines and greedy word-wrap. Used by the HEIGHT-FIT cap so a cell that
+        wraps (long instruction line) or is dense is shrunk to fit, not overflowed."""
+        if not text or avail_w <= 0:
+            return 1
+        total = 0
+        for hard_line in str(text).split("\n"):
+            words = [w for w in re.split(r"\s+", hard_line) if w]
+            if not words:
+                total += 1
+                continue
+            cur = ""
+            lines = 1
+            for w in words:
+                trial = w if not cur else (cur + " " + w)
+                if _text_width(trial, size) <= avail_w:
+                    cur = trial
+                else:
+                    lines += 1
+                    cur = w
+            total += lines
+        return max(1, total)
+
     peer_members = defaultdict(list)   # pg -> [(unit, translated)]
     standalone = []                    # units with no peer group
     for u in units:
@@ -2320,6 +2388,30 @@ def render_vocabulary_page_from_scene(page, page_scene, id_to_translation, fonts
             longest_token = max(words, key=len) if words else str(tr)
             while size > 7.0 and _text_width(longest_token, size) > avail_w:
                 size -= 0.5
+
+        # HEIGHT FIT (HARD CONSTRAINT): the column's rows must FIT the cell height. A denser
+        # page (more rows, or rows that wrap) must shrink to fit rather than overflow past the
+        # table border (the MySenses p19 defect: rows ran off the bottom and the phonics column
+        # collided). We estimate the TOTAL wrapped-line count per cell at the current size and
+        # shrink until (lines * line_height) fits the cell's inner height. Source-anchored size
+        # is the CEILING; this only ever shrinks, never grows. Book-agnostic: geometry + text.
+        if is_content_group:
+            by_cell_members = {}
+            for u, tr in members:
+                cbk = tuple(round(c, 1) for c in (getattr(u, "cell_box", None) or u.bbox))
+                by_cell_members.setdefault(cbk, []).append((u, tr))
+
+            for cbk2, cell_items in by_cell_members.items():
+                pad2 = _cell_pad(*cbk2)
+                inner_h = (cbk2[3] - pad2) - (cbk2[1] + pad2)
+                avail_w2 = max(4.0, (cbk2[2] - cbk2[0]) - 2 * pad2)
+                # Shrink until all wrapped lines in this cell fit the cell height.
+                while size > 7.0:
+                    total_lines = sum(_wrapped_line_count(str(tr), avail_w2, size)
+                                      for _, tr in cell_items)
+                    if total_lines * (size * 1.17) <= inner_h:
+                        break
+                    size -= 0.5
         peer_size[pg] = round(size, 1)
 
     # CROSS-COLUMN HARMONISATION: the body content columns (word_list_item / phonics)
@@ -2423,39 +2515,45 @@ def render_vocabulary_page_from_scene(page, page_scene, id_to_translation, fonts
                 else:
                     stages["inserted"] += len(cell_members)
             else:
-                # TASK 5 (vertical distribution): content items share ONE full-column
-                # cell_box. Distribute them EVENLY down the column (uniform row pitch)
-                # instead of at raw source-y, so columns with different item counts each
-                # fill their height with consistent rhythm and read cleanly. Book-agnostic.
+                # VERTICAL STACK (fixes dense/wrapping overlap): content items share ONE
+                # full-column cell_box. A phonics/instruction row can WRAP to several display
+                # lines, so a fixed one-line pitch made wrapped rows overlap the next row
+                # (the MySenses p19 collision). Instead, give each item a slot sized to its
+                # OWN wrapped-line count and stack cumulatively from the top. The HEIGHT-FIT
+                # cap above already shrank `size` so the whole column fits the cell. Book-agnostic.
                 cell_members.sort(key=lambda z: (round(z[0].bbox[1], 1), z[0].bbox[0]))
                 x0, y0, x1, y1 = cb
                 pad = _cell_pad(x0, y0, x1, y1)
                 n = len(cell_members)
                 size = peer_size.get(pg) or max(8.0, min(cell_members[0][0].bbox[3] - cell_members[0][0].bbox[1], 40.0))
-                # Start clearly below the cell top so the first row never rides up into
-                # the header band above it (content cell_box top can abut the header,
-                # and a colspan header covers several content columns).
+                line_h = size * 1.17
                 top_inset = max(pad, size * 0.9, 8.0)
                 inner_top = y0 + top_inset
                 inner_h = (y1 - pad) - inner_top
-                # Pitch = even distribution, but NEVER tighter than the glyph needs, or rows
-                # overlap at the (now source-anchored) size. The source already fit n rows in
-                # this cell at ~this size, so a tight source-scale pitch fits; we floor the
-                # pitch at size*1.17 and distribute from the top (not stretch to fill), so a
-                # sparse column does not balloon and a dense column stays legible.
-                min_pitch = size * 1.17
-                pitch = max(inner_h / n, min_pitch) if n else inner_h
+                avail_w_cell = max(4.0, (x1 - x0) - 2 * pad)
                 align_h = {"center": "center", "right": "right"}.get(
                     getattr(cell_members[0][0], "align_h", None), "left")
-                for i, (u, tr) in enumerate(cell_members):
-                    slot = pymupdf.Rect(x0 + pad, inner_top + i * pitch,
-                                        x1 - pad, inner_top + i * pitch + min_pitch)
+
+                # Per-item slot height = wrapped-line count * line height. Add a little even
+                # breathing room if the stacked total is shorter than the cell (don't balloon,
+                # just distribute the slack), so single-line rows aren't jammed together.
+                item_lines = [max(1, _wrapped_line_count(str(tr), avail_w_cell, size))
+                              for _, tr in cell_members]
+                stacked_h = sum(l * line_h for l in item_lines)
+                slack = max(0.0, inner_h - stacked_h)
+                gap = (slack / n) if n else 0.0
+
+                cursor = inner_top
+                for (u, tr), lines in zip(cell_members, item_lines):
+                    slot_h = lines * line_h
+                    slot = pymupdf.Rect(x0 + pad, cursor, x1 - pad, cursor + slot_h)
                     clip = slot & page.rect
                     used = draw_paragraph_text(
                         page, slot, tr, font_file, round(size, 1),
                         color=(0, 0, 0), align=align_h, min_size=round(size, 1),
                         valign="middle", clip=clip,
                     )
+                    cursor += slot_h + gap
                     if used is None or (isinstance(used, (int, float)) and used < 0):
                         stages["overflow"].append(u.id)
                     else:
