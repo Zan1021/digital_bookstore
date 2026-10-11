@@ -115,7 +115,29 @@ class ReviewQueue extends Component
 
         // Return a root-relative URL so images resolve regardless of the
         // host/port the app is served on (APP_URL may not match `artisan serve`).
-        return Storage::disk('public')->url($path);
+        // Cache-bust with the file's last-modified time: a re-render overwrites the
+        // file at the SAME path, so without ?v=... the browser serves the stale cached
+        // image and the reviewer sees an out-of-date comparison.
+        return $this->bustCache(Storage::disk('public')->url($path), $path);
+    }
+
+    /**
+     * Append a last-modified cache-busting query param to a public-disk URL so the
+     * browser re-fetches whenever the underlying file changes (comparison images and
+     * fix-previews are overwritten in place on every re-render). Falls back to the bare
+     * URL if the timestamp can't be read — never throws over a cosmetic concern.
+     */
+    private function bustCache(string $url, string $diskPath): string
+    {
+        try {
+            $v = Storage::disk('public')->lastModified($diskPath);
+        } catch (\Throwable $e) {
+            return $url;
+        }
+        if (! $v) {
+            return $url;
+        }
+        return $url . (str_contains($url, '?') ? '&' : '?') . 'v=' . $v;
     }
 
     public function selectPage(int $pageNum)
@@ -491,7 +513,9 @@ class ReviewQueue extends Component
         }
         $rel = "books/fixpreview/{$this->book->id}_{$this->language}/" . basename($absPath);
         Storage::disk('public')->put($rel, file_get_contents($absPath));
-        return Storage::disk('public')->url($rel);
+        // Cache-bust: the preview name is page-scoped and overwritten on each AI fix, so a
+        // bare URL would show the previous candidate. Key off the SOURCE file's mtime.
+        return $this->bustCache(Storage::disk('public')->url($rel), $rel);
     }
 
     /**

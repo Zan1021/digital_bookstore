@@ -10,6 +10,7 @@ use App\Models\Translation;
 use App\Models\TranslatedPage;
 use App\Services\PdfTranslationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Livewire\Livewire;
 use Mockery;
 use Tests\TestCase;
@@ -112,5 +113,36 @@ class ReviewQueueFlowTest extends TestCase
         $this->assertSame(1, $approved);
         // Text persisted.
         $this->assertSame('Nuwe teks', $p1->fresh()->translated_text);
+    }
+
+    /**
+     * Comparison image URLs must carry a last-modified cache-bust (?v=...) so a re-render
+     * that overwrites the file at the same path forces the browser to re-fetch instead of
+     * serving the stale cached image. Regression guard for the stale-review-image bug.
+     */
+    public function test_comparison_image_urls_are_cache_busted(): void
+    {
+        Storage::fake('public');
+
+        // Drop source + translated comparison images at the paths getPageImage() builds:
+        // books/comparison/{bookId}_{lang}/{type}/{type}_{page:03}.png
+        $base = "books/comparison/{$this->book->id}_af";
+        Storage::disk('public')->put("{$base}/source/source_001.png", 'IMGSRC');
+        Storage::disk('public')->put("{$base}/translated/translated_001.png", 'IMGTR');
+
+        $pages = Livewire::test(ReviewQueue::class, ['book' => $this->book, 'language' => 'af'])
+            ->get('pages');
+        $p1 = collect($pages)->firstWhere('page_number', 1);
+
+        $expectedV = Storage::disk('public')->lastModified("{$base}/source/source_001.png");
+
+        $this->assertNotNull($p1['source_image']);
+        $this->assertStringContainsString('?v=', $p1['source_image'], 'source image must be cache-busted');
+        $this->assertStringContainsString("v={$expectedV}", $p1['source_image'], 'uses the file last-modified time');
+        $this->assertStringContainsString('?v=', $p1['translated_image'], 'translated image must be cache-busted');
+
+        // A page with no rendered image stays null (no bogus ?v= on a missing file).
+        $p2 = collect($pages)->firstWhere('page_number', 2);
+        $this->assertNull($p2['source_image']);
     }
 }
