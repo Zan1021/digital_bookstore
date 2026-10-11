@@ -1132,29 +1132,53 @@ PROMPT;
     private function regeneratePhonics(array $items, string $langCode, string $langName, int $pageNumber): array
     {
         $system = <<<PROMPT
-You create phonics (sound-to-spelling) exercises for a Grade 1-2 {$langName} children's book.
-You receive a JSON array of items: {"id","text"}. Each text is an English phonics row like
-"- ee see, feet, bee" or "st rest, nest, west" — a short SOUND PATTERN followed by example
-words that CONTAIN that pattern.
+You are a {$langName} early-literacy teacher creating phonics (sound-to-spelling)
+exercises for a Grade 1-2 {$langName} children's book.
 
-Your job: for each item, produce an EQUIVALENT {$langName} phonics row.
-HARD REQUIREMENTS:
-- Choose a spelling pattern that genuinely exists in {$langName}.
-- Give 2-4 REAL {$langName} words that ACTUALLY CONTAIN that exact pattern (letters in that order).
-- Keep the same visual shape: preserve a leading "- " if the source had one, then
-  "<pattern> <word1>, <word2>, <word3>".
-- NEVER keep English example words. NEVER output a word that does not contain the pattern.
-- If a heading/instruction line (e.g. "Blends"/"Kombinasies"), translate it to {$langName}.
+You receive a JSON array of items: {"id","kind"}. "kind" is either "pattern" (an exercise
+row teaching one sound) or "instruction" (a heading/instruction line, with its English text
+in "text").
 
-Examples of CORRECT {$langName} (Afrikaans) rows:
-  "- oe boek, koek, soek"        (all contain "oe")
-  "- aa maan, kaas, slaap"       (all contain "aa")
-  "- sk skaap, skool, skil"      (all contain "sk")
+Your job: INVENT a fresh, correct {$langName} phonics row for each "pattern" item. You are
+NOT translating anything — you are authoring a NEW exercise from scratch in {$langName}.
+
+HARD REQUIREMENTS for every "pattern" row:
+- Pick a spelling pattern that is COMMON and NATURAL in {$langName} and that has several
+  easy, age-appropriate example words. Choose a DIFFERENT pattern for each row (do not repeat).
+- Give exactly 2-3 REAL, common {$langName} words that each LITERALLY CONTAIN that exact
+  pattern (the letters in that order).
+- Format the row as:  "- <pattern> <word1>, <word2>, <word3>".
+- NEVER use an English word. NEVER invent a non-word. NEVER output a word that does not
+  contain the pattern. If you are unsure a word is real {$langName}, choose a different,
+  everyday word you are certain of.
+- Do NOT reuse the English sound pattern from the source — {$langName} has its own sounds.
+  (English "ft"/"wh"/"oa" rarely map to a good {$langName} pattern; pick a native one instead.)
+
+For an "instruction" item, simply translate its "text" into natural {$langName}.
+
+GOOD {$langName} (Afrikaans) rows — note each pattern is native and every word contains it:
+  "- oe boek, koek, soek"
+  "- aa maan, kaas, slaap"
+  "- sk skaap, skool, skil"
+  "- ee see, tee, veer"
+  "- ie bier, vier, dier"
 
 Return ONLY a JSON array: [{"id":"...","translation":"..."}]. Every input id appears once.
 PROMPT;
 
-        $req = array_map(fn ($it) => ['id' => $it['id'], 'text' => $it['text']], $items);
+        // DE-ANCHOR: do NOT feed the model the English pattern letters/words — that cornered
+        // it into keeping bad patterns (e.g. "ft" -> "gift, kraft", English-ish non-words).
+        // Send only the item's KIND so it authors a fresh native pattern; instruction lines
+        // still carry their source text to translate.
+        $req = array_map(function ($it) {
+            $text = (string) ($it['text'] ?? '');
+            // A row with a short leading token then a word is a pattern exercise; otherwise
+            // it's a heading/instruction line to translate.
+            $looksPattern = (bool) preg_match('/^\s*[-–—]?\s*[\p{L}]{1,5}\s+\p{L}/u', $text);
+            return $looksPattern
+                ? ['id' => $it['id'], 'kind' => 'pattern']
+                : ['id' => $it['id'], 'kind' => 'instruction', 'text' => $text];
+        }, $items);
 
         try {
             $response = $this->chatWithRetry([
@@ -1178,14 +1202,77 @@ PROMPT;
             return [];
         }
 
-        $out = [];
+        // CORRECTION RETRY (parity with the flat-text path): the structured path previously
+        // validated each regenerated row but SHIPPED invalid phonics anyway (only logging a
+        // review flag). That is how "ft - klipfisk" reached the page. Now, when any row's
+        // example word does not contain its taught pattern, send ONLY the offenders back to
+        // the model (up to 2 passes) to be corrected before giving up. Still fail-safe: if a
+        // row is still invalid after the retries, keep the best result AND flag the page for
+        // human review (never silently ship pedagogically wrong phonics).
+        $byId = [];
         foreach ($parsed as $row) {
             $id = $row['id'] ?? null;
             $text = trim((string) ($row['translation'] ?? ''));
-            if ($id === null || $text === '') {
-                continue;
+            if ($id !== null && $text !== '') {
+                $byId[$id] = $text;
             }
-            // Validate: if this looks like a pattern row, every example word must contain the pattern.
+        }
+
+        for ($pass = 0; $pass < 2; $pass++) {
+            $bad = [];
+            foreach ($byId as $id => $text) {
+                if (!$this->phonicsRowIsValid($text)) {
+                    $bad[] = ['id' => $id, 'text' => $text];
+                }
+            }
+            if (empty($bad)) {
+                break;
+            }
+            Log::warning("Phonics regeneration invalid; requesting correction", [
+                'page' => $pageNumber, 'pass' => $pass + 1, 'invalid' => array_column($bad, 'text'),
+            ]);
+            try {
+                $fix = $this->chatWithRetry([
+                    'messages' => [
+                        ['role' => 'system', 'content' => $system],
+                        ['role' => 'user', 'content' =>
+                            "These {$langName} phonics rows are INVALID: at least one example word does "
+                            . "NOT literally contain the pattern (the token before the first space/dash). "
+                            . "Return ONLY a JSON array [{\"id\",\"translation\"}] for THESE ids, fixing each "
+                            . "so EVERY example word contains its pattern — replace the word, or pick a "
+                            . "different valid {$langName} pattern with real, common, age-appropriate words. "
+                            . "Do NOT reuse the English pattern if {$langName} has no good words for it.\n\n"
+                            . json_encode(array_map(
+                                fn ($b) => ['id' => $b['id'], 'text' => $b['text']],
+                                $bad
+                            ), JSON_UNESCAPED_UNICODE)],
+                    ],
+                    'temperature' => 0.3,
+                ]);
+            } catch (\Throwable $e) {
+                Log::warning("Phonics correction call failed for page {$pageNumber}", ['error' => $e->getMessage()]);
+                break;
+            }
+            $fixParsed = json_decode($fix, true);
+            if (!is_array($fixParsed) && preg_match('/\[.*\]/s', $fix, $fm)) {
+                $fixParsed = json_decode($fm[0], true);
+            }
+            if (!is_array($fixParsed)) {
+                break;
+            }
+            foreach ($fixParsed as $row) {
+                $id = $row['id'] ?? null;
+                $text = trim((string) ($row['translation'] ?? ''));
+                if ($id !== null && $text !== '' && array_key_exists($id, $byId)) {
+                    $byId[$id] = $text;
+                }
+            }
+        }
+
+        $out = [];
+        foreach ($byId as $id => $text) {
+            // Any row still invalid after the retries → flag the page for human review,
+            // but keep the best text so the page is not left blank.
             if (!$this->phonicsRowIsValid($text)) {
                 $this->phonicsNeedsReview[] = $pageNumber;
             }
@@ -1193,6 +1280,7 @@ PROMPT;
         }
         return $out;
     }
+
 
     /**
      * A phonics row "[- ] pattern w1, w2, ..." is valid when every example word contains

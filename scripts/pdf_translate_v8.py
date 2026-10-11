@@ -2294,41 +2294,31 @@ def render_vocabulary_page_from_scene(page, page_scene, id_to_translation, fonts
 
     peer_size = {}   # pg -> chosen pt size
     for pg, members in peer_members.items():
-        # Source cap: median source glyph height in the group (apparent size).
+        # SOURCE ANCHOR: the target size IS the source's own glyph size (median apparent
+        # height in the group). We only ever shrink from here to fit WIDTH; we never grow
+        # beyond the source and never shrink for vertical crowding. A dense column grows
+        # TALLER (source-rhythm placement handles the vertical), it does not render smaller
+        # than its peers. This keeps the whole body at the source scale, like the original.
         src_heights = sorted((u.bbox[3] - u.bbox[1]) for u, _ in members)
         cap = src_heights[len(src_heights) // 2] if src_heights else 12.0
         cap = max(8.0, min(cap, 40.0))
         size = cap
 
-        # HEIGHT CAP: CONTENT items sharing ONE column cell are distributed into n
-        # rows; the per-row pitch limits how tall the text can be or rows overlap
-        # (the 'g' descenders collided). Cap size by the smallest row pitch — but ONLY
-        # for content cells, never header cells (headers are not row-distributed and
-        # capping them regressed merged-header centering/fit). Book-agnostic.
         member_roles = {getattr(u, "semantic_role", "") for u, _ in members}
         is_content_group = not (member_roles & {"heading", "table_header", "merged_header"})
-        if is_content_group:
-            by_cell = {}
-            for u, _tr in members:
-                cbk = tuple(round(c, 1) for c in (getattr(u, "cell_box", None) or u.bbox))
-                by_cell.setdefault(cbk, 0)
-                by_cell[cbk] += 1
-            for cbk, count in by_cell.items():
-                if count <= 0:
-                    continue
-                pad = _cell_pad(*cbk)
-                inner_h = (cbk[3] - pad) - (cbk[1] + pad)
-                pitch = inner_h / count if count else inner_h
-                # Leave headroom: text box ~= size*1.3 tall, so size <= pitch/1.3.
-                size = min(size, max(7.0, pitch / 1.3))
 
-        # WIDTH CAP: shrink until the widest member's longest line fits its padded width.
+        # WIDTH CAP: shrink until the content fits the padded cell width. A long MULTI-WORD
+        # line (e.g. an instruction sentence "Groepeer algemene woorde, soos:") WRAPS onto
+        # further lines, so it must NOT dictate the font size. The true horizontal constraint
+        # is the longest UNBREAKABLE token (a single word cannot wrap); size off the widest
+        # single word, not the widest line.
         for u, tr in members:
             cb = getattr(u, "cell_box", None) or u.bbox
             pad = _cell_pad(*cb)
             avail_w = max(4.0, (cb[2] - cb[0]) - 2 * pad)
-            longest = max((ln for ln in str(tr).split("\n")), key=len, default=str(tr))
-            while size > 7.0 and _text_width(longest, size) > avail_w:
+            words = [w for w in re.split(r"\s+", str(tr)) if w]
+            longest_token = max(words, key=len) if words else str(tr)
+            while size > 7.0 and _text_width(longest_token, size) > avail_w:
                 size -= 0.5
         peer_size[pg] = round(size, 1)
 
@@ -2448,12 +2438,18 @@ def render_vocabulary_page_from_scene(page, page_scene, id_to_translation, fonts
                 top_inset = max(pad, size * 0.9, 8.0)
                 inner_top = y0 + top_inset
                 inner_h = (y1 - pad) - inner_top
-                pitch = inner_h / n if n else inner_h
+                # Pitch = even distribution, but NEVER tighter than the glyph needs, or rows
+                # overlap at the (now source-anchored) size. The source already fit n rows in
+                # this cell at ~this size, so a tight source-scale pitch fits; we floor the
+                # pitch at size*1.17 and distribute from the top (not stretch to fill), so a
+                # sparse column does not balloon and a dense column stays legible.
+                min_pitch = size * 1.17
+                pitch = max(inner_h / n, min_pitch) if n else inner_h
                 align_h = {"center": "center", "right": "right"}.get(
                     getattr(cell_members[0][0], "align_h", None), "left")
                 for i, (u, tr) in enumerate(cell_members):
                     slot = pymupdf.Rect(x0 + pad, inner_top + i * pitch,
-                                        x1 - pad, inner_top + (i + 1) * pitch)
+                                        x1 - pad, inner_top + i * pitch + min_pitch)
                     clip = slot & page.rect
                     used = draw_paragraph_text(
                         page, slot, tr, font_file, round(size, 1),
