@@ -889,10 +889,19 @@ PROMPT;
             // with a dedicated, few-shot, higher-temperature call, then VALIDATE that each
             // example word actually contains the sound pattern. Invalid results flag the page
             // for review instead of shipping wrong phonics. Book/language-agnostic.
+            //
+            // ROUTING FIX: do NOT rely solely on the scene-graph classifier's role/policy tag.
+            // It mislabels stray rows (e.g. a lone "- gg eier" tagged word_list instead of
+            // phonics), which then skip regeneration and get literally translated onto the page.
+            // On a vocabulary/phonics page we ALSO catch any item whose SOURCE text structurally
+            // looks like a phonics exercise row (short pattern token + example words). This makes
+            // the routing robust to classifier noise instead of adding more classifier logic.
+            $pageIsPhonicsish = in_array($pageType, ['vocabulary', 'phonics'], true);
             $phonicsItems = array_values(array_filter(
                 $translatableItems,
                 fn ($it) => ($it['policy'] ?? '') === 'educational_adaptation'
                     || ($it['role'] ?? '') === 'phonics'
+                    || ($pageIsPhonicsish && $this->looksLikePhonicsRow((string) ($it['text'] ?? '')))
             ));
             if (!empty($phonicsItems)) {
                 $regen = $this->regeneratePhonics($phonicsItems, $languageCode, $languageName, $pageNum);
@@ -1177,8 +1186,11 @@ PROMPT;
         $req = array_map(function ($it) {
             $text = (string) ($it['text'] ?? '');
             // A row with a short leading token then a word is a pattern exercise; otherwise
-            // it's a heading/instruction line to translate.
-            $looksPattern = (bool) preg_match('/^\s*[-–—]?\s*[\p{L}]{1,5}\s+\p{L}/u', $text);
+            // it's a heading/instruction line to translate. Normalise a mid-row dash
+            // separator ("gg - egg") so it classifies the same as "- gg egg" / "gg egg".
+            $norm = preg_replace('/^\s*[-–—]\s*/u', '', $text);
+            $norm = preg_replace('/\s*[-–—]\s*/u', ' ', $norm);
+            $looksPattern = (bool) preg_match('/^[\p{L}]{1,5}\s+\p{L}/u', $norm);
             return $looksPattern
                 ? ['id' => $it['id'], 'kind' => 'pattern']
                 : ['id' => $it['id'], 'kind' => 'instruction', 'text' => $text];
@@ -1294,6 +1306,53 @@ PROMPT;
         return $out;
     }
 
+
+    /**
+     * Does this SOURCE text structurally look like a phonics exercise row, regardless of how
+     * the scene-graph classifier tagged it? Used as a robustness net so mislabeled rows still
+     * get routed through phonics regeneration (and the validity gate) instead of being literally
+     * translated onto the page.
+     *
+     * A phonics row teaches one sound: a short pattern token (1-4 letters) plus one or more
+     * example words that CONTAIN that pattern. We accept the common shapes:
+     *   "ee - see, feet"   |   "- ee see, feet"   |   "ee see, feet"   |   "- gg egg"
+     * and require at least one example word that literally contains the pattern — which is
+     * exactly what distinguishes a phonics row from an ordinary word-list entry or a sentence.
+     * Conservative by design: a false negative just means a row is translated as before; a
+     * false positive would hand a normal word to the phonics author, so we keep the test tight.
+     */
+    private function looksLikePhonicsRow(string $text): bool
+    {
+        $t = trim($text);
+        if ($t === '') {
+            return false;
+        }
+        // Must be a short, single-line entry — not a prose sentence.
+        if (mb_strlen($t) > 60 || preg_match('/[.!?]\s/u', $t)) {
+            return false;
+        }
+        // Normalise: strip a leading bullet dash, collapse a " - " separator to a space.
+        $norm = preg_replace('/^\s*[-–—]\s*/u', '', $t);
+        $norm = preg_replace('/\s*[-–—]\s*/u', ' ', $norm);
+        // Expect: <pattern 1-4 letters> <example words...>
+        if (!preg_match('/^([\p{L}]{1,4})\s+(.+)$/u', $norm, $m)) {
+            return false;
+        }
+        $pattern = mb_strtolower($m[1]);
+        $words = preg_split('/[,\s]+/u', mb_strtolower($m[2]), -1, PREG_SPLIT_NO_EMPTY);
+        if (count($words) < 1) {
+            return false;
+        }
+        // At least one example word must literally contain the pattern — the defining trait
+        // of a phonics example. (A plain word list like "cat, dog" fails this, as it should.)
+        foreach ($words as $w) {
+            $w = preg_replace('/[^\p{L}]/u', '', $w);
+            if ($w !== '' && $w !== $pattern && mb_strpos($w, $pattern) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /**
      * A phonics row "[- ] pattern w1, w2, ..." is valid when every example word

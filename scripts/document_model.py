@@ -621,6 +621,29 @@ def _merge_continuation_spans(spans, page_type):
         b = (b_text or "").strip()
         if not a or not b:
             return False
+        # PHONICS FRAGMENT RE-JOIN (narrow, additive): PDF extraction sometimes splits a
+        # phonics row so the lone pattern token lands on one span and its example word(s)
+        # on the next — e.g. "- gg" then "eier", or "oe" then "boek, koek". The general
+        # rule below (needs BOTH lines multi-word, B lowercase, no internal delimiter)
+        # deliberately refuses this to protect single-word vocab columns. Handle it here
+        # FIRST, but ONLY for shapes that are UNAMBIGUOUSLY a phonics pattern fragment, so a
+        # plain vocab column ("hoor" / "sien") is never mistaken for pattern + example:
+        #   (a) a LEADING-DASH bare token — "- gg", "- oe" (the dash marks it as a phonics
+        #       bullet, not a vocabulary word), OR
+        #   (b) a no-dash short token whose continuation is a COMMA list — "oe" + "boek, koek"
+        #       (the comma list is the tell-tale of examples, absent from a vocab column).
+        _am = _re.match(r"^\s*([-–—])\s*([^\W\d_]{1,4})\s*$", a, _re.UNICODE)      # (a) dash form
+        _am_nodash = _re.match(r"^\s*([^\W\d_]{1,3})\s*$", a, _re.UNICODE)         # (b) short token
+        if _am or _am_nodash:
+            b_words = [w for w in _re.split(r"[,\s]+", b) if w]
+            b_has_comma = "," in b
+            ok_shape = 1 <= len(b_words) <= 3 and all(
+                _re.fullmatch(r"[^\W\d_]+[,]?", w, _re.UNICODE) for w in b_words
+            )
+            # Dash form may rejoin a single example ("- gg" + "eier"); the no-dash form
+            # requires a comma list so it cannot swallow a stacked single vocab word.
+            if ok_shape and (_am or b_has_comma):
+                return True
         if a[-1] in ".!?,:;-–—":
             return False
         if len(a.split()) < 2 or len(b.split()) < 2:

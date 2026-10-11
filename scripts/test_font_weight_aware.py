@@ -91,6 +91,38 @@ def main():
         check("role resolver: regular paragraph -> Regular file",
               os.path.basename(rr["fontFile"]) == "PlaypenSans-Regular.ttf")
 
+    # 6. REGRESSION (2026-10-11): the house font ships NO Regular file — only
+    #    Medium/SemiBold/Bold (the real storage/app/fonts situation). A non-bold caller
+    #    must resolve to the lightest NON-bold weight (Medium), never silently fall to
+    #    Bold (which made the WHOLE book bold). Covers both resolvers.
+    with tempfile.TemporaryDirectory() as tmp2:
+        _write("helv", os.path.join(tmp2, "PlaypenSans-Medium.ttf"))
+        _write("tiro", os.path.join(tmp2, "PlaypenSans-SemiBold.ttf"))
+        _write("cour", os.path.join(tmp2, "PlaypenSans-Bold.ttf"))
+
+        r_nb = resolve_font_with_policy("PlaypenSans", tmp2, is_bold=False)
+        check("no-Regular family: non-bold resolves to Medium (NOT Bold)",
+              os.path.basename(r_nb["fontFile"]) == "PlaypenSans-Medium.ttf")
+        r_b = resolve_font_with_policy("PlaypenSans", tmp2, is_bold=True)
+        check("no-Regular family: bold still resolves to Bold",
+              os.path.basename(r_b["fontFile"]) == "PlaypenSans-Bold.ttf")
+
+        # Same assertion against the pdf_translate_v8 house-font resolver, which had the bug.
+        import importlib.util as _ilu
+        v8spec = _ilu.spec_from_file_location(
+            "v8mod", os.path.join(SCRIPTS_DIR, "pdf_translate_v8.py"))
+        try:
+            v8 = _ilu.module_from_spec(v8spec)
+            v8spec.loader.exec_module(v8)
+            hf_nb = v8._house_font_file(tmp2, prefer_bold=False)
+            hf_b = v8._house_font_file(tmp2, prefer_bold=True)
+            check("_house_font_file: non-bold avoids Bold (-> Medium)",
+                  hf_nb is not None and "Bold" not in os.path.basename(hf_nb))
+            check("_house_font_file: bold -> Bold",
+                  hf_b is not None and "Bold" in os.path.basename(hf_b))
+        except Exception as e:  # importing the heavy module can fail in minimal envs
+            print(f"  [SKIP] _house_font_file direct check ({type(e).__name__}: {e})")
+
     print("=" * 60)
     print(f"RESULTS: {_passed} passed, {_failed} failed")
     print("=" * 60)

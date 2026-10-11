@@ -280,9 +280,38 @@ def build_vocabulary_manifest(page, page_num, spans):
         if not col_spans:
             continue
 
-        # Detect if this is a phonics column (items contain " - " patterns)
-        phonics_count = sum(1 for s in col_spans if re.search(r'\s+-\s+', s["text_stripped"]))
-        is_phonics = phonics_count >= 3
+        # Detect if this is a phonics column. A phonics row teaches a sound: a short
+        # pattern token with example words, written in several shapes the PDF may emit:
+        #   "ee - see, feet"  |  "- oe boek"  |  "gg - egg"  |  "sh ship, fish"
+        # The old test only counted a space-dash-space (" - "), so rows like "- gg" or
+        # "sh ship" were missed, the column was mislabeled word_list, and its rows skipped
+        # phonics regeneration (they reached the page literally translated, e.g. "- gg eier").
+        # Count a span as phonics-like if it has a dash separator in ANY position OR a short
+        # leading token (<=4 letters) followed by a word that CONTAINS that token.
+        def _is_phonics_span(txt):
+            t = (txt or "").strip()
+            if not t or len(t) > 60:
+                return False
+            if re.search(r'[-–—]', t):  # any dash — "ee - x", "- gg", "gg-x"
+                # must still look like pattern+something, not a hyphenated single word
+                norm = re.sub(r'^\s*[-–—]\s*', '', t)
+                norm = re.sub(r'\s*[-–—]\s*', ' ', norm)
+                return bool(re.match(r'^[^\W\d_]{1,4}(\s|$)', norm, re.UNICODE))
+            m = re.match(r'^([^\W\d_]{1,4})\s+(.+)$', t, re.UNICODE)
+            if not m:
+                return False
+            pat = m.group(1).lower()
+            for w in re.split(r'[,\s]+', m.group(2).lower()):
+                w = re.sub(r'[\W\d_]', '', w, flags=re.UNICODE)
+                if w and w != pat and pat in w:
+                    return True
+            return False
+
+        phonics_count = sum(1 for s in col_spans if _is_phonics_span(s["text_stripped"]))
+        # Robust threshold: a clear majority OR an absolute count. Lower floor than before
+        # (2) because real phonics columns are short, but guard against false positives by
+        # also requiring it to be at least ~40% of the column's spans.
+        is_phonics = phonics_count >= 2 and phonics_count >= 0.4 * len(col_spans)
 
         # Detect if high-frequency (short common words, fewer items than vocab cols)
         avg_word_len = sum(len(s["text_stripped"]) for s in col_spans) / max(len(col_spans), 1)

@@ -4503,14 +4503,37 @@ def _house_font_file(fonts_dir, prefer_bold=False):
             cands.append(os.path.join(fonts_dir, f))
     if not cands:
         return None
-    # Prefer the requested weight, else Regular, else first.
-    key = "bold" if prefer_bold else "regular"
+    # Prefer the requested weight, else a sensible non-bold default. The house font
+    # ships Medium/SemiBold/Bold but may have NO "Regular" file; in that case a
+    # non-bold caller must NOT silently fall through to Bold (that made the whole book
+    # bold). Resolution order:
+    #   prefer_bold=True  -> Bold, else heaviest available
+    #   prefer_bold=False -> Regular, else lightest NON-bold (Medium>SemiBold), else
+    #                        any non-bold, and only Bold as a last resort.
+    def _has(name, weight):
+        return weight in os.path.basename(name).lower()
+
+    if prefer_bold:
+        for c in cands:
+            if _has(c, "bold"):
+                return c
+        # No explicit bold — fall to the heaviest we have.
+        for weight in ("semibold", "medium", "regular"):
+            for c in cands:
+                if _has(c, weight):
+                    return c
+        return cands[0]
+
+    # Non-bold request: walk from lightest to heaviest, bold strictly last.
+    for weight in ("regular", "medium", "semibold"):
+        for c in cands:
+            if _has(c, weight):
+                return c
+    # Any remaining non-bold file before resorting to bold.
     for c in cands:
-        if key in os.path.basename(c).lower():
+        if not _has(c, "bold"):
             return c
-    for c in cands:
-        if "regular" in os.path.basename(c).lower():
-            return c
+    # Only bold exists — use it rather than returning nothing.
     return cands[0]
 
 
