@@ -43,6 +43,8 @@ class TranslationService
     private const FALLBACK_MODEL = 'gpt-4o-mini';
     private const MAX_RETRIES = 3;
     private const RETRY_DELAY_SECONDS = 2;
+    /** Hard cap on how long we will sleep for a single rate-limit backoff (safety valve). */
+    private const MAX_RETRY_WAIT_SECONDS = 60;
 
     /**
      * Make an OpenAI chat completion with automatic retry and model fallback.
@@ -64,18 +66,24 @@ class TranslationService
                     $lastError = $e;
                     $message = $e->getMessage();
 
-                    // Rate limit or overload — retry with backoff
+                    // Rate limit or overload — retry, honoring the server's requested wait.
                     if (str_contains($message, 'high volume') ||
                         str_contains($message, '429') ||
                         str_contains($message, 'Rate limit') ||
                         str_contains($message, 'overloaded')) {
 
-                        Log::warning("OpenAI API overloaded (model: {$model}, attempt {$attempt})", [
+                        $retryAfter = $this->parseRetryAfterSeconds($e);
+                        Log::warning("OpenAI rate-limited/overloaded (model: {$model}, attempt {$attempt})", [
                             'error' => $message,
+                            'retry_after_s' => $retryAfter,
                         ]);
 
                         if ($attempt < self::MAX_RETRIES) {
-                            sleep(self::RETRY_DELAY_SECONDS * $attempt); // exponential-ish backoff
+                            // Prefer the server's Retry-After; otherwise exponential-ish backoff.
+                            // Cap the wait so a job never hangs indefinitely on a bad reset value.
+                            $wait = $retryAfter ?? (self::RETRY_DELAY_SECONDS * $attempt);
+                            $wait = (int) min(max($wait, 1), self::MAX_RETRY_WAIT_SECONDS);
+                            sleep($wait);
                             continue;
                         }
                         // Exhausted retries for this model — try fallback
@@ -95,6 +103,66 @@ class TranslationService
         throw new \RuntimeException(
             "Translation failed: OpenAI API unavailable after retries. Last error: " . ($lastError?->getMessage() ?? 'Unknown'),
         );
+    }
+
+    /**
+     * Extract the server-requested wait (in seconds) from a rate-limit exception, so retries
+     * honor OpenAI's actual reset time instead of blindly sleeping a fixed amount. Looks, in
+     * order, for:
+     *   1. A `Retry-After` / `x-ratelimit-reset-*` HTTP header on the response (if the client
+     *      exposes it), and
+     *   2. OpenAI's human-readable 429 phrasing in the message, e.g.
+     *      "Please try again in 1.5s" or "... in 200ms".
+     * Returns null when nothing parseable is found (caller falls back to exponential backoff).
+     * Book/language-agnostic; pure parsing, no side effects.
+     */
+    private function parseRetryAfterSeconds(\Throwable $e): ?float
+    {
+        // 1) Try a Retry-After style header if the exception carries a PSR-7 response.
+        try {
+            $response = method_exists($e, 'getResponse') ? $e->getResponse() : null;
+            if ($response && method_exists($response, 'getHeaderLine')) {
+                foreach (['retry-after', 'x-ratelimit-reset-requests', 'x-ratelimit-reset-tokens'] as $h) {
+                    $val = trim((string) $response->getHeaderLine($h));
+                    if ($val === '') {
+                        continue;
+                    }
+                    // Numeric seconds, or an OpenAI duration like "1s"/"200ms"/"1m30s".
+                    $secs = is_numeric($val) ? (float) $val : $this->durationToSeconds($val);
+                    if ($secs !== null && $secs > 0) {
+                        return $secs;
+                    }
+                }
+            }
+        } catch (\Throwable $ignore) {
+            // Header access is best-effort; fall through to message parsing.
+        }
+
+        // 2) Parse the message body phrasing: "try again in 1.5s" / "in 200ms" / "in 2 seconds".
+        $msg = $e->getMessage();
+        if (preg_match('/try again in\s+([0-9]*\.?[0-9]+)\s*(ms|s|seconds?)?/i', $msg, $m)) {
+            $n = (float) $m[1];
+            $unit = strtolower($m[2] ?? 's');
+            return str_starts_with($unit, 'ms') ? $n / 1000.0 : $n;
+        }
+
+        return null;
+    }
+
+    /**
+     * Convert a compact duration string ("200ms", "1s", "1m30s") to seconds, or null.
+     */
+    private function durationToSeconds(string $val): ?float
+    {
+        $val = strtolower(trim($val));
+        if (preg_match('/^([0-9]*\.?[0-9]+)\s*ms$/', $val, $m)) {
+            return (float) $m[1] / 1000.0;
+        }
+        $total = 0.0;
+        $matched = false;
+        if (preg_match('/([0-9]*\.?[0-9]+)\s*m(?!s)/', $val, $m)) { $total += ((float) $m[1]) * 60; $matched = true; }
+        if (preg_match('/([0-9]*\.?[0-9]+)\s*s/', $val, $m)) { $total += (float) $m[1]; $matched = true; }
+        return $matched ? $total : null;
     }
 
     /**
@@ -1148,52 +1216,60 @@ PROMPT;
 You are a {$langName} early-literacy teacher creating phonics (sound-to-spelling)
 exercises for a Grade 1-2 {$langName} children's book.
 
-You receive a JSON array of items: {"id","kind"}. "kind" is either "pattern" (an exercise
-row teaching one sound) or "instruction" (a heading/instruction line, with its English text
-in "text").
+You receive a JSON array of items. Each item is either:
+  - {"id","kind":"pattern","format_sample":"<the original English row>"} — a phonics exercise
+    row, OR
+  - {"id","kind":"instruction","text":"<English text>"} — a heading/instruction line.
 
-Your job: INVENT a fresh, correct {$langName} phonics row for each "pattern" item. You are
-NOT translating anything — you are authoring a NEW exercise from scratch in {$langName}.
+For a "pattern" item, AUTHOR A FRESH {$langName} phonics row from scratch. You are NOT
+translating the English — you invent your own {$langName} sound pattern and {$langName} example
+words. The "format_sample" is shown ONLY so you copy its LAYOUT exactly:
+  - COPY the dash placement of format_sample precisely. If the sample is "- ck rock, lock"
+    (dash BEFORE the pattern), output "- <pat> <words>". If the sample is "br - brat"
+    (pattern, space, dash, space, word), output "<pat> - <words>". Match it character-for-character
+    in punctuation/spacing shape.
+  - COPY the number of example words. "- gg egg" has 1 example -> give exactly 1. "- ss hiss,
+    kiss" has 2 -> give exactly 2. "ee see, feet, bee" has 3 -> give exactly 3.
 
 HARD REQUIREMENTS for every "pattern" row:
-- Pick a spelling pattern that is COMMON and NATURAL in {$langName} and that has several
-  easy, age-appropriate example words. Choose a DIFFERENT pattern for each row (do not repeat).
-- Give exactly 2-3 REAL, common {$langName} words that each LITERALLY CONTAIN that exact
-  pattern (the letters in that order).
-- Format the row as:  "- <pattern> <word1>, <word2>, <word3>".
-- NEVER use an English word. NEVER invent a non-word. NEVER output a word that does not
-  contain the pattern. If you are unsure a word is real {$langName}, choose a different,
-  everyday word you are certain of.
-- Do NOT reuse the English sound pattern from the source — {$langName} has its own sounds.
-  (English "ft"/"wh"/"oa" rarely map to a good {$langName} pattern; pick a native one instead.)
+- Pick a {$langName} spelling pattern that is COMMON and NATURAL and has good example words.
+  Use a DIFFERENT pattern for each row (do not repeat a pattern across rows).
+- Every example word must be a REAL, common, age-appropriate {$langName} word that LITERALLY
+  CONTAINS the chosen pattern (those letters, in that order).
+- NEVER use an English word. NEVER invent a non-word. If unsure a word is real {$langName},
+  pick a different everyday word you are certain of.
+- Do NOT reuse the English sound pattern — {$langName} has its own sounds. (English "ck"/"wh"/
+  "ft" rarely map to a good {$langName} pattern; choose a native one.) ONLY the LAYOUT of
+  format_sample is copied, never its letters or words.
 
 For an "instruction" item, simply translate its "text" into natural {$langName}.
 
-GOOD {$langName} (Afrikaans) rows — note each pattern is native and every word contains it:
-  "- oe boek, koek, soek"
-  "- aa maan, kaas, slaap"
-  "- sk skaap, skool, skil"
-  "- ee see, tee, veer"
-  "- ie bier, vier, dier"
+EXAMPLES (sample layout -> a valid fresh {$langName} row with the SAME layout):
+  "- gg egg"           ->  "- oe boek"
+  "- ss hiss, kiss"    ->  "- aa kaas, baas"
+  "br - brat"          ->  "vl - vlag"
+  "tr - tree, trap"    ->  "kn - knie, kneus"
 
 Return ONLY a JSON array: [{"id":"...","translation":"..."}]. Every input id appears once.
 PROMPT;
 
-        // DE-ANCHOR: do NOT feed the model the English pattern letters/words — that cornered
-        // it into keeping bad patterns (e.g. "ft" -> "gift, kraft", English-ish non-words).
-        // Send only the item's KIND so it authors a fresh native pattern; instruction lines
-        // still carry their source text to translate.
+        // FORMAT-MIRRORING (not content-copying): send the model each phonics row's ORIGINAL
+        // text as a "format_sample" so it copies the LAYOUT (dash placement + example count)
+        // exactly — this is the signal we used to throw away. De-anchoring of CONTENT is kept:
+        // the model still authors a fresh native pattern + real {lang} words (gated), it just
+        // mirrors the source's shape. Placement is unaffected — the engine fills each item's
+        // existing bbox with the returned string, 1:1 by id.
         $req = array_map(function ($it) {
             $text = (string) ($it['text'] ?? '');
-            // A row with a short leading token then a word is a pattern exercise; otherwise
-            // it's a heading/instruction line to translate. Normalise a mid-row dash
-            // separator ("gg - egg") so it classifies the same as "- gg egg" / "gg egg".
+            // Normalise a mid-row dash only to DECIDE if this is a pattern row; the untouched
+            // original $text is what we hand the model as the format sample.
             $norm = preg_replace('/^\s*[-–—]\s*/u', '', $text);
             $norm = preg_replace('/\s*[-–—]\s*/u', ' ', $norm);
             $looksPattern = (bool) preg_match('/^[\p{L}]{1,5}\s+\p{L}/u', $norm);
-            return $looksPattern
-                ? ['id' => $it['id'], 'kind' => 'pattern']
-                : ['id' => $it['id'], 'kind' => 'instruction', 'text' => $text];
+            if (!$looksPattern) {
+                return ['id' => $it['id'], 'kind' => 'instruction', 'text' => $text];
+            }
+            return ['id' => $it['id'], 'kind' => 'pattern', 'format_sample' => $text];
         }, $items);
 
         try {
