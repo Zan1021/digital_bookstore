@@ -86,10 +86,41 @@ class NarrationService
             throw new \RuntimeException('No text available for narration');
         }
 
+        // PAGE RANGE (Req: no narration on the first two or last two pages). Narrate only
+        // pages within [start, end]. Defaults: start = narration_start_page or 3 (skip cover
+        // + copyright), end = narration_end_page or page_count - 2 (skip the last two: vocab/
+        // back-cover). This also keeps narration aligned to the STORY pages — front/back matter
+        // and the vocabulary page are exactly the non-story pages we must not voice, so audio
+        // no longer drifts onto a page whose text it does not match.
+        $pageCount = (int) ($book->page_count ?: (empty($pages) ? 0 : max(array_keys($pages))));
+        $startPage = (int) ($book->narration_start_page ?? 3);
+        $endPage = (int) ($book->narration_end_page ?? max($startPage, $pageCount - 2));
+        $pages = array_filter(
+            $pages,
+            fn ($pageNumber) => $pageNumber >= $startPage && $pageNumber <= $endPage,
+            ARRAY_FILTER_USE_KEY
+        );
+
+        if (empty($pages)) {
+            $narration->update(['status' => 'failed']);
+            throw new \RuntimeException(
+                "No narratable pages in range {$startPage}-{$endPage} (first two and last two pages are excluded)."
+            );
+        }
+
         // Calculate voice settings from drama/speed levels
         $this->currentStability = max(0.05, 1.0 - ($dramaLevel / 100)); // High drama = low stability
         $this->currentStyle = $dramaLevel / 100; // High drama = high style
         $this->currentSpeed = $speedLevel; // Used for text manipulation
+
+        // Clear any PRIOR audio for this book+language so pages now excluded from the range
+        // (e.g. a cover/back-matter mp3 from an earlier run before the range was enforced)
+        // do not linger as orphans. The map we persist below is the single source of truth,
+        // but we also keep the on-disk tree clean.
+        $audioDir = "narrations/book-{$book->id}/{$languageCode}";
+        if (Storage::disk('public')->exists($audioDir)) {
+            Storage::disk('public')->deleteDirectory($audioDir);
+        }
 
         $pageAudioPaths = [];
 

@@ -82,4 +82,54 @@ class NarrationGateTest extends TestCase
         $en = Translation::make(['language_code' => 'en']);
         $this->assertTrue($en->isApprovedForNarration());
     }
+
+    /**
+     * Page-range rule (Req: no narration on the FIRST TWO or LAST TWO pages). With a
+     * 6-page book and the defaults (start=3, end=page_count-2=4), only pages 3-4 are
+     * narrated; 1,2 (front matter) and 5,6 (back matter) are silent. ElevenLabs is faked
+     * so no real API call happens.
+     */
+    public function test_narration_excludes_first_two_and_last_two_pages(): void
+    {
+        \Illuminate\Support\Facades\Http::fake([
+            '*/text-to-speech/*' => \Illuminate\Support\Facades\Http::response([
+                'audio_base64' => base64_encode('FAKEAUDIO'),
+                'alignment' => ['characters' => [], 'character_start_times_seconds' => []],
+            ], 200),
+        ]);
+        \Illuminate\Support\Facades\Storage::fake('public');
+
+        $book = Book::create([
+            'title' => '6-pager', 'original_language' => 'en', 'page_count' => 6,
+            'status' => 'ready', 'pdf_path' => 'books/pdfs/x.pdf',
+        ]);
+        $t = Translation::create([
+            'book_id' => $book->id, 'language_code' => 'af', 'language_name' => 'Afrikaans',
+            'status' => 'draft', 'render_status' => Translation::STATE_READY_FOR_REVIEW,
+            'qa_report' => (new \App\Services\Qa\QaReport())
+                ->pass('structure')->pass('fit')->pass('target_mapping')->toArray(),
+            'render_fingerprint' => str_repeat('a', 16),
+            'output_sha256' => str_repeat('b', 16),
+        ]);
+        foreach (range(1, 6) as $n) {
+            $page = BookPage::create(['book_id' => $book->id, 'page_number' => $n, 'extracted_text' => "EN {$n}"]);
+            TranslatedPage::create([
+                'translation_id' => $t->id, 'book_page_id' => $page->id,
+                'page_number' => $n, 'translated_text' => "Teks bladsy {$n}",
+            ]);
+            $t->fresh()->setPageApproval($n, true);
+        }
+        $t->fresh()->markApproved();
+
+        $narration = app(NarrationService::class)
+            ->narrate($book->fresh(), 'af', 'voice-1', 'Voice One');
+
+        $keys = array_map('intval', array_keys($narration->page_audio_paths ?? []));
+        sort($keys);
+        $this->assertSame([3, 4], $keys, 'Only story pages 3-4 should be narrated.');
+        $this->assertArrayNotHasKey(1, $narration->page_audio_paths); // cover
+        $this->assertArrayNotHasKey(2, $narration->page_audio_paths); // copyright
+        $this->assertArrayNotHasKey(5, $narration->page_audio_paths); // back matter
+        $this->assertArrayNotHasKey(6, $narration->page_audio_paths); // back cover
+    }
 }
