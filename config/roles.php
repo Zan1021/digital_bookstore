@@ -5,8 +5,9 @@
 | Staff roles and their default permissions (Req 1.3, PB §74)
 |--------------------------------------------------------------------------
 |
-| RolesAndPermissionsSeeder syncs this matrix into the database, so it is the
-| starting point; the staff screen (task 2.4) makes it configurable per role.
+| RolesAndPermissionsSeeder syncs this matrix into the database; edit it here and
+| re-run the seeder to change what a role may do. The staff screen (task 2.4) assigns
+| roles to people; editing the matrix on screen is not built yet.
 | Permissions follow the admin areas of design.md §17.
 |
 | The Super Admin role is granted every permission implicitly (Gate::before in

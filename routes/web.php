@@ -58,6 +58,9 @@ Route::prefix('admin')->middleware(['auth', 'verified', 'staff:admin.access'])->
     Route::get('/review-queue/{book}/{language?}', \App\Livewire\Admin\ReviewQueue::class)
         ->middleware('staff:translations.review|layout.review')->name('admin.review-queue');
 
+    // Staff management — invite, change role, deactivate (task 2.4)
+    Route::get('/staff', \App\Livewire\Admin\StaffManager::class)->middleware('staff:staff.manage')->name('admin.staff');
+
     // Font Manager — View source fonts, mappings, upload custom fonts
     Route::get('/fonts/{book}', \App\Livewire\Admin\FontManager::class)->middleware('staff:books.manage')->name('admin.fonts');
 });

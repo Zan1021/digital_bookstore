@@ -14,6 +14,9 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'staff' => \App\Http\Middleware\EnsureStaffPermission::class,
         ]);
+        $middleware->web(append: [
+            \App\Http\Middleware\EnsureAccountActive::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //

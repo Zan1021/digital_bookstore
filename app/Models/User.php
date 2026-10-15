@@ -44,7 +44,21 @@ class User extends Authenticatable implements MustVerifyEmail
     {
         return [
             'email_verified_at' => 'datetime',
+            'invited_at' => 'datetime',
+            'deactivated_at' => 'datetime',
             'password' => 'hashed',
         ];
+    }
+
+    /** A deactivated account cannot sign in and is signed out on its next request. */
+    public function isDeactivated(): bool
+    {
+        return $this->deactivated_at !== null;
+    }
+
+    /** Invited staff who have not set their password yet. */
+    public function isPendingInvite(): bool
+    {
+        return $this->invited_at !== null;
     }
 }

@@ -30,11 +30,17 @@ class LoginForm extends Form
     {
         $this->ensureIsNotRateLimited();
 
-        if (! Auth::attempt($this->only(['email', 'password']), $this->remember)) {
+        $active = fn ($user) => ! $user->isDeactivated();
+
+        if (! Auth::attemptWhen($this->only(['email', 'password']), $active, $this->remember)) {
             RateLimiter::hit($this->throttleKey());
 
+            // Right password but a deactivated account: say so, so staff know to ask.
+            $deactivated = Auth::validate($this->only(['email', 'password']))
+                && Auth::getLastAttempted()?->isDeactivated();
+
             throw ValidationException::withMessages([
-                'form.email' => trans('auth.failed'),
+                'form.email' => $deactivated ? __('This account has been deactivated.') : trans('auth.failed'),
             ]);
         }
 

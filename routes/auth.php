@@ -17,6 +17,10 @@ Route::middleware('guest')->group(function () {
 
     Volt::route('reset-password/{token}', 'pages.auth.reset-password')
         ->name('password.reset');
+
+    // Staff invitation: set a password with the 7-day invite token (task 2.4).
+    Volt::route('accept-invite/{token}', 'pages.auth.accept-invite')
+        ->name('invite.accept');
 });
 
 Route::middleware('auth')->group(function () {
