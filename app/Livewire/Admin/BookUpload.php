@@ -37,18 +37,14 @@ class BookUpload extends Component
     // wizard records the choice and the 'done' step offers to run it. Empty = translate later.
     public string $targetLanguage = '';
 
-    /** Supported target languages (value => label), mirrors the book Translate tab. */
-    public array $languageOptions = [
-        'af' => 'Afrikaans', 'zu' => 'isiZulu', 'xh' => 'isiXhosa', 'st' => 'Sesotho',
-        'nso' => 'Sepedi', 'tn' => 'Setswana', 'fr' => 'French', 'de' => 'German',
-        'es' => 'Spanish', 'pt' => 'Portuguese', 'nl' => 'Dutch', 'it' => 'Italian',
-        'sw' => 'Swahili', 'ar' => 'Arabic', 'zh' => 'Chinese (Simplified)',
-    ];
+    /** Target languages (value => label) from the languages table, as on the book Translate tab. */
+    public array $languageOptions = [];
 
     public function mount()
     {
         // Approved fonts = the families shipped in storage/app/fonts (validated set).
         $this->approvedFonts = Book::approvedFontAssets();
+        $this->languageOptions = \App\Models\Language::targetOptions();
     }
 
     public function updatedFiles()
@@ -207,8 +203,7 @@ class BookUpload extends Component
         if ($this->targetLanguage === '') {
             return;
         }
-        $langName = \App\Services\TranslationService::SUPPORTED_LANGUAGES[$this->targetLanguage]
-            ?? $this->targetLanguage;
+        $langName = \App\Models\Language::nameFor($this->targetLanguage);
 
         foreach ($this->results as $i => $result) {
             if (empty($result['success']) || !empty($result['translation_started'])) {

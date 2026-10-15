@@ -28,7 +28,7 @@ class TranscreateBook extends Command
         }
 
         $langCode = $this->option('language');
-        $langName = TranslationService::SUPPORTED_LANGUAGES[$langCode] ?? $langCode;
+        $langName = \App\Models\Language::nameFor($langCode);
 
         $this->info("Book: {$book->title} (ID: {$book->id})");
         $this->info("Target: {$langName} ({$langCode})");

@@ -88,7 +88,7 @@ class BookManager extends Component
             return;
         }
 
-        $langName = TranslationService::SUPPORTED_LANGUAGES[$this->selectedLanguage] ?? $this->selectedLanguage;
+        $langName = \App\Models\Language::nameFor($this->selectedLanguage);
 
         // Create/reuse the edition immediately so the UI can show it as TRANSLATING.
         $edition = Translation::updateOrCreate(
@@ -321,7 +321,7 @@ class BookManager extends Component
     public function render()
     {
         return view('livewire.admin.book-manager', [
-            'languages' => TranslationService::SUPPORTED_LANGUAGES,
+            'languages' => \App\Models\Language::targetOptions($this->book->original_language),
         ])->layout('layouts.admin');
     }
 

@@ -41,7 +41,8 @@ class StageTimerTest extends TestCase
         $this->assertSame(2, $run->attempt);
         $this->assertSame(['language' => 'af'], $run->meta);
         $this->assertNotNull($run->finished_at);
-        $this->assertGreaterThanOrEqual(25, $run->duration_ms);
+        // usleep(30ms) can wake early on Windows (timer resolution); 10ms still proves it is measured.
+        $this->assertGreaterThanOrEqual(10, $run->duration_ms);
         $this->assertNull($run->error);
     }
 

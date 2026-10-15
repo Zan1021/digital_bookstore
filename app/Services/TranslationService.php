@@ -11,24 +11,6 @@ use OpenAI\Laravel\Facades\OpenAI;
 
 class TranslationService
 {
-    public const SUPPORTED_LANGUAGES = [
-        'af' => 'Afrikaans',
-        'zu' => 'isiZulu',
-        'xh' => 'isiXhosa',
-        'st' => 'Sesotho',
-        'nso' => 'Sepedi',
-        'tn' => 'Setswana',
-        'fr' => 'French',
-        'de' => 'German',
-        'es' => 'Spanish',
-        'pt' => 'Portuguese',
-        'nl' => 'Dutch',
-        'it' => 'Italian',
-        'sw' => 'Swahili',
-        'ar' => 'Arabic',
-        'zh' => 'Chinese (Simplified)',
-    ];
-
     /**
      * Locked terms that should NEVER be translated (character names, places, brands).
      * Publishers can extend this per-book in the future.
@@ -173,8 +155,7 @@ class TranslationService
      */
     public function translate(Book $book, string $languageCode): Translation
     {
-        $languageName = self::SUPPORTED_LANGUAGES[$languageCode]
-            ?? throw new \InvalidArgumentException("Unsupported language: {$languageCode}");
+        $languageName = \App\Models\Language::targetNameOrFail($languageCode, $book->original_language);
 
         $translation = Translation::updateOrCreate(
             ['book_id' => $book->id, 'language_code' => $languageCode],
@@ -907,8 +888,7 @@ PROMPT;
             return $this->translate($book, $languageCode);
         }
 
-        $languageName = self::SUPPORTED_LANGUAGES[$languageCode]
-            ?? throw new \InvalidArgumentException("Unsupported language: {$languageCode}");
+        $languageName = \App\Models\Language::targetNameOrFail($languageCode, $book->original_language);
 
         $translation = Translation::updateOrCreate(
             ['book_id' => $book->id, 'language_code' => $languageCode],

@@ -78,8 +78,7 @@ class NarrationService
         $narration = Narration::updateOrCreate(
             ['book_id' => $book->id, 'language_code' => $languageCode],
             [
-                'language_name' => TranslationService::SUPPORTED_LANGUAGES[$languageCode]
-                    ?? ($languageCode === $book->original_language ? 'English' : $languageCode),
+                'language_name' => \App\Models\Language::nameFor($languageCode),
                 'voice_id' => $voiceId,
                 'voice_name' => $voiceName,
                 'status' => 'processing',
