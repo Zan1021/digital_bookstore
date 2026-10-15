@@ -2,8 +2,10 @@
 
 namespace App\Providers;
 
+use App\Http\Middleware\EnsureStaffPermission;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\ServiceProvider;
+use Livewire\Livewire;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -29,5 +31,8 @@ class AppServiceProvider extends ServiceProvider
         // Super Admin holds every permission (Req 1.3). Returning null for everyone else
         // lets normal permission checks decide.
         Gate::before(fn ($user) => $user->hasRole(config('roles.super_admin')) ? true : null);
+
+        // Re-check staff permissions on Livewire update requests, not only on page load.
+        Livewire::addPersistentMiddleware([EnsureStaffPermission::class]);
     }
 }

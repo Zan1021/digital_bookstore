@@ -20,7 +20,10 @@ new #[Layout('layouts.guest')] class extends Component
 
         Session::regenerate();
 
-        $this->redirectIntended(default: route('dashboard', absolute: false), navigate: true);
+        // Staff land in the admin area, customers on their account dashboard.
+        $home = auth()->user()->can('admin.access') ? 'admin.dashboard' : 'dashboard';
+
+        $this->redirectIntended(default: route($home, absolute: false), navigate: true);
     }
 }; ?>
 

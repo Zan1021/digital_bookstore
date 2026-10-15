@@ -40,24 +40,31 @@ Route::view('profile', 'profile')
 
 require __DIR__.'/auth.php';
 
-// Admin routes (no auth for POC - add later)
-Route::prefix('admin')->group(function () {
+// Admin: signed-in, verified staff only (Req 1.1). Every route also names the permission
+// it needs (config/roles.php); denials are logged (Req 1.4, EnsureStaffPermission).
+Route::prefix('admin')->middleware(['auth', 'verified', 'staff:admin.access'])->group(function () {
     Route::get('/', Dashboard::class)->name('admin.dashboard');
-    Route::get('/upload', BookUpload::class)->name('admin.upload');
-    Route::get('/onboard', \App\Livewire\Admin\BookOnboarding::class)->name('admin.onboard');
-    Route::get('/books/{book}', BookManager::class)->name('admin.book');
-    Route::get('/books/{book}/details', \App\Livewire\Admin\BookReviewDetails::class)->name('admin.book-details');
-    Route::get('/books/{book}/review/{language?}', \App\Livewire\Admin\BookReviewer::class)->name('admin.review');
+    Route::get('/upload', BookUpload::class)->middleware('staff:books.manage')->name('admin.upload');
+    Route::get('/onboard', \App\Livewire\Admin\BookOnboarding::class)->middleware('staff:books.manage')->name('admin.onboard');
+    Route::get('/books/{book}', BookManager::class)->middleware('staff:books.view')->name('admin.book');
+    Route::get('/books/{book}/details', \App\Livewire\Admin\BookReviewDetails::class)->middleware('staff:books.view')->name('admin.book-details');
+    Route::get('/books/{book}/review/{language?}', \App\Livewire\Admin\BookReviewer::class)
+        ->middleware('staff:translations.review|layout.review')->name('admin.review');
+
+    // Engine Comparison (V7 vs V8) — Test route
+    Route::get('/engine-compare/{book}', \App\Livewire\Admin\EngineCompare::class)->middleware('staff:books.view')->name('admin.engine-compare');
+
+    // Review Queue — Per-page review with approve/reject/edit
+    Route::get('/review-queue/{book}/{language?}', \App\Livewire\Admin\ReviewQueue::class)
+        ->middleware('staff:translations.review|layout.review')->name('admin.review-queue');
+
+    // Font Manager — View source fonts, mappings, upload custom fonts
+    Route::get('/fonts/{book}', \App\Livewire\Admin\FontManager::class)->middleware('staff:books.manage')->name('admin.fonts');
 });
 
-// Engine Comparison (V7 vs V8) — Test route
-Route::get('/admin/engine-compare/{book}', \App\Livewire\Admin\EngineCompare::class)->name('admin.engine-compare');
-
-// Review Queue — Per-page review with approve/reject/edit
-Route::get('/admin/review-queue/{book}/{language?}', \App\Livewire\Admin\ReviewQueue::class)->name('admin.review-queue');
-
-// Font Manager — View source fonts, mappings, upload custom fonts
-Route::get('/admin/fonts/{book}', \App\Livewire\Admin\FontManager::class)->name('admin.fonts');
+// Readers and raw PDFs: staff only until customer entitlements and previews exist
+// (task 3.1 replaces this with an entitlement/preview check).
+Route::middleware(['auth', 'verified', 'staff:books.view'])->group(function () {
 
 // Flipbook viewer
 Route::get('/flipbook/{book}', function (Book $book) {
@@ -224,4 +231,6 @@ Route::get('/raw-pdf/{book}', function (Book $book) {
         'Content-Disposition' => 'inline; filename="' . basename($pdfPath) . '"',
     ]);
 })->name('raw-pdf');
+
+}); // end staff-only readers
 

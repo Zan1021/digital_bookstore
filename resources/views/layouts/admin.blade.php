@@ -43,11 +43,17 @@
                     <img src="{{ asset('images/logo-white.png') }}" alt="Logo" class="h-8 mr-2">
                 </a>
                 <a href="{{ route('admin.dashboard') }}" class="px-3 py-1 rounded hover:bg-brand-700 transition text-sm">Dashboard</a>
+                @can('books.manage')
                 <a href="{{ route('admin.upload') }}" class="px-3 py-1 rounded hover:bg-brand-700 transition text-sm">Upload Books</a>
+                @endcan
                 <a href="{{ route('store') }}" class="px-3 py-1 rounded hover:bg-brand-700 transition text-sm" target="_blank">View Store ↗</a>
             </div>
-            <div class="text-sm text-brand-200">
-                Publisher Admin
+            <div class="flex items-center gap-3 text-sm text-brand-200">
+                <a href="{{ route('profile') }}" class="hover:text-white transition">{{ auth()->user()->name }}</a>
+                <form method="POST" action="{{ route('logout') }}">
+                    @csrf
+                    <button type="submit" class="px-3 py-1 rounded hover:bg-brand-700 hover:text-white transition">Log out</button>
+                </form>
             </div>
         </div>
     </nav>

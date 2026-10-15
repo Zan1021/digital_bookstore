@@ -47,10 +47,13 @@
                     <span class="bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full font-medium">31% off</span>
                 </div>
 
-                {{-- Preview button — small, under price --}}
+                {{-- Preview button — small, under price. Readers are staff-only until
+                     customer previews exist (task 3.1), so only staff see it for now. --}}
+                @can('books.view')
                 <a href="{{ route('flipbook', $book) }}" class="inline-block mt-3 text-xs text-brand-500 hover:text-brand-700 font-medium">
                     ▶ Preview Flipbook
                 </a>
+                @endcan
 
                 {{-- Features --}}
                 <div class="flex flex-wrap gap-2 mt-5">
