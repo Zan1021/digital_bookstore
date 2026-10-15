@@ -40,7 +40,18 @@ class TranslateEditionJob implements ShouldQueue
         $this->onQueue('ai'); // paid translation calls (task 5.2)
     }
 
+    /**
+     * Timed as translate.edition (task 5.3): the whole job; its translate.text and
+     * translate.render stages are timed inside the services.
+     */
     public function handle(TranslationService $translator, PdfTranslationService $renderer): void
+    {
+        \App\Support\StageTimer::run('translate.edition', fn () => $this->handleUntimed($translator, $renderer),
+            Translation::whereKey($this->translationId)->value('book_id'),
+            ['translation_id' => $this->translationId], $this->attempts());
+    }
+
+    private function handleUntimed(TranslationService $translator, PdfTranslationService $renderer): void
     {
         $edition = Translation::with('book')->find($this->translationId);
         if (! $edition || ! $edition->book) {

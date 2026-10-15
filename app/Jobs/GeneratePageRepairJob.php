@@ -44,7 +44,14 @@ class GeneratePageRepairJob implements ShouldQueue
         return "page_repair:{$translationId}:{$page}";
     }
 
+    /** Timed as ai.page_repair (task 5.3). */
     public function handle(IllustrationTextService $illus): void
+    {
+        \App\Support\StageTimer::run('ai.page_repair', fn () => $this->handleUntimed($illus),
+            $this->bookId, ['translation_id' => $this->translationId, 'page' => $this->page], $this->attempts());
+    }
+
+    private function handleUntimed(IllustrationTextService $illus): void
     {
         $book = Book::find($this->bookId);
         $edition = Translation::find($this->translationId);

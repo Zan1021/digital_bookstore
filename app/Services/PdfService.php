@@ -23,7 +23,18 @@ class PdfService
     /**
      * Process an uploaded PDF: store it, extract text, create book record, auto-narrate.
      */
+    /** Timed as intake.upload (task 5.3); the run is linked to the book it creates. */
     public function processUpload(UploadedFile $file): Book
+    {
+        return \App\Support\StageTimer::run('intake.upload', function ($run) use ($file) {
+            $book = $this->processUploadUntimed($file);
+            $run->forceFill(['book_id' => $book->id])->save();
+
+            return $book;
+        }, null, ['bytes' => $file->getSize()]);
+    }
+
+    private function processUploadUntimed(UploadedFile $file): Book
     {
         // Store the PDF under a URL-SAFE filename. The original name often contains
         // spaces and apostrophes (e.g. "Kolulu's Home.pdf"); stored verbatim those break

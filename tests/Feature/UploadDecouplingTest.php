@@ -26,7 +26,8 @@ class UploadDecouplingTest extends TestCase
         $src = $this->source('app/Services/PdfService.php');
 
         // processUpload() must no longer call the auto-narration path.
-        $upload = substr($src, strpos($src, 'function processUpload'));
+        // The upload work lives in processUploadUntimed (processUpload is the task 5.3 timing wrapper).
+        $upload = substr($src, strpos($src, 'function processUploadUntimed'));
         $upload = substr($upload, 0, strpos($upload, "\n    }") + 6);
 
         $this->assertStringNotContainsString('autoNarrate(', $upload,
@@ -38,7 +39,8 @@ class UploadDecouplingTest extends TestCase
     public function test_upload_stores_a_url_safe_slugged_filename(): void
     {
         $src = $this->source('app/Services/PdfService.php');
-        $upload = substr($src, strpos($src, 'function processUpload'));
+        // The upload work lives in processUploadUntimed (processUpload is the task 5.3 timing wrapper).
+        $upload = substr($src, strpos($src, 'function processUploadUntimed'));
         $upload = substr($upload, 0, strpos($upload, "\n    }") + 6);
 
         // The stored filename must be slugged — storing the raw client name verbatim

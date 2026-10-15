@@ -32,7 +32,14 @@ class AnalyzeBookClassificationJob implements ShouldQueue
         $this->onQueue('intake'); // part of the upload pipeline (task 5.2)
     }
 
+    /** Timed as intake.classify (task 5.3). */
     public function handle(ClassificationAnalyzer $analyzer, DescriptionWriter $writer): void
+    {
+        \App\Support\StageTimer::run('intake.classify', fn () => $this->handleUntimed($analyzer, $writer),
+            $this->bookId, [], $this->attempts());
+    }
+
+    private function handleUntimed(ClassificationAnalyzer $analyzer, DescriptionWriter $writer): void
     {
         $book = Book::find($this->bookId);
         if (!$book) {

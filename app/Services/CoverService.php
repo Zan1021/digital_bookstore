@@ -15,7 +15,13 @@ use Symfony\Component\Process\Process;
  */
 class CoverService
 {
+    /** Timed as intake.cover (task 5.3). */
     public function generate(Book $book): bool
+    {
+        return \App\Support\StageTimer::run('intake.cover', fn () => $this->generateUntimed($book), $book->id);
+    }
+
+    private function generateUntimed(Book $book): bool
     {
         if (! $book->pdf_path || ! AssetStorage::disk()->exists($book->pdf_path)) {
             return false;

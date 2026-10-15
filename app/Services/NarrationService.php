@@ -51,7 +51,15 @@ class NarrationService
     /**
      * Generate narration for a book in a specific language.
      */
+    /** Timed as narration.generate (task 5.3); a refused or failed narration is recorded as failed. */
     public function narrate(Book $book, string $languageCode, string $voiceId, string $voiceName, int $dramaLevel = 90, int $speedLevel = 30): Narration
+    {
+        return \App\Support\StageTimer::run('narration.generate',
+            fn () => $this->narrateUntimed($book, $languageCode, $voiceId, $voiceName, $dramaLevel, $speedLevel),
+            $book->id, ['language' => $languageCode, 'voice_id' => $voiceId]);
+    }
+
+    private function narrateUntimed(Book $book, string $languageCode, string $voiceId, string $voiceName, int $dramaLevel = 90, int $speedLevel = 30): Narration
     {
         // Independent narration gate (spec Req 5.4): a translated edition must be
         // APPROVED before narration. Re-checked here so the service is safe even if

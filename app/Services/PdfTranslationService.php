@@ -552,7 +552,14 @@ class PdfTranslationService
      * The flat translated_text path is retained ONLY as a fallback for when the
      * engine cannot produce a contract for a source (no structural manifest).
      */
+    /** Timed as translate.render (task 5.3), whether a job or an admin button asks. */
     public function createTranslatedPdf(Book $book, Translation $translation): string
+    {
+        return \App\Support\StageTimer::run('translate.render', fn () => $this->createTranslatedPdfUntimed($book, $translation),
+            $book->id, ['language' => $translation->language_code, 'translation_id' => $translation->id]);
+    }
+
+    private function createTranslatedPdfUntimed(Book $book, Translation $translation): string
     {
         // Per-edition serialization (unified-rendering-and-testing D1). Concurrent renders of
         // the SAME edition must not race on the staging/public artifacts — whether triggered

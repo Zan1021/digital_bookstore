@@ -885,7 +885,14 @@ PROMPT;
      * This ensures 1:1 coverage and proper mapping for rendering.
      * Falls back to the legacy translate() method if no manifest exists.
      */
+    /** Timed as translate.text (task 5.3). */
     public function translateWithManifest(Book $book, string $languageCode): Translation
+    {
+        return \App\Support\StageTimer::run('translate.text', fn () => $this->translateWithManifestUntimed($book, $languageCode),
+            $book->id, ['language' => $languageCode]);
+    }
+
+    private function translateWithManifestUntimed(Book $book, string $languageCode): Translation
     {
         // FRESHNESS / PROVENANCE GUARD (spec §5.2): never trust a stale or old-builder
         // manifest. Structured pages (vocab/table merged headers) render correctly ONLY
