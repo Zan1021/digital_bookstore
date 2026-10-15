@@ -367,14 +367,13 @@
     <audio id="audio-player" preload="none"></audio>
     <audio id="page-turn-sound" preload="auto" src="{{ asset('sounds/page-turn.mp3') }}"></audio>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script src="https://unpkg.com/page-flip@2.0.7/dist/js/page-flip.browser.js"></script>
+    {{-- PDF.js 3.11.174 + StPageFlip 2.0.7, bundled (no CDN). The script below is a module so
+         it runs after the bundle has set pdfjsLib, St and the pdf.js worker. --}}
+    @vite(['resources/js/pdf-readers.js'])
 
-    <script>
+    <script type="module">
     (function() {
         'use strict';
-
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
         const CONFIG = {
             pdfUrl: @json($pdfUrl),

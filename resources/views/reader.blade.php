@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
     <title>{{ $book->title }} — Smart Reader</title>
-    <link rel="preconnect" href="https://cdnjs.cloudflare.com">
     <style>
         /* ===== RESET & BASE ===== */
         *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
@@ -929,12 +928,9 @@
     </div>
     </div><!-- /.reader-shell (now wraps all panels so their @click bindings work) -->
 
-    <!-- PDF.js -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <!-- StPageFlip 2.0.7 (pinned) — page-curl turn effect -->
-    <script src="https://cdn.jsdelivr.net/npm/page-flip@2.0.7/dist/js/page-flip.browser.min.js"></script>
+    <!-- PDF.js 3.11.174 + StPageFlip 2.0.7, bundled (no CDN); sets pdfjsLib, St and the worker -->
+    @vite(['resources/js/pdf-readers.js'])
     <script>
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
     // Register with Alpine the officially-recommended way (Alpine.data on alpine:init).
     // This avoids the global-function x-data pitfalls that were preventing the reader
@@ -2030,6 +2026,6 @@
     }
     </script>
     <!-- Alpine.js — loaded AFTER component function is defined -->
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    @vite(['resources/js/alpine.js'])
 </body>
 </html>

@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ $book->title }} — Page-Curl Prototype</title>
-    <link rel="preconnect" href="https://cdnjs.cloudflare.com">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         html, body { overflow: hidden; height: 100%; }
@@ -59,13 +58,11 @@
         <button id="next-btn">Next ›</button>
     </div>
 
-    <!-- PDF.js (same version as the live reader) -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
-    <!-- StPageFlip 2.0.7 (pinned) -->
-    <script src="https://cdn.jsdelivr.net/npm/page-flip@2.0.7/dist/js/page-flip.browser.min.js"></script>
+    <!-- PDF.js + StPageFlip (same versions as the live reader), bundled (no CDN). The script
+         below is a module so it runs after the bundle has set pdfjsLib, St and the worker. -->
+    @vite(['resources/js/pdf-readers.js'])
 
-    <script>
+    <script type="module">
     (async function () {
         const PDF_URL = @json($pdfUrl);
         const CROP = @json($book->getCropBoxFractions()); // {left,top,right,bottom}
