@@ -231,8 +231,8 @@ class BookManager extends Component
 
         // Delete translated PDF if it exists
         $pdfPath = "books/translated/{$this->book->id}_{$translation->language_code}.pdf";
-        if (\Illuminate\Support\Facades\Storage::disk('public')->exists($pdfPath)) {
-            \Illuminate\Support\Facades\Storage::disk('public')->delete($pdfPath);
+        if (\App\Assets\AssetStorage::disk()->exists($pdfPath)) {
+            \App\Assets\AssetStorage::disk()->delete($pdfPath);
         }
 
         $translation->delete();
@@ -249,18 +249,18 @@ class BookManager extends Component
         // Delete audio files
         if ($narration->page_audio_paths) {
             foreach ($narration->page_audio_paths as $path) {
-                if (\Illuminate\Support\Facades\Storage::disk('public')->exists($path)) {
-                    \Illuminate\Support\Facades\Storage::disk('public')->delete($path);
+                if (\App\Assets\AssetStorage::disk()->exists($path)) {
+                    \App\Assets\AssetStorage::disk()->delete($path);
                 }
                 $timingPath = str_replace('.mp3', '-timing.json', $path);
-                if (\Illuminate\Support\Facades\Storage::disk('public')->exists($timingPath)) {
-                    \Illuminate\Support\Facades\Storage::disk('public')->delete($timingPath);
+                if (\App\Assets\AssetStorage::disk()->exists($timingPath)) {
+                    \App\Assets\AssetStorage::disk()->delete($timingPath);
                 }
             }
         }
 
-        if ($narration->audio_path && \Illuminate\Support\Facades\Storage::disk('public')->exists($narration->audio_path)) {
-            \Illuminate\Support\Facades\Storage::disk('public')->delete($narration->audio_path);
+        if ($narration->audio_path && \App\Assets\AssetStorage::disk()->exists($narration->audio_path)) {
+            \App\Assets\AssetStorage::disk()->delete($narration->audio_path);
         }
 
         $narration->delete();

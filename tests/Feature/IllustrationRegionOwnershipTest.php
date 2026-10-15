@@ -98,7 +98,7 @@ class IllustrationRegionOwnershipTest extends TestCase
      */
     public function test_renderer_owned_pages_returns_cover_and_back_cover(): void
     {
-        Storage::fake('public');
+        Storage::fake('private');
         $book = Book::create([
             'title' => 'Colours', 'original_language' => 'en', 'page_count' => 16,
             'status' => 'ready', 'pdf_path' => 'books/pdfs/colours.pdf',
@@ -110,7 +110,7 @@ class IllustrationRegionOwnershipTest extends TestCase
             $pages[] = ['page_number' => $p, 'page_type' => $p === 2 ? 'copyright' : 'story'];
         }
         $pages[] = ['page_number' => 16, 'page_type' => 'back_cover'];
-        Storage::disk('public')->put(
+        Storage::disk('private')->put(
             'books/manifests/colours_manifest.json',
             json_encode(['pages' => $pages])
         );
@@ -122,7 +122,7 @@ class IllustrationRegionOwnershipTest extends TestCase
 
     public function test_renderer_owned_pages_handles_mixed_case_and_fails_safe(): void
     {
-        Storage::fake('public');
+        Storage::fake('private');
 
         // page_type casing must not matter (strtolower in the resolver).
         $book = Book::create([
@@ -130,7 +130,7 @@ class IllustrationRegionOwnershipTest extends TestCase
             'status' => 'ready', 'pdf_path' => 'books/pdfs/c.pdf',
             'manifest_path' => 'books/manifests/casing_manifest.json',
         ]);
-        Storage::disk('public')->put('books/manifests/casing_manifest.json', json_encode([
+        Storage::disk('private')->put('books/manifests/casing_manifest.json', json_encode([
             'pages' => [
                 ['page_number' => 1, 'page_type' => 'COVER'],
                 ['page_number' => 2, 'page_type' => 'Back_Cover'],

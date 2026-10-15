@@ -30,7 +30,7 @@ class BookUploadWizardTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        Storage::fake('public');
+        Storage::fake('private');
 
         // Approved fonts the wizard offers — stub the fonts dir with two families.
         $fontsDir = storage_path('app/fonts');

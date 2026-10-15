@@ -454,21 +454,33 @@ class Book extends Model
             $book->deleteAssociatedFiles();
             $book->deleteAssociatedRecords();
         });
+
+        // The store cover is trimmed like the reader page; redraw it when the trim changes.
+        static::updated(function (Book $book) {
+            if ($book->wasChanged(['crop_enabled', 'crop_box', 'crop_percent'])) {
+                app(\App\Services\CoverService::class)->generate($book);
+            }
+        });
     }
 
     /**
-     * Remove every file this book owns on the public disk: the source PDF, cover
-     * image, manifest, per-language translated PDFs, the per-book narration audio
-     * tree, and the engine comparison/overlay renders. Deletes whole directories
-     * rather than guessing individual filenames, so partial/stale path columns
-     * cannot leave orphans behind.
+     * Remove every file this book owns: on the private asset disk the source PDF,
+     * manifest, per-language translated PDFs, the per-book narration audio tree and
+     * the engine comparison/overlay renders; on the public disk the store cover image.
+     * Deletes whole directories rather than guessing individual filenames, so
+     * partial/stale path columns cannot leave orphans behind.
      */
     public function deleteAssociatedFiles(): void
     {
-        $disk = Storage::disk('public');
+        $disk = \App\Assets\AssetStorage::disk();
+
+        // The cover is the only book file on the public disk (store marketing image).
+        if ($this->cover_image && Storage::disk('public')->exists($this->cover_image)) {
+            Storage::disk('public')->delete($this->cover_image);
+        }
 
         // Single stored file paths on the book record.
-        foreach (['pdf_path', 'cover_image', 'manifest_path'] as $attr) {
+        foreach (['pdf_path', 'manifest_path'] as $attr) {
             $path = $this->getAttribute($attr);
             if ($path && $disk->exists($path)) {
                 $disk->delete($path);

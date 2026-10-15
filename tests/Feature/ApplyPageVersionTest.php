@@ -27,8 +27,8 @@ class ApplyPageVersionTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        Storage::fake('public');
-        Storage::disk('public')->put(self::LIVE_REL, self::LIVE_BYTES);
+        Storage::fake('private');
+        Storage::disk('private')->put(self::LIVE_REL, self::LIVE_BYTES);
     }
 
     private function edition(): Translation
@@ -64,7 +64,7 @@ class ApplyPageVersionTest extends TestCase
 
         $this->assertTrue($res['ok']);
         $this->assertSame('keep_cheap', $res['applied']);
-        $this->assertSame(self::LIVE_BYTES, Storage::disk('public')->get(self::LIVE_REL),
+        $this->assertSame(self::LIVE_BYTES, Storage::disk('private')->get(self::LIVE_REL),
             'keep_cheap must not change the edition PDF');
 
         $tr->refresh();
@@ -121,7 +121,7 @@ class ApplyPageVersionTest extends TestCase
 
         $this->assertFalse($res['ok']);
         $this->assertSame('NO_CANDIDATE_TO_APPLY', $res['reason']);
-        $this->assertSame(self::LIVE_BYTES, Storage::disk('public')->get(self::LIVE_REL));
+        $this->assertSame(self::LIVE_BYTES, Storage::disk('private')->get(self::LIVE_REL));
     }
 
     public function test_rejects_invalid_choice(): void

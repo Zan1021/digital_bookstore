@@ -20,4 +20,8 @@ return [
     // Lifetime of a signed asset URL.
     'signed_url_minutes' => (int) env('ASSETS_SIGNED_URL_MINUTES', 5),
 
+    // Lifetime of a signed staff-only working-file link (review images, upload previews):
+    // long enough for a review page left open, still bound to the staff member.
+    'staff_file_minutes' => (int) env('ASSETS_STAFF_FILE_MINUTES', 60),
+
 ];

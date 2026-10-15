@@ -97,7 +97,7 @@ class NarrationGateTest extends TestCase
                 'alignment' => ['characters' => [], 'character_start_times_seconds' => []],
             ], 200),
         ]);
-        \Illuminate\Support\Facades\Storage::fake('public');
+        \Illuminate\Support\Facades\Storage::fake('private');
 
         $book = Book::create([
             'title' => '6-pager', 'original_language' => 'en', 'page_count' => 6,

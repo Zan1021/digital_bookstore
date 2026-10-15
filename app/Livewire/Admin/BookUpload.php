@@ -56,8 +56,8 @@ class BookUpload extends Component
         if (count($this->files) > 0) {
             // Store first file temporarily for preview
             $firstFile = $this->files[0];
-            $tempPath = $firstFile->store('temp-previews', 'public');
-            $this->previewPdfUrl = asset('storage/' . $tempPath);
+            $tempPath = $firstFile->store('books/temp-previews', config('assets.disk'));
+            $this->previewPdfUrl = \App\Assets\AssetStorage::staffFileUrl($tempPath) ?? '';
 
             // Auto-detect TrimBox
             $pdfService = app(PdfService::class);

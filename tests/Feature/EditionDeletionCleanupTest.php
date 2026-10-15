@@ -23,7 +23,7 @@ class EditionDeletionCleanupTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        Storage::fake('public');
+        Storage::fake('private');
     }
 
     private function edition(Book $book, string $lang, BookPage $page): Translation
@@ -35,8 +35,8 @@ class EditionDeletionCleanupTest extends TestCase
             'status' => 'draft',
             'rendered_pdf_path' => "books/translated/{$book->id}_{$lang}.pdf",
         ]);
-        Storage::disk('public')->put($t->rendered_pdf_path, 'PDF');
-        Storage::disk('public')->put("books/comparison/{$book->id}_{$lang}/source/source_001.png", 'PNG');
+        Storage::disk('private')->put($t->rendered_pdf_path, 'PDF');
+        Storage::disk('private')->put("books/comparison/{$book->id}_{$lang}/source/source_001.png", 'PNG');
 
         TranslatedPage::create([
             'translation_id' => $t->id, 'book_page_id' => $page->id,
@@ -44,7 +44,7 @@ class EditionDeletionCleanupTest extends TestCase
         ]);
 
         // Edition narration + audio tree.
-        Storage::disk('public')->put("narrations/book-{$book->id}/{$lang}/page-1.mp3", 'MP3');
+        Storage::disk('private')->put("narrations/book-{$book->id}/{$lang}/page-1.mp3", 'MP3');
         Narration::create([
             'book_id' => $book->id, 'language_code' => $lang, 'language_name' => strtoupper($lang),
             'voice_id' => 'v', 'voice_name' => 'V', 'status' => 'completed',
@@ -60,9 +60,9 @@ class EditionDeletionCleanupTest extends TestCase
             'title' => 'Multi', 'original_language' => 'en', 'page_count' => 1,
             'status' => 'ready', 'pdf_path' => 'books/pdfs/multi.pdf',
         ]);
-        Storage::disk('public')->put($book->pdf_path, 'PDF');
+        Storage::disk('private')->put($book->pdf_path, 'PDF');
         // English narration (source) — must survive an af-edition delete.
-        Storage::disk('public')->put("narrations/book-{$book->id}/en/page-1.mp3", 'MP3');
+        Storage::disk('private')->put("narrations/book-{$book->id}/en/page-1.mp3", 'MP3');
         Narration::create([
             'book_id' => $book->id, 'language_code' => 'en', 'language_name' => 'English',
             'voice_id' => 'v', 'voice_name' => 'V', 'status' => 'completed',
@@ -77,21 +77,21 @@ class EditionDeletionCleanupTest extends TestCase
 
         // af gone.
         $this->assertDatabaseMissing('translations', ['id' => $af->id]);
-        Storage::disk('public')->assertMissing("books/translated/{$book->id}_af.pdf");
-        Storage::disk('public')->assertMissing("books/comparison/{$book->id}_af");
-        Storage::disk('public')->assertMissing("narrations/book-{$book->id}/af");
+        Storage::disk('private')->assertMissing("books/translated/{$book->id}_af.pdf");
+        Storage::disk('private')->assertMissing("books/comparison/{$book->id}_af");
+        Storage::disk('private')->assertMissing("narrations/book-{$book->id}/af");
         $this->assertDatabaseMissing('narrations', ['book_id' => $book->id, 'language_code' => 'af']);
         $this->assertSame(0, TranslatedPage::where('translation_id', $af->id)->count());
 
         // zu edition intact.
         $this->assertDatabaseHas('translations', ['id' => $zu->id]);
-        Storage::disk('public')->assertExists("books/translated/{$book->id}_zu.pdf");
-        Storage::disk('public')->assertExists("narrations/book-{$book->id}/zu/page-1.mp3");
+        Storage::disk('private')->assertExists("books/translated/{$book->id}_zu.pdf");
+        Storage::disk('private')->assertExists("narrations/book-{$book->id}/zu/page-1.mp3");
 
         // Original book + English narration intact.
         $this->assertDatabaseHas('books', ['id' => $book->id]);
-        Storage::disk('public')->assertExists($book->pdf_path);
-        Storage::disk('public')->assertExists("narrations/book-{$book->id}/en/page-1.mp3");
+        Storage::disk('private')->assertExists($book->pdf_path);
+        Storage::disk('private')->assertExists("narrations/book-{$book->id}/en/page-1.mp3");
         $this->assertDatabaseHas('narrations', ['book_id' => $book->id, 'language_code' => 'en']);
     }
 }

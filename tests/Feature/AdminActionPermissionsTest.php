@@ -38,7 +38,7 @@ class AdminActionPermissionsTest extends TestCase
     {
         parent::setUp();
         $this->seed(RolesAndPermissionsSeeder::class);
-        Storage::fake('public');
+        Storage::fake('private');
         $this->book = Book::create([
             'title' => 'Action Book', 'original_language' => 'en', 'page_count' => 1,
             'status' => 'ready', 'pdf_path' => 'books/pdfs/a.pdf',

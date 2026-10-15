@@ -79,33 +79,5 @@
 
     @livewireScripts
 
-    {{-- PDF.js for rendering book covers (cropped to TrimBox) --}}
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-            document.querySelectorAll('.pdf-cover').forEach(async (canvas) => {
-                const pdfUrl = canvas.dataset.pdf;
-                if (!pdfUrl) return;
-                try {
-                    const pdf = await pdfjsLib.getDocument(pdfUrl).promise;
-                    const page = await pdf.getPage(1);
-                    const vp = page.getViewport({ scale: 1 });
-                    const cropPct = 0.065;
-                    const cropX = vp.width * cropPct;
-                    const cropY = vp.height * cropPct;
-                    const trimW = vp.width - (cropX * 2);
-                    const trimH = vp.height - (cropY * 2);
-                    const container = canvas.parentElement;
-                    const scale = Math.max(container.clientWidth / trimW, container.clientHeight / trimH) * 2;
-                    canvas.width = Math.round(trimW * scale);
-                    canvas.height = Math.round(trimH * scale);
-                    const ctx = canvas.getContext('2d');
-                    ctx.translate(-cropX * scale, -cropY * scale);
-                    await page.render({ canvasContext: ctx, viewport: page.getViewport({ scale }) }).promise;
-                } catch (e) {}
-            });
-        });
-    </script>
 </body>
 </html>

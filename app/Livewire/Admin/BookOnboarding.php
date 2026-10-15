@@ -66,8 +66,8 @@ class BookOnboarding extends Component
             $this->validate(['pdfFile' => 'file|mimes:pdf|max:102400']);
 
             // Store temp for preview
-            $tempPath = $this->pdfFile->store('temp-previews', 'public');
-            $this->previewPdfUrl = asset('storage/' . $tempPath);
+            $tempPath = $this->pdfFile->store('books/temp-previews', config('assets.disk'));
+            $this->previewPdfUrl = \App\Assets\AssetStorage::staffFileUrl($tempPath) ?? '';
 
             // Auto-detect crop marks
             $pdfService = app(PdfService::class);

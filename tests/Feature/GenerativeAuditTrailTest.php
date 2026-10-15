@@ -28,8 +28,8 @@ class GenerativeAuditTrailTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        Storage::fake('public');
-        Storage::disk('public')->put(self::LIVE_REL, "%PDF-1.7\nED\n%%EOF");
+        Storage::fake('private');
+        Storage::disk('private')->put(self::LIVE_REL, "%PDF-1.7\nED\n%%EOF");
     }
 
     private function edition(): Translation

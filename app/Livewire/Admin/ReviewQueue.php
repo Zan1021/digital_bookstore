@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Admin;
 
+use App\Assets\AssetStorage;
 use App\Livewire\Attributes\Can;
 use App\Models\Book;
 use App\Models\Translation;
@@ -110,7 +111,7 @@ class ReviewQueue extends Component
             $pageNum
         );
 
-        if (! Storage::disk('public')->exists($path)) {
+        if (! AssetStorage::disk()->exists($path)) {
             return null;
         }
 
@@ -119,26 +120,8 @@ class ReviewQueue extends Component
         // Cache-bust with the file's last-modified time: a re-render overwrites the
         // file at the SAME path, so without ?v=... the browser serves the stale cached
         // image and the reviewer sees an out-of-date comparison.
-        return $this->bustCache(Storage::disk('public')->url($path), $path);
-    }
-
-    /**
-     * Append a last-modified cache-busting query param to a public-disk URL so the
-     * browser re-fetches whenever the underlying file changes (comparison images and
-     * fix-previews are overwritten in place on every re-render). Falls back to the bare
-     * URL if the timestamp can't be read — never throws over a cosmetic concern.
-     */
-    private function bustCache(string $url, string $diskPath): string
-    {
-        try {
-            $v = Storage::disk('public')->lastModified($diskPath);
-        } catch (\Throwable $e) {
-            return $url;
-        }
-        if (! $v) {
-            return $url;
-        }
-        return $url . (str_contains($url, '?') ? '&' : '?') . 'v=' . $v;
+        // Signed staff-only link; a new signature per render also defeats stale caching.
+        return AssetStorage::staffFileUrl($path);
     }
 
     #[Can('translations.review|layout.review')]
@@ -528,19 +511,17 @@ class ReviewQueue extends Component
         $this->fixRecompare = null;
     }
 
-    /** Expose a storage/app/temp artifact to the browser via a one-off public copy. The
-     *  candidate/current previews live in temp (not web-served); copy into the public disk
-     *  under a predictable, page-scoped name so the <img> can load it. */
+    /** Expose a storage/app/temp artifact to the browser: copy it onto the private asset
+     *  disk under a predictable, page-scoped name and hand out a signed staff-only link. */
     private function publicUrlForTemp(?string $absPath): ?string
     {
         if (!$absPath || !is_file($absPath)) {
             return null;
         }
         $rel = "books/fixpreview/{$this->book->id}_{$this->language}/" . basename($absPath);
-        Storage::disk('public')->put($rel, file_get_contents($absPath));
-        // Cache-bust: the preview name is page-scoped and overwritten on each AI fix, so a
-        // bare URL would show the previous candidate. Key off the SOURCE file's mtime.
-        return $this->bustCache(Storage::disk('public')->url($rel), $rel);
+        AssetStorage::disk()->put($rel, file_get_contents($absPath));
+        // Signed staff-only link; a new signature per render shows the latest candidate.
+        return AssetStorage::staffFileUrl($rel);
     }
 
     /**

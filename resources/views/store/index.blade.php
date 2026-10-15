@@ -270,8 +270,7 @@
                         <a href="{{ route('store.book', $book) }}" class="group">
                             <div class="bg-white rounded-2xl border border-gray-100 overflow-hidden shadow-sm hover:shadow-xl transition duration-300 card-hover">
                                 <div class="aspect-[3/4] bg-gray-50 overflow-hidden relative">
-                                    <canvas class="pdf-cover w-full h-full object-cover group-hover:scale-105 transition duration-300"
-                                            data-pdf="{{ asset('storage/' . $book->pdf_path) }}"></canvas>
+                                    <x-book-cover :book="$book" class="group-hover:scale-105 transition duration-300" />
                                     <div class="absolute top-2 left-2 flex flex-col gap-1">
                                         @if($book->narrations->where('status', 'completed')->count() > 0)
                                             <span class="bg-purple-500 text-white text-[9px] px-2 py-0.5 rounded-full font-medium">AUDIO</span>
@@ -399,32 +398,6 @@
         </div>
     </footer>
 
-    {{-- PDF.js for covers — crops to TrimBox --}}
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script>
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-        document.querySelectorAll('.pdf-cover').forEach(async (canvas) => {
-            const pdfUrl = canvas.dataset.pdf;
-            if (!pdfUrl) return;
-            try {
-                const pdf = await pdfjsLib.getDocument(pdfUrl).promise;
-                const page = await pdf.getPage(1);
-                const vp = page.getViewport({ scale: 1 });
-                const cropPct = 0.065;
-                const cropX = vp.width * cropPct;
-                const cropY = vp.height * cropPct;
-                const trimW = vp.width - (cropX * 2);
-                const trimH = vp.height - (cropY * 2);
-                const container = canvas.parentElement;
-                const scale = Math.max(container.clientWidth / trimW, container.clientHeight / trimH) * 2;
-                canvas.width = Math.round(trimW * scale);
-                canvas.height = Math.round(trimH * scale);
-                const ctx = canvas.getContext('2d');
-                ctx.translate(-cropX * scale, -cropY * scale);
-                await page.render({ canvasContext: ctx, viewport: page.getViewport({ scale }) }).promise;
-            } catch (e) {}
-        });
-    </script>
 </body>
 </html>
 

@@ -895,7 +895,7 @@ PROMPT;
         $this->ensureFreshManifest($book);
 
         // Check if manifest exists
-        if (!$book->manifest_path || !\Illuminate\Support\Facades\Storage::disk('public')->exists($book->manifest_path)) {
+        if (!$book->manifest_path || !\App\Assets\AssetStorage::disk()->exists($book->manifest_path)) {
             Log::info("No manifest for book {$book->id}, falling back to legacy translation.");
             return $this->translate($book, $languageCode);
         }
@@ -909,7 +909,7 @@ PROMPT;
         );
 
         // Load manifest
-        $manifestJson = \Illuminate\Support\Facades\Storage::disk('public')->get($book->manifest_path);
+        $manifestJson = \App\Assets\AssetStorage::disk()->get($book->manifest_path);
         $manifest = json_decode($manifestJson, true);
 
         if (!$manifest || empty($manifest['pages'])) {
@@ -1090,7 +1090,7 @@ PROMPT;
     private function ensureFreshManifest(Book $book): void
     {
         try {
-            $disk = \Illuminate\Support\Facades\Storage::disk('public');
+            $disk = \App\Assets\AssetStorage::disk();
 
             // No source PDF → nothing to rebuild from.
             if (!$book->pdf_path || !$disk->exists($book->pdf_path)) {

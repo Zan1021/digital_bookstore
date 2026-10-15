@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Assets\AssetStorage;
 use App\Models\Book;
 use App\Models\Translation;
 use Illuminate\Support\Facades\Log;
@@ -58,10 +59,10 @@ class VisualQaService
     public function review(Book $book, Translation $translation, ?array $pageNumbers = null): array
     {
         $fingerprint = (string) ($translation->render_fingerprint ?? '');
-        $sourcePath = Storage::disk('public')->path($book->pdf_path);
+        $sourcePath = AssetStorage::disk()->path($book->pdf_path);
         $translatedRel = $translation->rendered_pdf_path
             ?? "books/translated/{$book->id}_{$translation->language_code}.pdf";
-        $translatedPath = Storage::disk('public')->path($translatedRel);
+        $translatedPath = AssetStorage::disk()->path($translatedRel);
 
         $pages = $pageNumbers ?: ($this->allPageNumbers($sourcePath) ?: $this->allPageNumbers($translatedPath));
 

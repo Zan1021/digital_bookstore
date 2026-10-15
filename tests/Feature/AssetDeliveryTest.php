@@ -189,4 +189,58 @@ class AssetDeliveryTest extends TestCase
 
         $this->get(route('assets.show', [$this->book, 'audio', 'lang' => 'af', 'page' => 1]))->assertNotFound();
     }
+
+    // ---- Task 3.2: staff working files, store covers, readers -------------------------
+
+    public function test_staff_file_links_are_signed_staff_only_and_stay_in_the_asset_tree(): void
+    {
+        Storage::disk('private')->put('books/comparison/1_af/source/source_001.png', 'PNG');
+        $staff = $this->staff();
+        $this->actingAs($staff);
+        $url = \App\Assets\AssetStorage::staffFileUrl('books/comparison/1_af/source/source_001.png');
+
+        $this->get($url)->assertOk()->assertStreamedContent('PNG');
+        $this->actingAs($this->staff())->get($url)->assertForbidden();           // other user
+        $this->actingAs(User::factory()->create())->get($url)->assertForbidden(); // customer
+
+        $this->actingAs($staff);
+        $this->get(str_replace('source_001', 'source_002', $url))->assertForbidden(); // tampered
+        foreach (['.env', 'books/../.env', 'covers/1.jpg'] as $outside) {
+            $this->get(\App\Assets\AssetStorage::staffFileUrl($outside))->assertNotFound();
+        }
+    }
+
+    public function test_the_store_shows_the_cover_image_and_never_the_pdf(): void
+    {
+        $this->book->forceFill(['status' => 'published'])->save();
+        $html = $this->get(route('store.book', $this->book))->assertOk()->getContent();
+        $this->assertStringNotContainsString($this->book->pdf_path, $html);
+        $this->assertStringNotContainsString('data-pdf', $html);
+        $this->assertStringContainsString('No cover yet', $html);
+
+        $this->book->forceFill(['cover_image' => 'covers/'.$this->book->id.'.jpg'])->saveQuietly();
+        $this->get(route('store.book', $this->book))->assertOk()
+            ->assertSee('/storage/covers/'.$this->book->id.'.jpg', false);
+    }
+
+    public function test_readers_load_the_pdf_and_audio_through_the_gatekeeper(): void
+    {
+        $this->actingAs($this->staff());
+
+        $html = $this->get(route('reader', ['book' => $this->book, 'lang' => 'af']))->assertOk()->getContent();
+        $this->assertStringContainsString('assets\/books\/'.$this->book->id.'\/edition-pdf', $html);
+        $this->assertStringContainsString('assets\/books\/'.$this->book->id.'\/audio', $html);
+        $this->assertStringNotContainsString('books/1/af.pdf', $html);
+        $this->assertStringNotContainsString('/storage/', $html);
+    }
+
+    public function test_changing_the_crop_redraws_the_cover(): void
+    {
+        $covers = \Mockery::mock(\App\Services\CoverService::class);
+        $covers->shouldReceive('generate')->once()->with(\Mockery::on(fn ($b) => $b->is($this->book)))->andReturn(true);
+        $this->app->instance(\App\Services\CoverService::class, $covers);
+
+        $this->book->update(['title' => 'Renamed']); // not a crop change: no redraw
+        $this->book->update(['crop_enabled' => true, 'crop_box' => ['left' => 0.05, 'top' => 0.05, 'right' => 0.05, 'bottom' => 0.05]]);
+    }
 }

@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Assets\AssetStorage;
 use App\Models\Book;
 use App\Models\Translation;
 use Illuminate\Support\Facades\Cache;
@@ -503,7 +504,7 @@ class PdfTranslationService
      */
     public function extractMetadata(Book $book): array
     {
-        $pdfPath = Storage::disk('public')->path($book->pdf_path);
+        $pdfPath = AssetStorage::disk()->path($book->pdf_path);
         $outputPath = storage_path("app/temp/metadata_{$book->id}.json");
 
         // Ensure temp directory exists
@@ -631,7 +632,7 @@ class PdfTranslationService
 
     private function createTranslatedPdfInner(Book $book, Translation $translation): string
     {
-        $originalPath = Storage::disk('public')->path($book->pdf_path);
+        $originalPath = AssetStorage::disk()->path($book->pdf_path);
         $translatedPages = $translation->translatedPages()->orderBy('page_number')->get();
 
         if ($translatedPages->isEmpty()) {
@@ -695,8 +696,8 @@ class PdfTranslationService
         $outputFilename = "books/translated/{$book->id}_{$translation->language_code}.pdf";
         $stagingFilename = "books/staging/{$book->id}_{$translation->language_code}_"
             . substr(bin2hex(random_bytes(6)), 0, 10) . ".pdf";
-        $publicPath = Storage::disk('public')->path($outputFilename);
-        $outputPath = Storage::disk('public')->path($stagingFilename); // engine writes HERE
+        $publicPath = AssetStorage::disk()->path($outputFilename);
+        $outputPath = AssetStorage::disk()->path($stagingFilename); // engine writes HERE
         foreach ([dirname($publicPath), dirname($outputPath)] as $dir) {
             if (!is_dir($dir)) {
                 mkdir($dir, 0755, true);
@@ -1345,7 +1346,7 @@ class PdfTranslationService
         // (e.g. staging promotion failed) — readiness then fails closed (INVALID_GATE_INPUT).
         $outputSha256 = null;
         try {
-            $finalAbs = Storage::disk('public')->path($finalRel);
+            $finalAbs = AssetStorage::disk()->path($finalRel);
             if (is_file($finalAbs)) {
                 $outputSha256 = hash_file('sha256', $finalAbs);
             }
@@ -1401,7 +1402,7 @@ class PdfTranslationService
      */
     private function generateComparisonImages(Book $book, Translation $translation): void
     {
-        $disk = Storage::disk('public');
+        $disk = AssetStorage::disk();
         $sourceAbs = $disk->path($book->pdf_path);
         $translatedRel = $translation->rendered_pdf_path
             ?? "books/translated/{$book->id}_{$translation->language_code}.pdf";
@@ -1515,7 +1516,7 @@ PYCODE;
     {
         $renderedRel = $translation->rendered_pdf_path
             ?? "books/translated/{$book->id}_{$translation->language_code}.pdf";
-        $renderedPath = Storage::disk('public')->path($renderedRel);
+        $renderedPath = AssetStorage::disk()->path($renderedRel);
         if (!is_file($renderedPath)) {
             throw new \RuntimeException("Rendered PDF not found: {$renderedRel}");
         }
@@ -1531,7 +1532,7 @@ PYCODE;
         file_put_contents($manifestPath, json_encode($manifest, JSON_UNESCAPED_UNICODE));
 
         $imageRel = "books/overlays/{$book->id}_{$translation->language_code}_p{$pageNumber}.png";
-        $imagePath = Storage::disk('public')->path($imageRel);
+        $imagePath = AssetStorage::disk()->path($imageRel);
         $imageDir = dirname($imagePath);
         if (!is_dir($imageDir)) {
             mkdir($imageDir, 0755, true);
@@ -1556,7 +1557,7 @@ PYCODE;
         }
 
         $data = json_decode($process->getOutput(), true) ?: [];
-        $data['image_url'] = Storage::disk('public')->url($imageRel);
+        $data['image_url'] = AssetStorage::staffFileUrl($imageRel);
         return $data;
     }
 
@@ -1602,7 +1603,7 @@ PYCODE;
      */
     public function buildStableIdContract(Book $book, string $targetLanguage): array
     {
-        $pdfPath = Storage::disk('public')->path($book->pdf_path);
+        $pdfPath = AssetStorage::disk()->path($book->pdf_path);
         $outputPath = storage_path("app/temp/contract_{$book->id}_{$targetLanguage}.json");
         $tempDir = dirname($outputPath);
         if (!is_dir($tempDir)) {
@@ -1914,7 +1915,7 @@ PYCODE;
      */
     public function reRenderItems(Book $book, Translation $translation, array $contractItems, array $itemTranslations, array $itemIds): array
     {
-        $originalPath = Storage::disk('public')->path($book->pdf_path);
+        $originalPath = AssetStorage::disk()->path($book->pdf_path);
         $translationsData = $this->buildIdMappedTranslationsJson($contractItems, $itemTranslations);
 
         $translationsPath = storage_path("app/temp/reitems_{$book->id}_{$translation->language_code}.json");
@@ -1925,7 +1926,7 @@ PYCODE;
         file_put_contents($translationsPath, json_encode($translationsData, JSON_UNESCAPED_UNICODE));
 
         $outputFilename = "books/translated/{$book->id}_{$translation->language_code}.pdf";
-        $outputPath = Storage::disk('public')->path($outputFilename);
+        $outputPath = AssetStorage::disk()->path($outputFilename);
 
         $process = new Process([
             'python',

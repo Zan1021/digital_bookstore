@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Assets\AssetStorage;
 use App\Models\Book;
 use App\Models\Narration;
 use App\Models\Translation;
@@ -118,8 +119,8 @@ class NarrationService
         // do not linger as orphans. The map we persist below is the single source of truth,
         // but we also keep the on-disk tree clean.
         $audioDir = "narrations/book-{$book->id}/{$languageCode}";
-        if (Storage::disk('public')->exists($audioDir)) {
-            Storage::disk('public')->deleteDirectory($audioDir);
+        if (AssetStorage::disk()->exists($audioDir)) {
+            AssetStorage::disk()->deleteDirectory($audioDir);
         }
 
         $pageAudioPaths = [];
@@ -199,13 +200,13 @@ class NarrationService
 
         $audioContent = base64_decode($audioBase64);
         $path = "narrations/book-{$bookId}/{$langCode}/page-{$identifier}.mp3";
-        Storage::disk('public')->put($path, $audioContent);
+        AssetStorage::disk()->put($path, $audioContent);
 
         // Save word timestamps if available
         $alignment = $data['alignment'] ?? null;
         if ($alignment) {
             $timingPath = "narrations/book-{$bookId}/{$langCode}/page-{$identifier}-timing.json";
-            Storage::disk('public')->put($timingPath, json_encode($alignment));
+            AssetStorage::disk()->put($timingPath, json_encode($alignment));
         }
 
         return $path;

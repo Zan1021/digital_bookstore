@@ -981,7 +981,7 @@
             // Encode each path SEGMENT so any special character in a stored filename
             // (apostrophe, spaces, parentheses, …) produces a valid URL. The previous
             // single-char space replace left apostrophes to HTML-entity encode and 403.
-            pdfUrl: '{{ rtrim(asset("storage"), "/") . "/" . collect(explode("/", $pdfPath))->map(fn($s) => rawurlencode($s))->implode("/") }}?v={{ $pdfVersion ?? 0 }}',
+            pdfUrl: @json($pdfUrl . (str_contains($pdfUrl, '?') ? '&' : '?') . 'v=' . ($pdfVersion ?? 0)),
             minimumRenderedPageWidth: 120,
             controlsTimeout: null,
             // FlipHTML5-style book layout config (book-agnostic — no per-book constants).

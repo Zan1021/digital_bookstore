@@ -27,7 +27,7 @@ class GenerativeAutoPathGuardTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        Storage::fake('public');
+        Storage::fake('private');
         // Module enabled, but GENERATIVE explicitly OFF (shipped default).
         config()->set('bookstore.illustration_text.enabled', true);
         config()->set('bookstore.illustration_text.generative', false);
@@ -39,8 +39,8 @@ class GenerativeAutoPathGuardTest extends TestCase
             'title' => 'Guard Book', 'original_language' => 'en', 'page_count' => 3,
             'status' => 'ready', 'pdf_path' => 'books/pdfs/g.pdf',
         ]);
-        Storage::disk('public')->put('books/pdfs/g.pdf', "%PDF-1.7\nSRC\n%%EOF");
-        Storage::disk('public')->put('books/translated/1_af.pdf', "%PDF-1.7\nED\n%%EOF");
+        Storage::disk('private')->put('books/pdfs/g.pdf', "%PDF-1.7\nSRC\n%%EOF");
+        Storage::disk('private')->put('books/translated/1_af.pdf', "%PDF-1.7\nED\n%%EOF");
         return Translation::create([
             'book_id' => $book->id, 'language_code' => 'af', 'language_name' => 'AF',
             'status' => 'draft', 'render_status' => Translation::STATE_READY_FOR_REVIEW,

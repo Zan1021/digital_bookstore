@@ -36,7 +36,7 @@
     @if($translation->rendered_pdf_path ?? null)
         <div class="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg flex items-center justify-between">
             <span class="text-sm text-green-700">📄 Rendered PDF available — edit text below and click "Re-render PDF" to update.</span>
-            <a href="{{ asset('storage/' . $translation->rendered_pdf_path) }}" target="_blank"
+            <a href="{{ \App\Assets\AssetStorage::url($book, 'edition-pdf', $translation->language_code) }}" target="_blank"
                class="text-xs bg-green-600 text-white px-3 py-1.5 rounded-lg hover:bg-green-700">📥 View/Download PDF</a>
         </div>
     @endif

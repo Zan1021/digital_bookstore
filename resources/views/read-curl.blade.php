@@ -67,7 +67,7 @@
 
     <script>
     (async function () {
-        const PDF_URL = '{{ asset("storage/" . str_replace(" ", "%20", $pdfPath)) }}';
+        const PDF_URL = @json($pdfUrl);
         const CROP = @json($book->getCropBoxFractions()); // {left,top,right,bottom}
         const BOOK_ID = {{ $book->id }};
         const LANG = '{{ $lang }}';

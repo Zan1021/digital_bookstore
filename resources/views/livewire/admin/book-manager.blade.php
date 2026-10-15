@@ -329,7 +329,7 @@
                                         </svg>
                                         <span class="text-sm text-green-700 font-medium">Rendered PDF ready</span>
                                     </div>
-                                    <a href="{{ asset('storage/' . $translation->rendered_pdf_path) }}" target="_blank"
+                                    <a href="{{ \App\Assets\AssetStorage::url($book, 'edition-pdf', $translation->language_code) }}" target="_blank"
                                        class="text-xs bg-green-600 text-white px-3 py-1.5 rounded-lg hover:bg-green-700 transition">
                                         📥 Download / View PDF
                                     </a>
@@ -458,7 +458,7 @@
                                 </div>
                                 @if($narration->audio_path)
                                     <audio controls class="w-full mt-2">
-                                        <source src="{{ asset('storage/' . $narration->audio_path) }}" type="audio/mpeg">
+                                        <source src="{{ \App\Assets\AssetStorage::staffFileUrl($narration->audio_path) }}" type="audio/mpeg">
                                     </audio>
                                 @endif
                                 @if($narration->page_audio_paths)
@@ -469,7 +469,7 @@
                                                 <div class="flex items-center space-x-3 bg-gray-50 rounded-lg p-2">
                                                     <span class="text-xs font-medium text-gray-500 w-16">Page {{ $pageNum }}</span>
                                                     <audio controls class="flex-1 h-8">
-                                                        <source src="{{ asset('storage/' . $audioPath) }}" type="audio/mpeg">
+                                                        <source src="{{ \App\Assets\AssetStorage::staffFileUrl($audioPath) }}" type="audio/mpeg">
                                                     </audio>
                                                 </div>
                                             @endforeach

@@ -227,8 +227,7 @@
                     @foreach($books as $book)
                         <a href="{{ route('store.book', $book) }}" class="group block">
                             <div class="aspect-[3/4] bg-gray-100 rounded-xl overflow-hidden mb-3 border border-gray-100 group-hover:shadow-lg transition">
-                                <canvas class="pdf-cover w-full h-full object-cover"
-                                        data-pdf="{{ asset('storage/' . $book->pdf_path) }}"></canvas>
+                                <x-book-cover :book="$book" />
                             </div>
                             <h3 class="text-sm font-semibold text-gray-800 leading-snug group-hover:text-brand-600">{{ $book->title }}</h3>
                             <p class="text-xs text-gray-400 mt-0.5">

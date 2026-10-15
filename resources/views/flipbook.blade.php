@@ -377,7 +377,7 @@
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
         const CONFIG = {
-            pdfUrl: '{{ asset("storage/" . $pdfPath) }}',
+            pdfUrl: @json($pdfUrl),
             cropPercent: {{ $book->crop_enabled ? $book->crop_percent : 0 }},
             totalPages: {{ $book->page_count }},
             narrationStartPage: {{ $book->narration_start_page }},
@@ -385,11 +385,7 @@
         };
 
         // Page audio map
-        const pageAudioMap = @json(
-            collect($book->narrations->where('status', 'completed')->first()?->page_audio_paths ?? [])
-                ->mapWithKeys(fn($path, $page) => [(int)$page => asset('storage/' . $path)])
-                ->toArray()
-        );
+        const pageAudioMap = @json($pageAudioUrls);
 
         // Page timing data for word-level sync
         const pageTimingMap = @json($pageTimingMap ?? []);

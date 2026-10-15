@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Assets\AssetStorage;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -33,7 +34,7 @@ class Translation extends Model
      */
     public function deleteAssociatedFiles(): void
     {
-        $disk = Storage::disk('public');
+        $disk = AssetStorage::disk();
 
         $pdfs = array_filter([
             $this->rendered_pdf_path,

@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Admin;
 
+use App\Assets\AssetStorage;
 use App\Livewire\Attributes\Can;
 use App\Models\Book;
 use Illuminate\Support\Facades\Process;
@@ -80,7 +81,7 @@ class FontManager extends Component
     private function loadFontInfo()
     {
         // Get fonts from the source PDF
-        $pdfPath = Storage::disk('public')->path($this->book->pdf_path);
+        $pdfPath = AssetStorage::disk()->path($this->book->pdf_path);
         $fontsDir = storage_path('app/fonts');
 
         // List available local fonts

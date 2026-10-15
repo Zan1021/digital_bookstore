@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Admin;
 
+use App\Assets\AssetStorage;
 use App\Livewire\Attributes\Can;
 use App\Models\Book;
 use App\Models\Translation;
@@ -50,10 +51,10 @@ class EngineCompare extends Component
             return;
         }
 
-        // Version the viewer URL by the output hash so a stale PNG/PDF is never paired
-        // with a newer candidate (A2.4). Falls back to updated_at when no hash yet.
-        $version = $translation->output_sha256 ?: (string) $translation->updated_at?->timestamp;
-        $this->v8PdfUrl = Storage::disk('public')->url($translation->rendered_pdf_path) . '?v=' . $version;
+        // Signed staff-only link to the rendered edition on the private disk; a fresh
+        // signature per render means the browser never pairs a stale PDF with a newer
+        // candidate (A2.4).
+        $this->v8PdfUrl = AssetStorage::staffFileUrl($translation->rendered_pdf_path);
         $this->v8Report = $translation->decodeQaReport();
 
         if (in_array($translation->render_status, Translation::BLOCKING_RENDER_STATES, true)) {

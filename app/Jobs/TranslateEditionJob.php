@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Assets\AssetStorage;
 use App\Models\ProcessingJob;
 use App\Models\Translation;
 use App\Services\PdfTranslationService;
@@ -147,7 +148,7 @@ class TranslateEditionJob implements ShouldQueue
      */
     private function clearRenderArtifacts(Translation $edition): void
     {
-        $disk = Storage::disk('public');
+        $disk = AssetStorage::disk();
         $pdfs = array_filter([
             $edition->rendered_pdf_path,
             "books/translated/{$edition->book_id}_{$edition->language_code}.pdf",

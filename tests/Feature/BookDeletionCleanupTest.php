@@ -30,7 +30,8 @@ class BookDeletionCleanupTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        Storage::fake('public');
+        Storage::fake('private'); // protected book files
+        Storage::fake('public');  // the store cover image
     }
 
     private function makeBookWithEverything(): Book
@@ -46,11 +47,11 @@ class BookDeletionCleanupTest extends TestCase
         ]);
 
         // Source + book-level files.
-        Storage::disk('public')->put($book->pdf_path, 'PDF');
+        Storage::disk('private')->put($book->pdf_path, 'PDF');
         Storage::disk('public')->put($book->cover_image, 'PNG');
-        Storage::disk('public')->put($book->manifest_path, '{}');
+        Storage::disk('private')->put($book->manifest_path, '{}');
         // Manifest by naming convention (books/manifests/{id}_manifest.json).
-        Storage::disk('public')->put("books/manifests/{$book->id}_manifest.json", '{}');
+        Storage::disk('private')->put("books/manifests/{$book->id}_manifest.json", '{}');
 
         // Pages.
         $pageIds = [];
@@ -77,9 +78,9 @@ class BookDeletionCleanupTest extends TestCase
             'status' => 'draft',
             'rendered_pdf_path' => "books/translated/{$book->id}_af.pdf",
         ]);
-        Storage::disk('public')->put($translation->rendered_pdf_path, 'PDF');
+        Storage::disk('private')->put($translation->rendered_pdf_path, 'PDF');
         // Legacy guessed path too.
-        Storage::disk('public')->put("books/translated/{$book->id}_af.pdf", 'PDF');
+        Storage::disk('private')->put("books/translated/{$book->id}_af.pdf", 'PDF');
         foreach (range(1, 3) as $n) {
             TranslatedPage::create([
                 'translation_id' => $translation->id,
@@ -88,17 +89,17 @@ class BookDeletionCleanupTest extends TestCase
                 'translated_text' => "Bladsy {$n}",
             ]);
         }
-        Storage::disk('public')->put("books/comparison/{$book->id}_af/source/source_001.png", 'PNG');
-        Storage::disk('public')->put("books/comparison/{$book->id}_af/translated/translated_001.png", 'PNG');
-        Storage::disk('public')->put("books/comparison/{$book->id}_af/comparison_report.json", '{}');
+        Storage::disk('private')->put("books/comparison/{$book->id}_af/source/source_001.png", 'PNG');
+        Storage::disk('private')->put("books/comparison/{$book->id}_af/translated/translated_001.png", 'PNG');
+        Storage::disk('private')->put("books/comparison/{$book->id}_af/comparison_report.json", '{}');
 
         // Narration audio tree (the exact shape that used to orphan).
         $audioPaths = [];
         foreach (range(1, 3) as $n) {
             $mp3 = "narrations/book-{$book->id}/en/page-{$n}.mp3";
             $timing = "narrations/book-{$book->id}/en/page-{$n}-timing.json";
-            Storage::disk('public')->put($mp3, 'MP3');
-            Storage::disk('public')->put($timing, '{}');
+            Storage::disk('private')->put($mp3, 'MP3');
+            Storage::disk('private')->put($timing, '{}');
             $audioPaths[] = $mp3;
         }
         Narration::create([
@@ -120,8 +121,8 @@ class BookDeletionCleanupTest extends TestCase
         $bookId = $book->id;
 
         // Sanity: everything exists first.
-        Storage::disk('public')->assertExists("narrations/book-{$bookId}/en/page-1.mp3");
-        Storage::disk('public')->assertExists("books/comparison/{$bookId}_af/source/source_001.png");
+        Storage::disk('private')->assertExists("narrations/book-{$bookId}/en/page-1.mp3");
+        Storage::disk('private')->assertExists("books/comparison/{$bookId}_af/source/source_001.png");
         $this->assertDatabaseCount('translated_pages', 3);
 
         $book->delete();
@@ -135,16 +136,16 @@ class BookDeletionCleanupTest extends TestCase
         $this->assertDatabaseCount('processing_jobs', 0);
 
         // --- Disk: nothing left behind ---
-        Storage::disk('public')->assertMissing('books/pdfs/teardown.pdf');
+        Storage::disk('private')->assertMissing('books/pdfs/teardown.pdf');
         Storage::disk('public')->assertMissing('covers/teardown.png');
-        Storage::disk('public')->assertMissing('books/manifests/custom_manifest.json');
-        Storage::disk('public')->assertMissing("books/manifests/{$bookId}_manifest.json");
-        Storage::disk('public')->assertMissing("books/translated/{$bookId}_af.pdf");
-        Storage::disk('public')->assertMissing("narrations/book-{$bookId}");
-        Storage::disk('public')->assertMissing("narrations/book-{$bookId}/en/page-1.mp3");
-        Storage::disk('public')->assertMissing("narrations/book-{$bookId}/en/page-3-timing.json");
-        Storage::disk('public')->assertMissing("books/comparison/{$bookId}_af");
-        Storage::disk('public')->assertMissing("books/comparison/{$bookId}_af/translated/translated_001.png");
+        Storage::disk('private')->assertMissing('books/manifests/custom_manifest.json');
+        Storage::disk('private')->assertMissing("books/manifests/{$bookId}_manifest.json");
+        Storage::disk('private')->assertMissing("books/translated/{$bookId}_af.pdf");
+        Storage::disk('private')->assertMissing("narrations/book-{$bookId}");
+        Storage::disk('private')->assertMissing("narrations/book-{$bookId}/en/page-1.mp3");
+        Storage::disk('private')->assertMissing("narrations/book-{$bookId}/en/page-3-timing.json");
+        Storage::disk('private')->assertMissing("books/comparison/{$bookId}_af");
+        Storage::disk('private')->assertMissing("books/comparison/{$bookId}_af/translated/translated_001.png");
     }
 
     public function test_deleting_one_book_leaves_another_books_files_intact(): void
@@ -155,12 +156,12 @@ class BookDeletionCleanupTest extends TestCase
         $remove->delete();
 
         // Removed book gone.
-        Storage::disk('public')->assertMissing("narrations/book-{$remove->id}");
-        Storage::disk('public')->assertMissing("books/comparison/{$remove->id}_af");
+        Storage::disk('private')->assertMissing("narrations/book-{$remove->id}");
+        Storage::disk('private')->assertMissing("books/comparison/{$remove->id}_af");
 
         // Kept book untouched.
-        Storage::disk('public')->assertExists("narrations/book-{$keep->id}/en/page-1.mp3");
-        Storage::disk('public')->assertExists("books/comparison/{$keep->id}_af/source/source_001.png");
+        Storage::disk('private')->assertExists("narrations/book-{$keep->id}/en/page-1.mp3");
+        Storage::disk('private')->assertExists("books/comparison/{$keep->id}_af/source/source_001.png");
         $this->assertDatabaseHas('books', ['id' => $keep->id]);
     }
 }

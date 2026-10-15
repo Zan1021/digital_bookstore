@@ -29,10 +29,10 @@ class GenerativeRepairCandidateTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        Storage::fake('public');
+        Storage::fake('private');
         // A minimal, valid-enough PDF stand-in for the live edition. The repair + render
         // are mocked, so the bytes only need to be stable and identifiable.
-        Storage::disk('public')->put(self::LIVE_REL, "%PDF-1.7\nLIVE-EDITION-BYTES\n%%EOF");
+        Storage::disk('private')->put(self::LIVE_REL, "%PDF-1.7\nLIVE-EDITION-BYTES\n%%EOF");
     }
 
     private function edition(): Translation
@@ -51,7 +51,7 @@ class GenerativeRepairCandidateTest extends TestCase
 
     private function liveBytes(): string
     {
-        return Storage::disk('public')->get(self::LIVE_REL);
+        return Storage::disk('private')->get(self::LIVE_REL);
     }
 
     public function test_produces_candidate_without_touching_live_edition(): void
@@ -94,7 +94,7 @@ class GenerativeRepairCandidateTest extends TestCase
     public function test_fails_closed_when_edition_pdf_missing(): void
     {
         $tr = $this->edition();
-        Storage::disk('public')->delete(self::LIVE_REL);
+        Storage::disk('private')->delete(self::LIVE_REL);
 
         $svc = $this->serviceThatRepairs(modifies: true);
         $res = $svc->repairPageGenerative($tr->book, $tr, 1);

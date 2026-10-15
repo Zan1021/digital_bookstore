@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Assets\AssetStorage;
 use App\Models\Book;
 use App\Models\BookPage;
 use Illuminate\Http\UploadedFile;
@@ -33,10 +34,11 @@ class PdfService
         $originalStem = pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME);
         $safeStem = \Illuminate\Support\Str::slug($originalStem) ?: 'book';
         $filename = time() . '_' . $safeStem . '.pdf';
-        $path = $file->storeAs('books/pdfs', $filename, 'public');
+        // Source PDFs are protected: private asset disk, never web-served (Req 20.1).
+        $path = $file->storeAs('books/pdfs', $filename, config('assets.disk'));
 
         // Parse PDF for text and page count
-        $fullPath = Storage::disk('public')->path($path);
+        $fullPath = AssetStorage::disk()->path($path);
         $pdf = $this->parser->parseFile($fullPath);
         $pages = $pdf->getPages();
 
@@ -69,6 +71,9 @@ class PdfService
         }
 
         $book->update(['status' => 'ready']);
+
+        // Store cover image (public) so the store never loads the private PDF.
+        app(CoverService::class)->generate($book);
 
         // Auto-classify + draft a store description on import (book-classification-discovery
         // spec, Req 4.1/5.1). Queued so upload isn't blocked; failure never blocks the book.
@@ -275,11 +280,11 @@ class PdfService
         $manifestPath = storage_path("app/public/books/manifests/{$book->id}_manifest.json");
 
         if ($pdfPath === null) {
-            if (!$book->pdf_path || !Storage::disk('public')->exists($book->pdf_path)) {
+            if (!$book->pdf_path || !AssetStorage::disk()->exists($book->pdf_path)) {
                 Log::warning("rebuildManifest: source PDF missing for book {$book->id}");
                 return false;
             }
-            $pdfPath = Storage::disk('public')->path($book->pdf_path);
+            $pdfPath = AssetStorage::disk()->path($book->pdf_path);
         }
 
         if (!file_exists($scriptPath)) {
@@ -335,7 +340,7 @@ class PdfService
     public function detectCropMarks(string $pdfPath): ?array
     {
         try {
-            $fullPath = Storage::disk('public')->path($pdfPath);
+            $fullPath = AssetStorage::disk()->path($pdfPath);
             if (!is_file($fullPath)) {
                 return null;
             }
@@ -424,7 +429,7 @@ class PdfService
     private function detectCropMarksFallback(string $pdfPath): ?array
     {
         try {
-            $fullPath = Storage::disk('public')->path($pdfPath);
+            $fullPath = AssetStorage::disk()->path($pdfPath);
             $pdf = $this->parser->parseFile($fullPath);
             $pages = $pdf->getPages();
 

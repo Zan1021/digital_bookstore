@@ -72,6 +72,8 @@ Route::get('/assets/books/{book}/{kind}', [\App\Http\Controllers\AssetController
     ->where('kind', $assetKinds)->middleware('throttle:120,1')->name('assets.show');
 Route::get('/assets/serve/{book}/{kind}', [\App\Http\Controllers\AssetController::class, 'serve'])
     ->where('kind', $assetKinds)->middleware(['signed', 'throttle:120,1'])->name('assets.serve');
+Route::get('/assets/file', [\App\Http\Controllers\AssetController::class, 'file'])
+    ->middleware(['signed', 'throttle:240,1'])->name('assets.file');
 
 // Readers and raw PDFs: staff only until customer entitlements and previews exist
 // (task 3.1 replaces this with an entitlement/preview check).
@@ -87,7 +89,7 @@ Route::get('/flipbook/{book}', function (Book $book) {
 
     if ($requestedLang && $requestedLang !== 'en') {
         $translation = $book->translations->where('language_code', $requestedLang)->first();
-        if ($translation && $translation->rendered_pdf_path && \Illuminate\Support\Facades\Storage::disk('public')->exists($translation->rendered_pdf_path)) {
+        if ($translation && $translation->rendered_pdf_path && \App\Assets\AssetStorage::disk()->exists($translation->rendered_pdf_path)) {
             $pdfPath = $translation->rendered_pdf_path;
         }
     }
@@ -98,8 +100,8 @@ Route::get('/flipbook/{book}', function (Book $book) {
     if ($narration && $narration->page_audio_paths) {
         foreach ($narration->page_audio_paths as $page => $path) {
             $timingPath = str_replace('.mp3', '-timing.json', $path);
-            if (\Illuminate\Support\Facades\Storage::disk('public')->exists($timingPath)) {
-                $timing = json_decode(\Illuminate\Support\Facades\Storage::disk('public')->get($timingPath), true);
+            if (\App\Assets\AssetStorage::disk()->exists($timingPath)) {
+                $timing = json_decode(\App\Assets\AssetStorage::disk()->get($timingPath), true);
                 if ($timing) {
                     $pageTimingMap[(int)$page] = $timing;
                 }
@@ -107,7 +109,17 @@ Route::get('/flipbook/{book}', function (Book $book) {
         }
     }
 
-    return view('flipbook', compact('book', 'pageTimingMap', 'pdfPath'));
+    $pdfUrl = $pdfPath === $book->pdf_path
+        ? \App\Assets\AssetStorage::url($book, 'source-pdf')
+        : \App\Assets\AssetStorage::url($book, 'edition-pdf', $requestedLang);
+    $pageAudioUrls = [];
+    if ($narration && $narration->page_audio_paths && ! $narration->is_outdated) {
+        foreach (array_keys($narration->page_audio_paths) as $page) {
+            $pageAudioUrls[(int) $page] = \App\Assets\AssetStorage::url($book, 'audio', $narration->language_code, (int) $page);
+        }
+    }
+
+    return view('flipbook', compact('book', 'pageTimingMap', 'pdfPath', 'pdfUrl', 'pageAudioUrls'));
 })->name('flipbook');
 
 // Smart Book Reader (new)
@@ -119,7 +131,7 @@ Route::get('/read/{book}', function (Book $book) {
 
     if ($lang !== 'en') {
         $translation = $book->translations->where('language_code', $lang)->first();
-        if ($translation && $translation->rendered_pdf_path && \Illuminate\Support\Facades\Storage::disk('public')->exists($translation->rendered_pdf_path)) {
+        if ($translation && $translation->rendered_pdf_path && \App\Assets\AssetStorage::disk()->exists($translation->rendered_pdf_path)) {
             $pdfPath = $translation->rendered_pdf_path;
         }
     }
@@ -136,12 +148,13 @@ Route::get('/read/{book}', function (Book $book) {
 
     if ($narration && $narration->page_audio_paths) {
         foreach ($narration->page_audio_paths as $page => $path) {
-            $pageAudioMap[(int)$page] = asset('storage/' . $path);
+            // Through the asset gatekeeper (private disk, signed URL), never /storage.
+            $pageAudioMap[(int)$page] = \App\Assets\AssetStorage::url($book, 'audio', $lang, (int) $page);
             
             // Load timing data for word-level sync
             $timingPath = str_replace('.mp3', '-timing.json', $path);
-            if (\Illuminate\Support\Facades\Storage::disk('public')->exists($timingPath)) {
-                $timing = json_decode(\Illuminate\Support\Facades\Storage::disk('public')->get($timingPath), true);
+            if (\App\Assets\AssetStorage::disk()->exists($timingPath)) {
+                $timing = json_decode(\App\Assets\AssetStorage::disk()->get($timingPath), true);
                 if ($timing) {
                     $pageTimingMap[(int)$page] = $timing;
                 }
@@ -164,7 +177,7 @@ Route::get('/read/{book}', function (Book $book) {
         try {
             // Read labels from the SOURCE PDF (printed folios are identical across
             // languages, and the translated render may not carry /PageLabels through).
-            $absPdf = \Illuminate\Support\Facades\Storage::disk('public')->path($book->pdf_path);
+            $absPdf = \App\Assets\AssetStorage::disk()->path($book->pdf_path);
             if (is_file($absPdf)) {
                 $proc = new \Symfony\Component\Process\Process([
                     'python', '-c',
@@ -197,7 +210,7 @@ Route::get('/read/{book}', function (Book $book) {
     // making every re-render invisible in the browser. Book-agnostic.
     $pdfVersion = 0;
     try {
-        $absRendered = \Illuminate\Support\Facades\Storage::disk('public')->path($pdfPath);
+        $absRendered = \App\Assets\AssetStorage::disk()->path($pdfPath);
         if (is_file($absRendered)) {
             $pdfVersion = filemtime($absRendered) ?: 0;
         }
@@ -205,7 +218,11 @@ Route::get('/read/{book}', function (Book $book) {
         $pdfVersion = 0;
     }
 
-    return view('reader', compact('book', 'pdfPath', 'lang', 'pageAudioMap', 'pageTimingMap', 'pageLabels', 'pdfVersion'));
+    $pdfUrl = $pdfPath === $book->pdf_path
+        ? \App\Assets\AssetStorage::url($book, 'source-pdf')
+        : \App\Assets\AssetStorage::url($book, 'edition-pdf', $lang);
+
+    return view('reader', compact('book', 'pdfPath', 'pdfUrl', 'lang', 'pageAudioMap', 'pageTimingMap', 'pageLabels', 'pdfVersion'));
 })->name('reader');
 
 // THROWAWAY page-curl prototype (spec: specs/page-curl-reader). Self-contained, does NOT
@@ -216,11 +233,15 @@ Route::get('/read-curl/{book}', function (Book $book) {
     $pdfPath = $book->pdf_path;
     if ($lang !== 'en') {
         $t = $book->translations->where('language_code', $lang)->first();
-        if ($t && $t->rendered_pdf_path && \Illuminate\Support\Facades\Storage::disk('public')->exists($t->rendered_pdf_path)) {
+        if ($t && $t->rendered_pdf_path && \App\Assets\AssetStorage::disk()->exists($t->rendered_pdf_path)) {
             $pdfPath = $t->rendered_pdf_path;
         }
     }
-    return view('read-curl', compact('book', 'pdfPath', 'lang'));
+    $pdfUrl = $pdfPath === $book->pdf_path
+        ? \App\Assets\AssetStorage::url($book, 'source-pdf')
+        : \App\Assets\AssetStorage::url($book, 'edition-pdf', $lang);
+
+    return view('read-curl', compact('book', 'pdfPath', 'pdfUrl', 'lang'));
 })->name('read-curl');
 
 // RAW PDF — serve the translated PDF directly, no reader/crop, for debugging the engine output.
@@ -230,14 +251,14 @@ Route::get('/raw-pdf/{book}', function (Book $book) {
 
     if ($lang !== 'en') {
         $translation = $book->translations->where('language_code', $lang)->first();
-        if ($translation && $translation->rendered_pdf_path && \Illuminate\Support\Facades\Storage::disk('public')->exists($translation->rendered_pdf_path)) {
+        if ($translation && $translation->rendered_pdf_path && \App\Assets\AssetStorage::disk()->exists($translation->rendered_pdf_path)) {
             $pdfPath = $translation->rendered_pdf_path;
         }
     }
 
-    abort_unless(\Illuminate\Support\Facades\Storage::disk('public')->exists($pdfPath), 404, 'PDF not found');
+    abort_unless(\App\Assets\AssetStorage::disk()->exists($pdfPath), 404, 'PDF not found');
 
-    return response(\Illuminate\Support\Facades\Storage::disk('public')->get($pdfPath), 200, [
+    return response(\App\Assets\AssetStorage::disk()->get($pdfPath), 200, [
         'Content-Type' => 'application/pdf',
         'Content-Disposition' => 'inline; filename="' . basename($pdfPath) . '"',
     ]);

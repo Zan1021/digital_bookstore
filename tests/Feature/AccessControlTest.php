@@ -32,8 +32,8 @@ class AccessControlTest extends TestCase
     {
         parent::setUp();
         $this->seed(RolesAndPermissionsSeeder::class);
-        Storage::fake('public');
-        Storage::disk('public')->put('books/pdfs/a.pdf', '%PDF-1.4 test');
+        Storage::fake('private');
+        Storage::disk('private')->put('books/pdfs/a.pdf', '%PDF-1.4 test');
         $this->book = Book::create([
             'title' => 'Access Book', 'original_language' => 'en', 'page_count' => 1,
             'status' => 'ready', 'pdf_path' => 'books/pdfs/a.pdf',

@@ -58,6 +58,34 @@ class AssetController extends Controller
         ], 'inline');
     }
 
+    /**
+     * Staff-only working file (review renders, engine compare, upload previews). The
+     * path comes from a link the server signed for this staff member; it must stay
+     * inside books/ or narrations/ and is served only to staff with books.view.
+     */
+    public function file(Request $request): Response
+    {
+        abort_unless((int) $request->query('u') === (int) ($request->user()?->id ?? 0), 403);
+
+        $path = (string) $request->query('path');
+        $inAssetTree = str_starts_with($path, 'books/') || str_starts_with($path, 'narrations/');
+        abort_if(! $inAssetTree || str_contains($path, '..') || str_contains($path, '\\'), 404);
+
+        $user = $request->user();
+        if (! $user || $user->isDeactivated() || ! $user->can('admin.access') || ! $user->can('books.view')) {
+            Log::warning('Asset access denied', ['user_id' => $user?->id, 'path' => $path, 'ip' => $request->ip()]);
+            abort(403);
+        }
+
+        $disk = Storage::disk(config('assets.disk'));
+        abort_unless($disk->exists($path), 404);
+
+        return $disk->response($path, null, [
+            'Cache-Control' => 'private, no-store, max-age=0',
+            'X-Content-Type-Options' => 'nosniff',
+        ], 'inline');
+    }
+
     private function assetOrFail(Request $request, Book $book, string $kind): AssetRef
     {
         $page = $request->query('page');

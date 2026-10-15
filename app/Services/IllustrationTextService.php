@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Assets\AssetStorage;
 use App\Models\Book;
 use App\Models\Translation;
 use Illuminate\Support\Facades\Log;
@@ -64,7 +65,7 @@ class IllustrationTextService
 
         // Inventory from the SOURCE PDF (I5), not the translated edition.
         $sourceRel = $book->pdf_path ?? $book->source_pdf_path ?? null;
-        $pdfPath = $sourceRel ? Storage::disk('public')->path($sourceRel) : null;
+        $pdfPath = $sourceRel ? AssetStorage::disk()->path($sourceRel) : null;
         if (!$pdfPath || !is_file($pdfPath)) {
             Log::info('IllustrationText: inventory skipped, no source pdf', ['book' => $book->id]);
             return [];
@@ -149,7 +150,7 @@ class IllustrationTextService
 
         $translatedRel = $translation->rendered_pdf_path
             ?? "books/translated/{$book->id}_{$translation->language_code}.pdf";
-        $pdfPath = Storage::disk('public')->path($translatedRel);
+        $pdfPath = AssetStorage::disk()->path($translatedRel);
 
         $result = ['modified_pages' => [], 'review_pages' => [], 'skipped' => [], 'ok' => true,
                    'coverage' => [], 'issues' => []];
@@ -300,7 +301,7 @@ class IllustrationTextService
     private function rendererOwnedPages(Book $book): array
     {
         try {
-            $disk = Storage::disk('public');
+            $disk = AssetStorage::disk();
             if (!$book->manifest_path || !$disk->exists($book->manifest_path)) {
                 return [];
             }
@@ -332,7 +333,7 @@ class IllustrationTextService
     private function contractOwnedRegions(Book $book): array
     {
         try {
-            $disk = Storage::disk('public');
+            $disk = AssetStorage::disk();
             if (!$book->manifest_path || !$disk->exists($book->manifest_path)) {
                 return [];
             }
@@ -730,7 +731,7 @@ SYS;
         // The LIVE edition PDF. We copy it; we never pass it as a repair --output.
         $translatedRel = $translation->rendered_pdf_path
             ?? "books/translated/{$book->id}_{$translation->language_code}.pdf";
-        $livePath = Storage::disk('public')->path($translatedRel);
+        $livePath = AssetStorage::disk()->path($translatedRel);
         if (!is_file($livePath)) {
             return $fail('MISSING_EDITION_PDF');
         }
@@ -893,7 +894,7 @@ SYS;
         // ---- use_generative: splice the candidate page, then re-compare that page. ----
         $translatedRel = $translation->rendered_pdf_path
             ?? "books/translated/{$book->id}_{$translation->language_code}.pdf";
-        $livePath = Storage::disk('public')->path($translatedRel);
+        $livePath = AssetStorage::disk()->path($translatedRel);
         if (!is_file($livePath)) {
             return $fail('MISSING_EDITION_PDF');
         }

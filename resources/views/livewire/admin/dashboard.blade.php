@@ -122,8 +122,7 @@
                 <div wire:key="book-{{ $book->id }}" class="bg-white rounded-xl border border-gray-100 overflow-hidden shadow-sm hover:shadow-lg transition group">
                     {{-- Cover image --}}
                     <a href="{{ route('reader', $book) }}" class="block relative bg-gray-100 overflow-hidden" style="aspect-ratio: 467/680;">
-                        <canvas class="pdf-cover w-full h-full group-hover:scale-105 transition duration-300"
-                                data-pdf="{{ asset('storage/' . $book->pdf_path) }}"></canvas>
+                        <x-book-cover :book="$book" class="group-hover:scale-105 transition duration-300" />
 
                         {{-- Status badge --}}
                         <span class="absolute top-2 right-2 px-2 py-0.5 rounded-full text-[10px] font-medium

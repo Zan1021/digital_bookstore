@@ -25,7 +25,7 @@
             {{-- Book Cover — fixed size, cropped, no stretch --}}
             <div class="flex justify-center items-start">
                 <div class="w-[450px] rounded-2xl overflow-hidden shadow-2xl flex-shrink-0 border border-gray-100">
-                    <canvas class="pdf-cover w-full" style="display:block;" data-pdf="{{ asset('storage/' . $book->pdf_path) }}"></canvas>
+                    <x-book-cover :book="$book" class="aspect-[3/4]" />
                 </div>
             </div>
 
@@ -169,41 +169,6 @@
         </div>
     </div>
 
-    {{-- PDF.js for cover — crops to TrimBox --}}
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script>
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-        document.querySelectorAll('.pdf-cover').forEach(async (canvas) => {
-            const pdfUrl = canvas.dataset.pdf;
-            if (!pdfUrl) return;
-            try {
-                const pdf = await pdfjsLib.getDocument(pdfUrl).promise;
-                const page = await pdf.getPage(1);
-                const vp = page.getViewport({ scale: 1 });
-
-                // Detect TrimBox from page view (crop 6.5% from each side as default for print-ready PDFs)
-                const cropPct = 0.065;
-                const cropX = vp.width * cropPct;
-                const cropY = vp.height * cropPct;
-                const trimW = vp.width - (cropX * 2);
-                const trimH = vp.height - (cropY * 2);
-
-                // Scale to fit container
-                const container = canvas.parentElement;
-                const scale = Math.min(container.clientWidth / trimW, container.clientHeight / trimH) * 2;
-
-                const fullVp = page.getViewport({ scale });
-                canvas.width = Math.round(trimW * scale);
-                canvas.height = Math.round(trimH * scale);
-
-                const ctx = canvas.getContext('2d');
-                // Offset to crop the edges
-                ctx.translate(-cropX * scale, -cropY * scale);
-
-                await page.render({ canvasContext: ctx, viewport: fullVp }).promise;
-            } catch (e) {}
-        });
-    </script>
 </body>
 </html>
 

@@ -2,6 +2,7 @@
 
 namespace App\Services\Qa;
 
+use App\Assets\AssetStorage;
 use App\Models\Book;
 use App\Models\Translation;
 use App\Services\ExerciseService;
@@ -88,7 +89,7 @@ class BookTestingService
         $fingerprint = (string) ($translation->render_fingerprint ?? '');
         $translatedRel = $translation->rendered_pdf_path
             ?? "books/translated/{$book->id}_{$translation->language_code}.pdf";
-        $translatedPath = Storage::disk('public')->path($translatedRel);
+        $translatedPath = AssetStorage::disk()->path($translatedRel);
 
         // Expected page set derived from the FINAL PDF — includes blank/preserved/image-only
         // pages. If we cannot count the PDF, the set is empty and the gate fails closed.
