@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pymupdf
 from document_model import build_document_scene, summarize_document_scene
 from pdf_translate_v8 import replace_text_in_pdf, extract_page_spans, classify_page
+from corpus_fixtures import SKIP_EXIT
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FONTS = os.path.join(BASE, "storage", "app", "fonts")
@@ -133,7 +134,7 @@ def main():
     books = _discover_second_books(limit=2)
     if not books:
         print("SKIP: no second-book corpus available (nothing to verify)")
-        return 0
+        sys.exit(SKIP_EXIT)
     for src in books:
         print(f"--- {os.path.basename(src)} ---")
         run_book(src)

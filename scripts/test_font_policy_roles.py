@@ -12,6 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from font_policy import resolve_role_font, check_glyph_coverage, load_approved_fonts
+from corpus_fixtures import SKIP_EXIT
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FONTS = os.path.join(BASE, "storage", "app", "fonts")
@@ -33,7 +34,7 @@ reg = load_approved_fonts(FONTS)
 fams = set(reg["families"].keys())
 if not fams:
     print("SKIP: no approved fonts available")
-    sys.exit(0)
+    sys.exit(SKIP_EXIT)
 
 # Pick two distinct approved families to prove the policy actually switches the font.
 have_playpen = any("playpen" in f for f in fams)

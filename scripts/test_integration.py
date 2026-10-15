@@ -28,11 +28,9 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pymupdf
+from corpus_fixtures import SKIP_EXIT, find_corpus_book
 
-KOLULU_PDF = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "Kolulu Engl Series 3 - 2 - A Fun Place.pdf"
-)
+KOLULU_PDF = find_corpus_book("Kolulu Engl Series 3 - 2 - A Fun Place.pdf")
 
 _tests_run = 0
 _tests_passed = 0
@@ -333,9 +331,9 @@ def main():
     print("V8 ENGINE INTEGRATION TESTS (10 required)")
     print("=" * 60)
     
-    if not os.path.isfile(KOLULU_PDF):
-        print(f"\nERROR: Test PDF not found: {KOLULU_PDF}")
-        return 1
+    if KOLULU_PDF is None:
+        print("\nSKIP: corpus book not found: Kolulu Engl Series 3 - 2 - A Fun Place.pdf")
+        return SKIP_EXIT
     
     print()
     test_01_story_page_render()

@@ -7,6 +7,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from document_model import build_document_scene
+from corpus_fixtures import SKIP_EXIT, find_corpus_book
 
 
 def _find_pdf():
@@ -21,14 +22,14 @@ def _find_pdf():
         for f in files:
             if f.lower().endswith(".pdf"):
                 return os.path.join(root, f)
-    return None
+    return find_corpus_book("Kolulu Engl Series 3 - 2 - A Fun Place.pdf")
 
 
 def main():
     pdf = _find_pdf()
     if not pdf:
         print("SKIP: no test PDF available (pass a path or set BOOKSTORE_TEST_PDF)")
-        return 0
+        return SKIP_EXIT
 
     print(f"Building document scene from: {os.path.basename(pdf)}")
     scene = build_document_scene(pdf)

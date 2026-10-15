@@ -2,3 +2,15 @@
 !private/
 !public/
 !.gitignore
+!fonts/
+fonts/*
+# Open-licence (SIL OFL) fonts only, so CI can run the font tests. Never add
+# ComicSansMS.ttf (Microsoft) or Grade1Font.ttf (non-commercial licence).
+!fonts/OFL.txt
+!fonts/README.md
+!fonts/PlaypenSans-Medium.ttf
+!fonts/PlaypenSans-SemiBold.ttf
+!fonts/PlaypenSans-Bold.ttf
+!fonts/PlaywriteZA.ttf
+!fonts/Kalam.ttf
+!fonts/PatrickHand-Regular.ttf

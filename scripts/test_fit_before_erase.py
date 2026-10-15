@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pymupdf
 from document_model import build_document_scene
 from pdf_translate_v8 import replace_text_in_pdf
+from corpus_fixtures import SKIP_EXIT
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FONTS = os.path.join(BASE, "storage", "app", "fonts")
@@ -62,7 +63,7 @@ def _contract_payload(scene):
 src = next((p for p in CANDIDATES if os.path.isfile(p)), None)
 if not src:
     print("SKIP: no corpus PDF available")
-    sys.exit(0)
+    sys.exit(SKIP_EXIT)
 
 os.makedirs(OUT, exist_ok=True)
 scene = build_document_scene(src)
