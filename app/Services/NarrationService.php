@@ -18,7 +18,7 @@ class NarrationService
 
     public function __construct()
     {
-        $this->apiKey = config('services.elevenlabs.api_key', '');
+        $this->apiKey = (string) config('services.elevenlabs.api_key');
     }
 
     /**
