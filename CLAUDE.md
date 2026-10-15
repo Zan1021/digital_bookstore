@@ -41,7 +41,7 @@ Work rules for the task list:
 ## Commands (Windows, this machine)
 
 - Serve: `php artisan serve --port=8080` — **use 8080**, Docker Desktop occupies 8000.
-- Queue worker: `php artisan queue:work`
+- Queue worker: `php artisan queue:work --queue=mail,intake,ai,layout,exports,default` (jobs run on named queues; a bare `queue:work` only takes `default`). Production: Redis + `php artisan horizon` (Linux only: Horizon needs pcntl/posix, which Windows PHP lacks).
 - PHP tests: `php artisan test`
 - Python tests: each `scripts/test_*.py` is a standalone script, not pytest. Run them one by one with `python scripts/<name>.py` until task 1.1 adds `python scripts/run_python_tests.py`.
 - Known failing Python tests (task 1.2 fixes them): `test_manifest_flow`, `test_v8_render`, `test_validation`, `test_surgery` point to files that no longer exist; `test_e2e_contract` fails V8's own structural gate.

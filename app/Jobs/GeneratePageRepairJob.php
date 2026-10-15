@@ -35,6 +35,7 @@ class GeneratePageRepairJob implements ShouldQueue
 
     public function __construct(public int $bookId, public int $translationId, public int $page)
     {
+        $this->onQueue('ai'); // paid generative image call (task 5.2)
     }
 
     /** Stable key for the ProcessingJob row the UI polls. */

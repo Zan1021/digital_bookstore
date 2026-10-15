@@ -29,6 +29,7 @@ class AnalyzeBookClassificationJob implements ShouldQueue
 
     public function __construct(public int $bookId)
     {
+        $this->onQueue('intake'); // part of the upload pipeline (task 5.2)
     }
 
     public function handle(ClassificationAnalyzer $analyzer, DescriptionWriter $writer): void

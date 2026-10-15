@@ -58,7 +58,8 @@ Work top to bottom. Each phase ends with a **checkpoint** that must pass before 
 - [ ] 5. Production-ready infrastructure settings
   - [x] 5.1 Check all migrations run on PostgreSQL as well as SQLite (CI matrix).
     - _Note:_ checked locally on PostgreSQL 16.10 (throwaway Docker container): all 38 migrations run, reset and re-run cleanly; the full PHP suite passes (374). Two store-search tests failed on PostgreSQL — `BookQuery` used SQLite-only `json_extract()`, and `LIKE` is case-sensitive on PostgreSQL — fixed with `whereLike()` (ILIKE on PostgreSQL) and a `translations->en` JSON path, plus the admin dashboard search; two tests added. CI's PHP job is now a sqlite/pgsql matrix with a postgres:16.10 service and a migrations up/down step; it runs once the branch is pushed.
-  - [ ] 5.2 Configure Redis queues and Horizon with queues `intake`, `ai`, `layout`, `exports`, `mail`.
+  - [x] 5.2 Configure Redis queues and Horizon with queues `intake`, `ai`, `layout`, `exports`, `mail`.
+    - _Note:_ Horizon 5.50 + predis; one supervisor per queue group (mail+default, intake, ai, layout, exports). Jobs routed: classification → intake, translation and AI page repair → ai; staff invitations queued on mail; layout/exports wait for their jobs. Fixed Redis `retry_after` 90s → 960s (translation runs up to 900s and would have been started twice, paying for AI twice). Dashboard Super Admin only in every environment. Horizon cannot run on Windows (needs pcntl/posix; declared in composer `config.platform` so it installs) — local dev keeps the database queue; the worker command now lists all queues. Checked against a real Redis 7.4 container: jobs land on their queues and a worker drains only its own.
   - [ ] 5.3 Add a `jobs_runs` table and a small helper that records stage start, end, duration, status and error.
   - _Requirements: 3.1, 3.3; design §20_
 

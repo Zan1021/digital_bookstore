@@ -2,16 +2,27 @@
 
 namespace App\Notifications;
 
+use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
 /**
  * Email to a newly invited staff member with a link to set their password (task 2.4).
  * The token comes from the 'invites' password broker, valid for 7 days.
+ * Sent from the 'mail' queue so it never waits behind AI or layout work (task 5.2).
  */
-class StaffInvitation extends Notification
+class StaffInvitation extends Notification implements ShouldQueue
 {
+    use Queueable;
+
     public function __construct(public string $token, public string $role) {}
+
+    /** @return array<string, string> */
+    public function viaQueues(): array
+    {
+        return ['mail' => 'mail'];
+    }
 
     /** @return list<string> */
     public function via(object $notifiable): array

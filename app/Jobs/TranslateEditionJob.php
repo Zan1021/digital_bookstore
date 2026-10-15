@@ -37,6 +37,7 @@ class TranslateEditionJob implements ShouldQueue
 
     public function __construct(public int $translationId)
     {
+        $this->onQueue('ai'); // paid translation calls (task 5.2)
     }
 
     public function handle(TranslationService $translator, PdfTranslationService $renderer): void
