@@ -65,7 +65,8 @@ Work top to bottom. Each phase ends with a **checkpoint** that must pass before 
   - _Requirements: 3.1, 3.3; design §20_
 
 - [ ] 6. Core data model corrections
-  - [ ] 6.1 Add `publishers` and `publisher_id` on publisher-owned tables; seed Mthombothi Studios.
+  - [x] 6.1 Add `publishers` and `publisher_id` on publisher-owned tables; seed Mthombothi Studios.
+    - _Note:_ `publishers` (name, slug, settings) created with Mthombothi Studios in the migration, plus an idempotent `PublisherSeeder`. Of the publisher-owned tables in design §4 only `books` exists yet: it gets `publisher_id` (backfilled, restrict on delete; new books default to `config('publisher.default_slug')`). Series (6.2), fonts, font profiles, text templates and products get `publisher_id` when created; book children reach the publisher through the book; classification/discovery tables stay store-wide. Checked on SQLite and PostgreSQL (migrations up/down, full suite).
   - [ ] 6.2 Add `series` and `contributors`; migrate the existing `books.series` / `series_volume` values into them.
   - [ ] 6.3 Add `languages` (code, name, direction, script, enabled).
   - [ ] 6.4 Stop storing the source language as a translation: migrate away the "en · draft" row for English books and update screens that read it.

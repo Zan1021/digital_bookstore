@@ -13,6 +13,7 @@ class Book extends Model
     use HasFactory;
 
     protected $fillable = [
+        'publisher_id',
         'title',
         'author',
         'illustrator',
@@ -233,6 +234,11 @@ class Book extends Model
         return $this->hasMany(BookPage::class)->orderBy('page_number');
     }
 
+    public function publisher(): BelongsTo
+    {
+        return $this->belongsTo(Publisher::class);
+    }
+
     public function translations(): HasMany
     {
         return $this->hasMany(Translation::class);
@@ -441,6 +447,12 @@ class Book extends Model
     protected static function booted(): void
     {
         static::creating(function (Book $book) {
+            // Single-publisher launch (task 6.1, Req 25.2): a book that names no publisher
+            // belongs to the default one.
+            if (! $book->publisher_id) {
+                $book->publisher_id = Publisher::default()->id;
+            }
+
             if (!$book->sku) {
                 $lastId = static::max('id') ?? 0;
                 $book->sku = 'BK-' . str_pad($lastId + 1, 6, '0', STR_PAD_LEFT);
