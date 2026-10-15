@@ -27,6 +27,7 @@ Structure:
       ...
 
 Usage:
+    python test_corpus.py                 # self-test: committed fixtures + create/verify
     python test_corpus.py create --input book.pdf --page 3 --name kolulu_story_p3
     python test_corpus.py verify --fixture kolulu_story_p3 --rendered rendered_p3.pdf
     python test_corpus.py list
@@ -233,6 +234,103 @@ def list_fixtures(fixture_dir: str = None) -> list:
 
 
 # =============================================================================
+# SELF-TEST (no arguments) — what run_python_tests.py runs
+# =============================================================================
+
+def self_test() -> int:
+    """Check the committed fixtures still match the engine, and that create/verify work.
+
+    1. For every committed fixture, re-extracting its source page with today's engine
+       reproduces the stored manifest (span count, ids, text, font sizes, geometry).
+    2. Every fixture's own source page passes verify (a no-op render is not a regression).
+    3. create -> verify round-trips on a synthetic page; a page of the wrong size and a
+       page without text both FAIL verify.
+    """
+    import tempfile
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from pdf_translate_v8 import extract_page_spans
+
+    passed = failed = 0
+
+    def check(name, ok, detail=""):
+        nonlocal passed, failed
+        print(f"  [{'OK' if ok else 'FAIL'}] {name}{f' — {detail}' if detail and not ok else ''}")
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+
+    fixtures = list_fixtures()
+    check("committed fixtures found", len(fixtures) > 0, f"none in {FIXTURES_DIR}")
+
+    for fx in fixtures:
+        name = fx["name"]
+        path = os.path.join(FIXTURES_DIR, name)
+        with open(os.path.join(path, "expected_manifest.json"), encoding="utf-8") as f:
+            expected = json.load(f)
+        src = pymupdf.open(os.path.join(path, "source_page.pdf"))
+        page = src[0]
+        spans = extract_page_spans(page, expected["page_number"])
+        geom = expected["geometry"]
+        check(f"[{name}] page geometry unchanged",
+              abs(page.rect.width - geom["width"]) < 0.1 and abs(page.rect.height - geom["height"]) < 0.1)
+        check(f"[{name}] span count unchanged", len(spans) == expected["span_count"],
+              f"expected {expected['span_count']}, got {len(spans)}")
+        got = [{"id": s["id"], "text": s["text_stripped"][:30], "font_size": s["font_size"]}
+               for s in spans[:10]]
+        check(f"[{name}] span ids, text and sizes unchanged", got == expected["spans_sample"],
+              f"got {got}")
+        src.close()
+        result = verify_against_fixture(name, os.path.join(path, "source_page.pdf"))
+        check(f"[{name}] source page passes its own verify", result.get("pass") is True,
+              str(result.get("checks") or result.get("error")))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        book = os.path.join(tmp, "book.pdf")
+        doc = pymupdf.open()
+        for n in range(3):
+            p = doc.new_page(width=420, height=595)
+            p.insert_text((40, 80), f"Synthetic page {n + 1} with a sentence.", fontsize=14)
+        doc.save(book)
+        doc.close()
+
+        fx_dir = os.path.join(tmp, "fixtures")
+        made = create_fixture(book, 2, "synthetic_p2", "Vertaalde sin.", fixture_dir=fx_dir)
+        check("create writes every fixture file",
+              all(os.path.isfile(os.path.join(made["path"], f)) for f in made["files_created"]))
+        check("list finds the created fixture",
+              [f["name"] for f in list_fixtures(fx_dir)] == ["synthetic_p2"])
+        same = verify_against_fixture("synthetic_p2", os.path.join(made["path"], "source_page.pdf"), fx_dir)
+        check("verify passes the unchanged page", same["pass"] is True, str(same.get("checks")))
+
+        wrong_size = os.path.join(tmp, "wrong_size.pdf")
+        doc = pymupdf.open()
+        doc.new_page(width=595, height=842).insert_text((40, 80), "Some text", fontsize=14)
+        doc.save(wrong_size)
+        doc.close()
+        r = verify_against_fixture("synthetic_p2", wrong_size, fx_dir)
+        check("verify fails a page of the wrong size",
+              r["pass"] is False and not next(c for c in r["checks"] if c["name"] == "dimensions_match")["pass"])
+
+        no_text = os.path.join(tmp, "no_text.pdf")
+        doc = pymupdf.open()
+        doc.new_page(width=420, height=595)
+        doc.save(no_text)
+        doc.close()
+        r = verify_against_fixture("synthetic_p2", no_text, fx_dir)
+        check("verify fails a page without selectable text",
+              r["pass"] is False and not next(c for c in r["checks"] if c["name"] == "text_selectable")["pass"])
+
+        missing = verify_against_fixture("does_not_exist", no_text, fx_dir)
+        check("verify fails an unknown fixture", missing["pass"] is False)
+
+    print("=" * 60)
+    print(f"RESULTS: {passed} passed, {failed} failed")
+    print("=" * 60)
+    return 1 if failed else 0
+
+
+# =============================================================================
 # CLI
 # =============================================================================
 
@@ -284,8 +382,9 @@ def main():
             print("No fixtures found. Create with: python test_corpus.py create ...")
     
     else:
-        parser.print_help()
+        return self_test()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
