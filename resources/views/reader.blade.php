@@ -720,6 +720,10 @@
                 <select class="tb-select" x-model="language" @change="changeLanguage()">
                     <option value="en">English</option>
                     @foreach($book->translations as $t)
+                        {{-- The English source is already the hardcoded option above; a
+                             materialised 'en' source edition (created at publish time) must
+                             not render a second "English" entry. --}}
+                        @continue($t->language_code === 'en')
                         <option value="{{ $t->language_code }}">{{ $t->language_name }}</option>
                     @endforeach
                 </select>
@@ -974,7 +978,10 @@
             renderedPageHeight: 0,
 
             // Config
-            pdfUrl: '{{ asset("storage/" . str_replace(" ", "%20", $pdfPath)) }}?v={{ $pdfVersion ?? 0 }}',
+            // Encode each path SEGMENT so any special character in a stored filename
+            // (apostrophe, spaces, parentheses, …) produces a valid URL. The previous
+            // single-char space replace left apostrophes to HTML-entity encode and 403.
+            pdfUrl: '{{ rtrim(asset("storage"), "/") . "/" . collect(explode("/", $pdfPath))->map(fn($s) => rawurlencode($s))->implode("/") }}?v={{ $pdfVersion ?? 0 }}',
             minimumRenderedPageWidth: 120,
             controlsTimeout: null,
             // FlipHTML5-style book layout config (book-agnostic — no per-book constants).

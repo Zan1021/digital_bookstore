@@ -122,9 +122,20 @@ class BookClassificationService
         return $missing;
     }
 
-    /** True when the book has at least one edition that passes render readiness (R1). */
+    /**
+     * True when the book has at least one edition that passes render readiness (R1).
+     * A store-visible edition is: the trusted English source, or a translated edition
+     * that passed the readiness gate. An English-original book with NO edition rows yet
+     * is also eligible — its trusted source PDF is materialised as an 'en' edition at
+     * publish time (Book::publishBook). But once a translated edition exists, that
+     * edition must itself be ready: an English-original book whose only edition is a
+     * FAILED translation stays unpublishable (a bad QA edition can't reach the store).
+     */
     private function hasPublishableEdition(Book $book): bool
     {
+        if (! $book->translations()->exists() && $book->original_language === 'en') {
+            return true; // trusted source, no editions yet -> 'en' created at publish
+        }
         foreach ($book->translations as $edition) {
             if ($edition->isStoreVisible()) {
                 return true;
@@ -141,16 +152,27 @@ class BookClassificationService
     /**
      * Publish the book if the gate passes. Returns true on publish; false (no state
      * change) when requirements are missing. Marks classification reviewed.
+     *
+     * Delegates the actual go-live to Book::publishBook(), which flips the book AND its
+     * render-ready editions to published. Previously this only set book.status, leaving
+     * every edition's publication_status='draft' — so the catalogue gate (which also
+     * requires a published edition) still hid the "published" book. Going through
+     * publishBook() closes that gap so a gated publish is actually visible in the store.
      */
     public function publish(Book $book): bool
     {
+        // Materialise the trusted English source edition first so the readiness gate and
+        // the catalogue reason over it (an English-original book's proofed source always
+        // counts, even if only a translated edition row existed before).
+        $book->ensureSourceEdition();
+
         if (!$this->canPublish($book)) {
             return false;
         }
-        $book->forceFill([
-            'status' => 'published',
-            'classification_status' => 'reviewed',
-        ])->save();
+        if (! $book->publishBook()) {
+            return false; // no render-ready edition could be taken live
+        }
+        $book->forceFill(['classification_status' => 'reviewed'])->save();
         return true;
     }
 }

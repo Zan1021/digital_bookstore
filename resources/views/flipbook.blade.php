@@ -333,6 +333,7 @@
             <select id="language-select">
                 <option value="en">English</option>
                 @foreach($book->translations as $t)
+                    @continue($t->language_code === 'en')
                     <option value="{{ $t->language_code }}">{{ $t->language_name }}</option>
                 @endforeach
             </select>

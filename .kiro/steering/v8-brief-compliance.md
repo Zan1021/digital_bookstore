@@ -1,6 +1,9 @@
 ---
-inclusion: always
+inclusion: manual
 ---
+
+> **ARCHIVED 2026-10-15.** The master plan is now `.kiro/specs/publishing-platform-v2/` (see `.kiro/steering/platform-v2.md`). This V8 document is kept for history; do not follow it for new work.
+
 
 # Steering: V8 Universal PDF Translation Engine — Full Compliance (SINGLE SOURCE OF TRUTH)
 

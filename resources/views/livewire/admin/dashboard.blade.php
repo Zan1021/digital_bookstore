@@ -5,6 +5,11 @@
             {{ session('success') }}
         </div>
     @endif
+    @if(session('error'))
+        <div class="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+            {{ session('error') }}
+        </div>
+    @endif
 
     <div class="flex items-center justify-between mb-8">
         <h1 class="text-3xl font-bold text-gray-800">My Books</h1>
@@ -150,6 +155,7 @@
                                     onchange="if(this.value) window.open(this.value, '_blank')">
                                 <option value="{{ route('reader', $book) }}">English</option>
                                 @foreach($book->translations as $t)
+                                    @continue($t->language_code === 'en')
                                     <option value="{{ route('reader', ['book' => $book->id, 'lang' => $t->language_code]) }}">{{ $t->language_name }}</option>
                                 @endforeach
                             </select>
@@ -188,14 +194,25 @@
                             </div>
                         @endif
 
-                        {{-- Publish button --}}
+                        {{-- Publish / Unpublish — final step of the upload→review→publish flow.
+                             Calls Dashboard::publish()/unpublish() which delegate to the gated
+                             Book::publishBook()/unpublish(). (Was previously a dead link that
+                             never changed status, so uploads could never reach the store.) --}}
                         <div class="mt-2">
                             @if($book->status === 'published')
-                                <span class="block text-center text-xs bg-green-100 text-green-700 py-1.5 rounded-lg font-medium">✓ Published</span>
+                                <div class="flex items-center gap-2">
+                                    <span class="flex-1 text-center text-xs bg-green-100 text-green-700 py-1.5 rounded-lg font-medium">✓ Published</span>
+                                    <button wire:click="unpublish({{ $book->id }})"
+                                            wire:loading.attr="disabled"
+                                            class="text-xs text-gray-500 hover:text-gray-700 underline">Unpublish</button>
+                                </div>
                             @else
-                                <a href="{{ route('store.book', $book) }}" class="block text-center text-xs bg-brand-500 text-white py-1.5 rounded-lg font-medium hover:bg-brand-600 transition">
-                                    Publish to Store
-                                </a>
+                                <button wire:click="publish({{ $book->id }})"
+                                        wire:loading.attr="disabled"
+                                        class="w-full text-center text-xs bg-brand-500 text-white py-1.5 rounded-lg font-medium hover:bg-brand-600 transition disabled:opacity-50">
+                                    <span wire:loading.remove wire:target="publish({{ $book->id }})">Publish to Store</span>
+                                    <span wire:loading wire:target="publish({{ $book->id }})">Publishing…</span>
+                                </button>
                             @endif
                         </div>
                     </div>

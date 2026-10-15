@@ -112,7 +112,10 @@ class PublishGateTest extends TestCase
 
     public function test_book_with_only_a_failed_edition_cannot_publish(): void
     {
+        // A NON-English original: there is no trusted source edition to fall back on, so a
+        // single translated edition that failed QA leaves nothing publishable.
         $book = $this->book();
+        $book->forceFill(['original_language' => 'fr'])->save();
         $this->completeMetadata($book);
         // A translated edition that FAILED layout QA (blocking render state, no identity).
         \App\Models\Translation::create([
@@ -125,6 +128,33 @@ class PublishGateTest extends TestCase
             'a book whose only edition failed QA must not be publishable');
         $this->assertFalse($this->svc->publish($book));
         $this->assertNotSame('published', $book->refresh()->status);
+    }
+
+    public function test_english_original_publishes_via_source_but_failed_edition_stays_hidden(): void
+    {
+        // An English-original book is backed by its trusted, proofed source PDF, so it may
+        // go live in English even while a translated edition is still unfit — but that
+        // failed edition must NOT be published/visible (a bad QA edition never reaches the
+        // store). This is the upload→publish flow for a freshly uploaded English book.
+        $book = $this->book(); // original_language = en
+        $this->completeMetadata($book);
+        $failed = \App\Models\Translation::create([
+            'book_id' => $book->id, 'language_code' => 'af', 'language_name' => 'AF',
+            'status' => 'draft', 'render_status' => \App\Models\Translation::STATE_NEEDS_LAYOUT_REVIEW,
+        ]);
+
+        $this->assertTrue($this->svc->publish($book), 'English source makes the book publishable');
+        $book->refresh();
+        $this->assertSame('published', $book->status);
+
+        // The English source edition went live…
+        $en = $book->translations()->where('language_code', 'en')->first();
+        $this->assertNotNull($en, 'source English edition is materialised on publish');
+        $this->assertSame('published', $en->publication_status);
+
+        // …but the failed Afrikaans edition stayed hidden from the store.
+        $this->assertNotSame('published', $failed->fresh()->publication_status,
+            'a failed translated edition must never be published');
     }
 
     public function test_book_with_a_render_ready_edition_can_publish(): void

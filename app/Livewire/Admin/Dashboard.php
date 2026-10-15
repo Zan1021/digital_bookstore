@@ -33,6 +33,53 @@ class Dashboard extends Component
         $this->filter = $filter;
     }
 
+    /**
+     * Publish a book to the storefront — the final step of the upload→review→publish
+     * flow. Goes through the single publish authority (BookClassificationService), which
+     * enforces the metadata + render-ready-edition gate and flips the book AND its
+     * editions live. On refusal it reports exactly what's missing so the user knows what
+     * to fix, instead of a dead button that silently does nothing.
+     */
+    #[Can('editions.publish')]
+    public function publish(int $bookId)
+    {
+        $book = Book::find($bookId);
+        if (! $book) {
+            return;
+        }
+
+        $svc = app(\App\Services\Classification\BookClassificationService::class);
+        if ($svc->publish($book)) {
+            session()->flash('success', "Published \"{$book->title}\" — it's now live in the store.");
+            return;
+        }
+
+        $missing = $svc->missingRequirements($book->refresh());
+        $labels = [
+            'primary_category' => 'a primary category',
+            'language' => 'a language',
+            'book_type' => 'a book type',
+            'age_range' => 'an age range',
+            'description' => 'an approved description',
+            'publishable_edition' => 'a render-ready edition (review/approve a translation, or the English source)',
+        ];
+        $needs = implode(', ', array_map(fn ($m) => $labels[$m] ?? $m, $missing));
+        session()->flash('error', "Can't publish \"{$book->title}\" yet — still needs: {$needs}. Set these on the book's Manage page, then publish.");
+    }
+
+    /** Pull a book from the storefront (reverses publish; non-destructive). */
+    #[Can('editions.publish')]
+    public function unpublish(int $bookId)
+    {
+        $book = Book::find($bookId);
+        if (! $book) {
+            return;
+        }
+
+        $book->unpublish();
+        session()->flash('success', "Unpublished \"{$book->title}\" — it's back to draft and hidden from the store.");
+    }
+
     #[Can('books.manage')]
     public function deleteBook(int $bookId)
     {

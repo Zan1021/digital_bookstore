@@ -350,6 +350,94 @@ class Book extends Model
             ->value('extracted_text');
     }
 
+    /**
+     * Whether this book is live on the customer storefront. Mirrors the catalogue gate
+     * (Services\Discovery\BookQuery::base): the book is published AND has at least one
+     * store-visible published edition. Keeps the "is it live?" answer in one place.
+     */
+    public function isPublished(): bool
+    {
+        return $this->status === 'published'
+            && $this->translations
+                ->contains(fn (Translation $t) => $t->publication_status === 'published' && $t->isStoreVisible());
+    }
+
+    /**
+     * Materialise the trusted source-language edition as a Translation row when the work
+     * is English-original and none exists yet. On upload the English original lives only
+     * on book.pdf_path (no edition row), but the storefront catalogue and the publish
+     * readiness gate both reason over editions. Creating the 'en' edition (pointing at the
+     * proofed original PDF) lets the trusted source be published and counted without a
+     * machine render. No-op for non-English originals or when an 'en' edition is present.
+     */
+    public function ensureSourceEdition(): void
+    {
+        if ($this->original_language !== 'en') {
+            return;
+        }
+        if ($this->translations()->where('language_code', 'en')->exists()) {
+            return;
+        }
+        $this->translations()->create([
+            'language_code' => 'en',
+            'language_name' => 'English',
+            'status' => 'draft',
+            'rendered_pdf_path' => $this->pdf_path, // the proofed original
+        ]);
+        $this->load('translations');
+    }
+
+    /**
+     * Publish the book to the storefront (completes the upload→review→publish flow that
+     * previously had no final step, so uploaded books could never leave 'draft').
+     *
+     * The storefront requires BOTH book.status='published' AND a published, store-visible
+     * edition. The English source is publisher-proofed and always trusted to publish
+     * (Translation::publishEdition / isSourceLanguage), but it is not persisted as a
+     * Translation row on upload (the original PDF lives on book.pdf_path). So we ensure a
+     * source 'en' edition exists, publish every edition that is render-ready, and only
+     * flip the book to published when at least one edition actually went live.
+     *
+     * Translated editions that haven't passed the readiness gate are left unpublished
+     * rather than force-shown — a failed QA edition must never reach the public catalogue.
+     *
+     * @return bool true when the book is now live; false when nothing was publishable.
+     */
+    public function publishBook(): bool
+    {
+        // Ensure the trusted English source edition exists so the catalogue's
+        // whereHas('translations', publication_status='published') can match.
+        $this->ensureSourceEdition();
+
+        $publishedAny = false;
+        foreach ($this->translations as $edition) {
+            if ($edition->publishEdition()) { // gated: source trusted, translated must be ready
+                $publishedAny = true;
+            }
+        }
+
+        if (! $publishedAny) {
+            return false;
+        }
+
+        $this->status = 'published';
+        $this->save();
+
+        return true;
+    }
+
+    /**
+     * Pull the book from the storefront. Reverses publishBook: the book returns to 'draft'
+     * and every edition's publication_status is reset so the catalogue gate excludes it.
+     * Non-destructive — renders, translations and files are untouched.
+     */
+    public function unpublish(): void
+    {
+        $this->translations()->update(['publication_status' => 'draft']);
+        $this->status = 'draft';
+        $this->save();
+    }
+
     protected static function booted(): void
     {
         static::creating(function (Book $book) {

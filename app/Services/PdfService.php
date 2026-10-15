@@ -24,8 +24,15 @@ class PdfService
      */
     public function processUpload(UploadedFile $file): Book
     {
-        // Store the PDF
-        $filename = time() . '_' . $file->getClientOriginalName();
+        // Store the PDF under a URL-SAFE filename. The original name often contains
+        // spaces and apostrophes (e.g. "Kolulu's Home.pdf"); stored verbatim those break
+        // the public /storage URL the reader hands to PDF.js (the apostrophe HTML-entity
+        // encodes and the fetch 403s). Slug the stem, keep the .pdf extension, prefix a
+        // timestamp for uniqueness. The human-readable title is still derived from the
+        // ORIGINAL name below, so nothing user-facing is lost.
+        $originalStem = pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME);
+        $safeStem = \Illuminate\Support\Str::slug($originalStem) ?: 'book';
+        $filename = time() . '_' . $safeStem . '.pdf';
         $path = $file->storeAs('books/pdfs', $filename, 'public');
 
         // Parse PDF for text and page count
