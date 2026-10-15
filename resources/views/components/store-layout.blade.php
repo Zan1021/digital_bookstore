@@ -5,8 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ $title }} — StoryBooks</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>tailwind.config={theme:{extend:{colors:{brand:{50:"#fff7f5",100:"#ffede8",200:"#ffd5cc",300:"#ffb3a3",400:"#ff8468",500:"#fd5826",600:"#e84a1c",700:"#c23a14",800:"#9d3114",900:"#7d2b15"}}}}}</script>
+    @vite(['resources/css/app.css', 'resources/js/app.js'])
     @livewireStyles
 </head>
 <body class="bg-white font-sans antialiased text-gray-800">

@@ -45,7 +45,8 @@ Work top to bottom. Each phase ends with a **checkpoint** that must pass before 
   - _Requirements: 20.1, 20.2_
 
 - [ ] 4. Build and self-host front-end assets
-  - [ ] 4.1 Replace the Tailwind CDN script in every layout with the Vite + Tailwind build (Tailwind 4 is already in `package.json`); move the brand colour scale into the theme.
+  - [x] 4.1 Replace the Tailwind CDN script in every layout with the Vite + Tailwind build (Tailwind 4 is already in `package.json`); move the brand colour scale into the theme.
+    - _Note:_ CDN was Tailwind 3. Before/after full-page screenshots of 13 store/admin pages compared pixel by pixel: store home and book page now match exactly; v3→v4 line-height difference fixed on two store headings; v3 defaults (border colour, placeholder, button cursor) kept in `app.css`; the file picker's lost button look restored. Remaining differences are intentional: `@tailwindcss/forms` (needed by the sign-in pages) gives selects a chevron, text inputs a visible border and styled checkboxes.
   - [ ] 4.2 Bundle Alpine, page-flip and PDF.js (until the old reader is retired) through Vite; remove CDN script tags.
   - [ ] 4.3 Self-host Playpen Sans (Regular, Medium, SemiBold, Bold from `Fonts/`) and Instrument Sans as WOFF2; remove the fonts.bunny.net link.
   - [ ] 4.4 Create the design tokens of §16 in `resources/css/tokens.css`.

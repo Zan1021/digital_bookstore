@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>StoryBooks — Children's Digital Publishing Platform</title>
-    <script src="https://cdn.tailwindcss.com"></script><script>tailwind.config={theme:{extend:{colors:{brand:{50:"#fff7f5",100:"#ffede8",200:"#ffd5cc",300:"#ffb3a3",400:"#ff8468",500:"#fd5826",600:"#e84a1c",700:"#c23a14",800:"#9d3114",900:"#7d2b15"}}}}}</script>
+    @vite(['resources/css/app.css', 'resources/js/app.js'])
     <style>
         .gradient-text {
             background: linear-gradient(135deg, #fd5826, #ff8468, #e84a1c);
@@ -45,7 +45,7 @@
             <div class="inline-flex items-center bg-brand-100 text-brand-600 px-4 py-1.5 rounded-full text-xs font-medium mb-8">
                 Powered by AI — Available in multiple languages
             </div>
-            <h1 class="text-5xl md:text-6xl lg:text-7xl font-bold text-gray-900 leading-tight max-w-4xl mx-auto">
+            <h1 class="text-5xl md:text-6xl lg:text-7xl font-bold text-gray-900 leading-tight md:leading-none max-w-4xl mx-auto">
                 Wonderful stories for <span class="gradient-text">curious minds</span>
             </h1>
             <p class="text-xl text-gray-500 mt-6 max-w-2xl mx-auto leading-relaxed">
@@ -175,7 +175,7 @@
             <div class="grid grid-cols-1 md:grid-cols-2 gap-16 items-center">
                 <div>
                     <div class="inline-flex items-center bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-medium mb-4">For Publishers</div>
-                    <h2 class="text-3xl md:text-4xl font-bold text-gray-800 leading-tight">Turn 300 books into a<br><span class="gradient-text">multilingual digital library</span></h2>
+                    <h2 class="text-3xl md:text-4xl font-bold text-gray-800 leading-tight md:leading-10">Turn 300 books into a<br><span class="gradient-text">multilingual digital library</span></h2>
                     <p class="text-gray-500 mt-4 leading-relaxed">Upload your entire catalogue. Our AI handles translation, narration, and formatting. What would take months of manual work happens in hours — for a fraction of the cost.</p>
 
                     <div class="mt-8 space-y-4">
