@@ -1,0 +1,45 @@
+/*
+ * Design tokens (design.md §16, Req 27.2): the one set shared by store and admin.
+ * Defined as a static Tailwind @theme: always emitted as CSS variables on :root (usable
+ * from plain CSS, e.g. var(--color-ink-900)) and each token is also a utility class:
+ *   colours  bg-/text-/border-  brand-50…900, ink-900, paper-50, sky-500, leaf-500, sun-400
+ *   fonts    font-sans (UI, Instrument Sans), font-display (Playpen Sans; use font-semibold)
+ *   radii    rounded-card (12px), rounded-chip (pill)
+ *   shadow   shadow-card
+ * Type scale and spacing are Tailwind's default scales, deliberately unchanged.
+ * Applying these to the store and admin pages is the redesign work (tasks 34+);
+ * defining them changes nothing on screen by itself.
+ */
+@theme static {
+    /* Brand: the existing Mthombothi scale; brand-600 is the primary action colour. */
+    --color-brand-50: #fff7f5;
+    --color-brand-100: #ffede8;
+    --color-brand-200: #ffd5cc;
+    --color-brand-300: #ffb3a3;
+    --color-brand-400: #ff8468;
+    --color-brand-500: #fd5826;
+    --color-brand-600: #e84a1c;
+    --color-brand-700: #c23a14;
+    --color-brand-800: #9d3114;
+    --color-brand-900: #7d2b15;
+
+    /* Text and background. */
+    --color-ink-900: #1f1b16; /* warm near-black text */
+    --color-paper-50: #fffbf6; /* warm white background */
+
+    /* Secondary accents for age and category chips. §16 names them without values; these
+       are first choices to confirm. As fills, pair them with ink-900 text (WCAG AA). */
+    --color-sky-500: #3b9fd8;
+    --color-leaf-500: #4caf6a;
+    --color-sun-400: #f7c948;
+
+    /* Fonts (self-hosted in fonts.css). */
+    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
+        'Segoe UI Symbol', 'Noto Color Emoji';
+    --font-display: 'Playpen Sans', 'Instrument Sans', ui-sans-serif, system-ui, sans-serif;
+
+    /* Shape. */
+    --radius-card: 12px;
+    --radius-chip: 9999px;
+    --shadow-card: 0 1px 2px rgb(31 27 22 / 0.06), 0 4px 12px rgb(31 27 22 / 0.06);
+}

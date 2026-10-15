@@ -1,5 +1,6 @@
 @import 'tailwindcss';
 @import './fonts.css';
+@import './tokens.css';
 @plugin '@tailwindcss/forms';
 
 @source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
@@ -7,26 +8,12 @@
 @source '../**/*.blade.php';
 @source '../**/*.js';
 
-@theme {
-    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
-        'Segoe UI Symbol', 'Noto Color Emoji';
-
-    /* Brand scale (was an inline tailwind.config on each page for the CDN build). */
-    --color-brand-50: #fff7f5;
-    --color-brand-100: #ffede8;
-    --color-brand-200: #ffd5cc;
-    --color-brand-300: #ffb3a3;
-    --color-brand-400: #ff8468;
-    --color-brand-500: #fd5826;
-    --color-brand-600: #e84a1c;
-    --color-brand-700: #c23a14;
-    --color-brand-800: #9d3114;
-    --color-brand-900: #7d2b15;
-}
+/* Design tokens (colours, fonts, radii, shadow) live in tokens.css. */
 
 /*
  * Tailwind 3 defaults the existing pages were designed with (they used the v3 CDN until
- * task 4.1). Tailwind 4 changed these; keep the v3 look until the design tokens (task 4.4).
+ * task 4.1). Tailwind 4 changed these; keep the v3 look until the pages are redesigned on the
+ * design tokens (tasks 34+).
  */
 @layer base {
     *,

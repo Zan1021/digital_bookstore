@@ -44,14 +44,15 @@ Work top to bottom. Each phase ends with a **checkpoint** that must pass before 
     - _Note:_ staff-only since 2.3; it no longer serves files itself — it redirects to the asset gatekeeper (edition PDF for `?lang=`, else the source), so old bookmarks keep working and there is one file-serving path.
   - _Requirements: 20.1, 20.2_
 
-- [ ] 4. Build and self-host front-end assets
+- [x] 4. Build and self-host front-end assets
   - [x] 4.1 Replace the Tailwind CDN script in every layout with the Vite + Tailwind build (Tailwind 4 is already in `package.json`); move the brand colour scale into the theme.
     - _Note:_ CDN was Tailwind 3. Before/after full-page screenshots of 13 store/admin pages compared pixel by pixel: store home and book page now match exactly; v3→v4 line-height difference fixed on two store headings; v3 defaults (border colour, placeholder, button cursor) kept in `app.css`; the file picker's lost button look restored. Remaining differences are intentional: `@tailwindcss/forms` (needed by the sign-in pages) gives selects a chevron, text inputs a visible border and styled checkboxes.
   - [x] 4.2 Bundle Alpine, page-flip and PDF.js (until the old reader is retired) through Vite; remove CDN script tags.
     - _Note:_ same versions as the CDN: pdf.js 3.11.174 (npm alias `pdfjs-dist-v3`, so `scripts/render_pdfjs.mjs` keeps pdfjs-dist 4.10.38), page-flip 2.0.7, Alpine pinned to 3.17.4 (was unpinned `3.x.x`). Entries `pdf-readers.js` and `alpine.js`; flipbook and page-curl inline scripts became modules so they run after the bundle. Checked: all three readers render the Afrikaans edition with no external requests; flipbook and prototype turn pages. The reader did not turn on a scripted click in headless Edge — identical with the old CDN version, so not caused by this change; to confirm by hand.
   - [x] 4.3 Self-host Playpen Sans (Regular, Medium, SemiBold, Bold from `Fonts/`) and Instrument Sans as WOFF2; remove the fonts.bunny.net link.
     - _Note:_ Playpen Sans converted from `Fonts/` to WOFF2 in `resources/fonts/` (identical glyphs, cmap and metrics; ~60% smaller), Instrument Sans from `@fontsource/instrument-sans@5.3.0`; both in `resources/css/fonts.css` (imported by `app.css`, loaded alone by the flipbook). No external font requests on store, admin, sign-in or flipbook. Store and admin text now renders in Instrument Sans (design §16 UI font) instead of the system font; all 13 checked pages keep their height. **Open for Zan:** `public/fonts/Grade1Font.ttf` (non-commercial licence) is committed and publicly downloadable; the flipbook's unused `@font-face` for it was removed, the file was left for Zan's decision.
-  - [ ] 4.4 Create the design tokens of §16 in `resources/css/tokens.css`.
+  - [x] 4.4 Create the design tokens of §16 in `resources/css/tokens.css`.
+    - _Note:_ static Tailwind `@theme` (CSS variables on `:root` + utilities): brand scale, `ink-900`, `paper-50`, `sky-500`/`leaf-500`/`sun-400`, `font-sans` (Instrument Sans), `font-display` (Playpen Sans), `rounded-card` 12px, `rounded-chip`, `shadow-card`; type scale and spacing are Tailwind's defaults. Defining them changes no page (13 pages pixel-identical). **To confirm with Zan:** §16 gives no values for sky/leaf/sun — chosen #3b9fd8 / #4caf6a / #f7c948 (ink-900 text on each passes WCAG AA). **Flag for Req 27.6:** white text on brand-600 is 3.87:1, below AA for normal-size text.
   - _Requirements: 27.1, 27.2, 7.3_
 
 - [ ] 5. Production-ready infrastructure settings
