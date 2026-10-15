@@ -35,3 +35,6 @@ Thumbs.db
 # Python bytecode / caches (regenerated on run; must not be tracked)
 __pycache__/
 *.pyc
+
+# Grade 1 font: non-commercial licence, never publicly served (keep it in Fonts/ and storage/app/fonts).
+/public/fonts/Grade1Font.ttf
