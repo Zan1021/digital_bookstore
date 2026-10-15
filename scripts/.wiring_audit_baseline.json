@@ -13,6 +13,7 @@
     "render_comparison",
     "render_page15_check",
     "render_page2_check",
+    "run_python_tests",
     "script_detection",
     "show_qa_report",
     "translation_variants",

@@ -53,6 +53,15 @@
             "@php artisan config:clear --ansi",
             "@php artisan test"
         ],
+        "test:python": [
+            "Composer\\Config::disableProcessTimeout",
+            "python scripts/run_python_tests.py"
+        ],
+        "test:all": [
+            "Composer\\Config::disableProcessTimeout",
+            "@test",
+            "@test:python"
+        ],
         "post-autoload-dump": [
             "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
             "@php artisan package:discover --ansi"
