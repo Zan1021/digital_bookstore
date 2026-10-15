@@ -4,43 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
     <title>{{ $book->title }}</title>
+    @vite(['resources/css/fonts.css'])
     <style>
-        /* Playpen Sans — Primary children's book font */
-        @font-face {
-            font-family: 'Playpen Sans';
-            src: url('/fonts/PlaypenSans-Regular.ttf') format('truetype');
-            font-weight: 400;
-            font-style: normal;
-            font-display: swap;
-        }
-        @font-face {
-            font-family: 'Playpen Sans';
-            src: url('/fonts/PlaypenSans-Medium.ttf') format('truetype');
-            font-weight: 500;
-            font-style: normal;
-            font-display: swap;
-        }
-        @font-face {
-            font-family: 'Playpen Sans';
-            src: url('/fonts/PlaypenSans-SemiBold.ttf') format('truetype');
-            font-weight: 600;
-            font-style: normal;
-            font-display: swap;
-        }
-        @font-face {
-            font-family: 'Playpen Sans';
-            src: url('/fonts/PlaypenSans-Bold.ttf') format('truetype');
-            font-weight: 700;
-            font-style: normal;
-            font-display: swap;
-        }
-        @font-face {
-            font-family: 'Grade 1';
-            src: url('/fonts/Grade1Font.ttf') format('truetype');
-            font-weight: 400;
-            font-style: normal;
-            font-display: swap;
-        }
+        /* Playpen Sans comes from the self-hosted fonts bundle (resources/css/fonts.css). */
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
 

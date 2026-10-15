@@ -18,6 +18,7 @@
         "vite": "^7.0.7"
     },
     "dependencies": {
+        "@fontsource/instrument-sans": "5.3.0",
         "alpinejs": "3.17.4",
         "page-flip": "2.0.7",
         "pdfjs-dist-v3": "npm:pdfjs-dist@3.11.174"

@@ -1,0 +1,44 @@
+/*
+ * Self-hosted web fonts (task 4.3): no third-party font service. Both are SIL OFL.
+ *
+ * Instrument Sans — UI font (design §16), from @fontsource/instrument-sans (pinned).
+ * Playpen Sans — the books' typeface and the store's display font (design §16), WOFF2
+ * converted from Fonts/PlaypenSans-*.ttf with identical glyphs and metrics, so the web
+ * pages use the same font files the engine lays text out with. Licence: ../fonts/OFL.txt.
+ */
+@import '@fontsource/instrument-sans/400.css';
+@import '@fontsource/instrument-sans/500.css';
+@import '@fontsource/instrument-sans/600.css';
+@import '@fontsource/instrument-sans/700.css';
+
+@font-face {
+    font-family: 'Playpen Sans';
+    src: url('../fonts/PlaypenSans-Regular.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'Playpen Sans';
+    src: url('../fonts/PlaypenSans-Medium.woff2') format('woff2');
+    font-weight: 500;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'Playpen Sans';
+    src: url('../fonts/PlaypenSans-SemiBold.woff2') format('woff2');
+    font-weight: 600;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'Playpen Sans';
+    src: url('../fonts/PlaypenSans-Bold.woff2') format('woff2');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
