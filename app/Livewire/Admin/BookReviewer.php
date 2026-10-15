@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Admin;
 
+use App\Livewire\Attributes\Can;
 use App\Models\Book;
 use App\Models\Translation;
 use App\Models\TranslatedPage;
@@ -57,6 +58,7 @@ class BookReviewer extends Component
      * Load text blocks detected on the cover page (page 1).
      * Publisher can toggle which blocks should be translated.
      */
+    #[Can('translations.review|layout.review')]
     public function loadCoverBlocks()
     {
         try {
@@ -114,6 +116,7 @@ class BookReviewer extends Component
         }
     }
 
+    #[Can('layout.review')]
     public function saveCoverConfig()
     {
         $metadata = $this->book->metadata ?? [];
@@ -122,6 +125,7 @@ class BookReviewer extends Component
         session()->flash('success', 'Cover page configuration saved.');
     }
 
+    #[Can('layout.review')]
     public function renderPdf()
     {
         if (!$this->translation) return;
@@ -153,6 +157,7 @@ class BookReviewer extends Component
         }
     }
 
+    #[Can('translations.review|layout.review')]
     public function loadPages()
     {
         $query = $this->translation->translatedPages()->orderBy('page_number');
@@ -178,6 +183,7 @@ class BookReviewer extends Component
         })->toArray();
     }
 
+    #[Can('translations.review')]
     public function approvePage(int $pageId)
     {
         $tp = TranslatedPage::find($pageId);
@@ -187,6 +193,7 @@ class BookReviewer extends Component
         }
     }
 
+    #[Can('translations.review')]
     public function rejectPage(int $pageId)
     {
         $tp = TranslatedPage::find($pageId);
@@ -196,6 +203,7 @@ class BookReviewer extends Component
         }
     }
 
+    #[Can('translations.review')]
     public function approveAll()
     {
         $this->translation->translatedPages()
@@ -204,6 +212,7 @@ class BookReviewer extends Component
         $this->loadPages();
     }
 
+    #[Can('translations.review')]
     public function startEdit(int $pageId)
     {
         $tp = TranslatedPage::find($pageId);
@@ -213,6 +222,7 @@ class BookReviewer extends Component
         }
     }
 
+    #[Can('translations.review')]
     public function saveEdit()
     {
         if ($this->editingPageId) {
@@ -251,6 +261,7 @@ class BookReviewer extends Component
         }
     }
 
+    #[Can('translations.review')]
     public function cancelEdit()
     {
         $this->editingPageId = null;
@@ -269,6 +280,7 @@ class BookReviewer extends Component
     /**
      * Load the overlay data (page image + region boxes) for the current page.
      */
+    #[Can('translations.review|layout.review')]
     public function loadOverlay(?int $page = null)
     {
         if (!$this->translation) return;
@@ -285,6 +297,7 @@ class BookReviewer extends Component
         }
     }
 
+    #[Can('translations.review|layout.review')]
     public function toggleOverlayLayer(string $layer)
     {
         if (array_key_exists($layer, $this->overlayToggles)) {
@@ -292,6 +305,7 @@ class BookReviewer extends Component
         }
     }
 
+    #[Can('translations.review|layout.review')]
     public function selectRegion(string $regionId)
     {
         $this->selectedRegionId = $regionId;
@@ -306,6 +320,7 @@ class BookReviewer extends Component
      * (§15), then re-render just this page so the change is reflected immediately.
      * The override takes precedence over the page-level translation on re-render.
      */
+    #[Can('translations.review')]
     public function saveRegionTranslation()
     {
         if (!$this->translation || !$this->selectedRegionId) {
@@ -324,6 +339,7 @@ class BookReviewer extends Component
      * font, size/tracking/line-height, boundary edit). Stored keyed by region ID
      * with an audit trail — never in code (§15).
      */
+    #[Can('layout.review')]
     public function saveRegionOverride(string $regionId, array $override)
     {
         if (!$this->translation) return;
@@ -340,6 +356,7 @@ class BookReviewer extends Component
      * Re-render ONLY the current page (§15 single-page re-render). Uses the stored
      * stable-ID contract + per-item translations so unrelated pages are untouched.
      */
+    #[Can('layout.review')]
     public function reRenderPage(?int $page = null)
     {
         if (!$this->translation) return;
@@ -395,12 +412,14 @@ class BookReviewer extends Component
         }
     }
 
+    #[Can('translations.review|layout.review')]
     public function closeOverlay()
     {
         $this->showOverlay = false;
         $this->overlayData = [];
     }
 
+    #[Can('translations.review|layout.review')]
     public function getStats(): array
     {
         if (!$this->translation) return [];

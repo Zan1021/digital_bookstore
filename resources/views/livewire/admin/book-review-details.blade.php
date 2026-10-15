@@ -78,7 +78,9 @@
             <p class="text-xs text-gray-500 mb-1">Status: <strong>{{ $description->status }}</strong> · source: {{ $description->source }}</p>
             <p class="text-sm border rounded p-2 bg-gray-50">{{ $description->short_text }}</p>
             @if ($description->status !== 'approved')
+                @can('books.manage')
                 <button wire:click="approveDescription" class="mt-2 px-3 py-1 text-xs rounded bg-emerald-600 text-white">Approve description</button>
+                @endcan
             @endif
         @else
             <p class="text-sm text-gray-400">No description drafted yet.</p>
@@ -86,10 +88,14 @@
     </section>
 
     <div class="flex gap-2">
+        @can('books.manage')
         <button wire:click="save" class="px-4 py-2 rounded bg-gray-200 hover:bg-gray-300 text-sm">Save draft</button>
+        @endcan
+        @can('editions.publish')
         <button wire:click="publish" @disabled(!$canPublish)
             class="px-4 py-2 rounded text-sm text-white {{ $canPublish ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-gray-400 cursor-not-allowed' }}">
             Publish
         </button>
+        @endcan
     </div>
 </div>

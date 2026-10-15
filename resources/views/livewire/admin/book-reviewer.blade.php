@@ -8,6 +8,7 @@
             @endif
         </div>
         <div class="flex gap-3">
+            @can('layout.review')
             <button wire:click="renderPdf" wire:loading.attr="disabled" wire:target="renderPdf"
                     class="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 transition disabled:opacity-50 flex items-center gap-2">
                 <span wire:loading.remove wire:target="renderPdf">
@@ -19,9 +20,12 @@
                     Rendering...
                 </span>
             </button>
+            @endcan
+            @can('translations.review')
             <button wire:click="approveAll" class="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 transition">
                 Approve All Unreviewed
             </button>
+            @endcan
             <a href="{{ route('admin.book', $book) }}" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-300 transition">
                 Back
             </a>
@@ -100,10 +104,12 @@
                     — status: <strong>{{ $overlayData['status'] }}</strong>
                 </span>
                 <div class="flex items-center gap-2">
+                    @can('layout.review')
                     <button type="button" wire:click="reRenderPage({{ $overlayData['page'] }})"
                         class="px-3 py-1 text-xs rounded bg-emerald-600 text-white hover:bg-emerald-700">
                         Re-render this page
                     </button>
+                    @endcan
                     <button type="button" wire:click="closeOverlay"
                         class="px-3 py-1 text-xs rounded bg-gray-200 hover:bg-gray-300">Close</button>
                 </div>
@@ -240,12 +246,14 @@
                                 class="w-full border border-gray-300 rounded p-2 text-xs"
                                 placeholder="Edited translation for this region..."></textarea>
                             <div class="flex gap-2 mt-2">
+                                @can('translations.review')
                                 <button type="button" wire:click="saveRegionTranslation"
                                     wire:loading.attr="disabled"
                                     class="px-3 py-1 text-xs rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
                                     <span wire:loading.remove wire:target="saveRegionTranslation">Save &amp; re-render page</span>
                                     <span wire:loading wire:target="saveRegionTranslation">Rendering…</span>
                                 </button>
+                                @endcan
                             </div>
                             <p class="mt-1 text-[10px] text-gray-500">
                                 Saved as a per-edition override (audited); re-renders only this page.
@@ -306,9 +314,11 @@
                     </h3>
                     <p class="text-xs text-gray-500 mt-1">Choose which text blocks on the cover should be translated. Character names and publisher info are auto-skipped.</p>
                 </div>
+                @can('layout.review')
                 <button wire:click="saveCoverConfig" class="px-4 py-2 bg-orange-500 text-white rounded-lg text-sm font-medium hover:bg-orange-600 transition">
                     Save Config
                 </button>
+                @endcan
             </div>
 
             @if(session('success'))
@@ -360,9 +370,15 @@
                         @if($page['review_status'] === 'approved')
                             <span class="text-xs px-2 py-1 bg-green-100 text-green-700 rounded font-medium">Approved</span>
                         @else
+                            @can('translations.review')
                             <button wire:click="approvePage({{ $page['id'] }})" class="text-xs px-2 py-1 bg-green-500 text-white rounded hover:bg-green-600">Approve</button>
+                            @endcan
+                            @can('translations.review')
                             <button wire:click="startEdit({{ $page['id'] }})" class="text-xs px-2 py-1 bg-blue-500 text-white rounded hover:bg-blue-600">Edit</button>
+                            @endcan
+                            @can('translations.review')
                             <button wire:click="rejectPage({{ $page['id'] }})" class="text-xs px-2 py-1 bg-red-500 text-white rounded hover:bg-red-600">Flag</button>
+                            @endcan
                         @endif
                     </div>
                 </div>
@@ -374,8 +390,12 @@
                         <label class="text-xs font-medium text-gray-500 mb-1 block">Edit Translation:</label>
                         <textarea wire:model="editingText" class="w-full border border-gray-300 rounded-lg p-3 text-sm" rows="4"></textarea>
                         <div class="flex gap-2 mt-2">
+                            @can('translations.review')
                             <button wire:click="saveEdit" class="px-4 py-2 bg-green-600 text-white rounded text-sm hover:bg-green-700">Save & Approve</button>
+                            @endcan
+                            @can('translations.review')
                             <button wire:click="cancelEdit" class="px-4 py-2 bg-gray-200 text-gray-700 rounded text-sm hover:bg-gray-300">Cancel</button>
+                            @endcan
                         </div>
                     </div>
                 @else

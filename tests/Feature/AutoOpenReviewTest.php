@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use Tests\Concerns\ActsAsSuperAdmin;
 use App\Livewire\Admin\BookManager;
 use App\Models\Book;
 use App\Models\Translation;
@@ -17,7 +18,7 @@ use Tests\TestCase;
  */
 class AutoOpenReviewTest extends TestCase
 {
-    use RefreshDatabase;
+    use ActsAsSuperAdmin, RefreshDatabase;
 
     private function book(): Book
     {

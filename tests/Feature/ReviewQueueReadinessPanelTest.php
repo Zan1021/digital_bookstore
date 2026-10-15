@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use Tests\Concerns\ActsAsSuperAdmin;
 use App\Livewire\Admin\ReviewQueue;
 use App\Models\Book;
 use App\Models\BookPage;
@@ -18,7 +19,7 @@ use Tests\TestCase;
  */
 class ReviewQueueReadinessPanelTest extends TestCase
 {
-    use RefreshDatabase;
+    use ActsAsSuperAdmin, RefreshDatabase;
 
     private function editionBook(array $overrides): Translation
     {

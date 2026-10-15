@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Admin;
 
+use App\Livewire\Attributes\Can;
 use App\Models\Book;
 use App\Models\Category;
 use App\Models\ClassificationSuggestion;
@@ -62,6 +63,7 @@ class BookReviewDetails extends Component
         $this->selectedTagIds = array_values(array_unique($this->selectedTagIds));
     }
 
+    #[Can('books.manage')]
     public function save(BookClassificationService $svc): void
     {
         $userId = auth()->id();
@@ -88,6 +90,7 @@ class BookReviewDetails extends Component
         session()->flash('success', 'Draft saved.');
     }
 
+    #[Can('books.manage')]
     public function approveDescription(BookClassificationService $svc): void
     {
         $desc = $this->book->descriptions()->where('status', 'suggested')->latest()->first();
@@ -97,6 +100,7 @@ class BookReviewDetails extends Component
         }
     }
 
+    #[Can('editions.publish')]
     public function publish(BookClassificationService $svc): void
     {
         $this->save($svc);

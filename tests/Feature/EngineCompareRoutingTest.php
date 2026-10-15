@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use Tests\Concerns\ActsAsSuperAdmin;
 use App\Livewire\Admin\EngineCompare;
 use App\Models\Book;
 use App\Models\Translation;
@@ -19,7 +20,7 @@ use Tests\TestCase;
  */
 class EngineCompareRoutingTest extends TestCase
 {
-    use RefreshDatabase;
+    use ActsAsSuperAdmin, RefreshDatabase;
 
     private Book $book;
 

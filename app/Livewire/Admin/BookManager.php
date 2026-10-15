@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Admin;
 
+use App\Livewire\Attributes\Can;
 use App\Models\Book;
 use App\Models\Translation;
 use App\Services\NarrationService;
@@ -41,17 +42,20 @@ class BookManager extends Component
         $this->cropEnabled = (bool) $book->crop_enabled;
     }
 
+    #[Can('books.view')]
     public function switchTab(string $tab)
     {
         $this->activeTab = $tab;
     }
 
+    #[Can('books.manage')]
     public function suggestMetadata()
     {
         $service = app(PdfService::class);
         $this->suggestedMetadata = $service->suggestMetadata($this->book);
     }
 
+    #[Can('books.manage')]
     public function applyMetadata()
     {
         if (!$this->suggestedMetadata) {
@@ -77,6 +81,7 @@ class BookManager extends Component
      * wire:poll. A demo fallback runs synchronously when TRANSLATION_SYNC=true or no
      * queue worker is expected (spec Req 3 / Task 12).
      */
+    #[Can('translations.manage')]
     public function translate()
     {
         if (empty($this->selectedLanguage)) {
@@ -115,6 +120,7 @@ class BookManager extends Component
      * (READY_FOR_REVIEW / NEEDS_LAYOUT_REVIEW), redirect to its review queue so the publisher
      * lands on the compare page automatically. A failed edition stays put (shown in place).
      */
+    #[Can('books.view')]
     public function pollTranslationStatus()
     {
         if (!$this->watchEditionId) {
@@ -146,6 +152,7 @@ class BookManager extends Component
      * Re-dispatch translation for an edition that failed or needs a fresh run
      * (spec Req 3.4) — no re-upload required.
      */
+    #[Can('translations.manage')]
     public function retryTranslation(int $translationId)
     {
         $edition = $this->book->translations()->findOrFail($translationId);
@@ -165,6 +172,7 @@ class BookManager extends Component
      * True while any edition is mid-flight — the view polls with wire:poll only when
      * this is set, so a settled page does not poll forever.
      */
+    #[Can('books.view')]
     public function getIsAnyTranslatingProperty(): bool
     {
         return $this->book->translations->contains(function ($t) {
@@ -176,6 +184,7 @@ class BookManager extends Component
         });
     }
 
+    #[Can('translations.manage|layout.review')]
     public function renderPdf(int $translationId)
     {
         set_time_limit(300); // 5 minutes for PDF rendering
@@ -211,6 +220,7 @@ class BookManager extends Component
         }
     }
 
+    #[Can('translations.manage')]
     public function deleteTranslation(int $translationId)
     {
         $translation = $this->book->translations()->findOrFail($translationId);
@@ -230,6 +240,7 @@ class BookManager extends Component
         session()->flash('success', "Deleted {$langName} translation.");
     }
 
+    #[Can('narration.manage')]
     public function deleteNarration(int $narrationId)
     {
         $narration = $this->book->narrations()->findOrFail($narrationId);
@@ -257,6 +268,7 @@ class BookManager extends Component
         session()->flash('success', "Deleted {$langName} narration.");
     }
 
+    #[Can('narration.manage')]
     public function loadVoices()
     {
         try {
@@ -267,6 +279,7 @@ class BookManager extends Component
         }
     }
 
+    #[Can('narration.manage')]
     public function narrate()
     {
         if (empty($this->selectedVoice) || empty($this->selectedLanguage)) {
@@ -312,6 +325,7 @@ class BookManager extends Component
         ])->layout('layouts.admin');
     }
 
+    #[Can('books.manage')]
     public function saveSettings()
     {
         $this->book->update([

@@ -118,10 +118,15 @@
                                 <p class="text-xs text-purple-700 mt-0.5">Regenerates the illustration background behind baked-in text, then you pick. Uses a paid AI image call.</p>
                             </div>
                             @if($fixState === 'idle')
+                                @can('translations.manage')
                                 <button wire:click="fixWithAi" wire:loading.attr="disabled"
                                         class="bg-purple-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-purple-700 transition">
                                     Fix with AI →
                                 </button>
+                                @endcan
+                                @cannot('translations.manage')
+                                <span class="text-xs text-purple-700">A Content Manager can run this (paid AI call).</span>
+                                @endcannot
                             @endif
                         </div>
 
@@ -139,8 +144,10 @@
                                     @else
                                         <div class="text-xs text-gray-400 py-8">no preview</div>
                                     @endif
+                                    @canany(['translations.manage', 'layout.review'])
                                     <button wire:click="applyFix('keep_cheap')"
                                             class="mt-2 w-full bg-gray-200 text-gray-800 px-3 py-2 rounded-lg text-sm hover:bg-gray-300">Keep current</button>
+                                    @endcanany
                                 </div>
                                 <div class="text-center">
                                     <p class="text-xs font-medium text-purple-700 mb-1">AI version</p>
@@ -149,23 +156,31 @@
                                     @else
                                         <div class="text-xs text-gray-400 py-8">no preview</div>
                                     @endif
+                                    @canany(['translations.manage', 'layout.review'])
                                     <button wire:click="applyFix('use_generative')"
                                             class="mt-2 w-full bg-purple-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-purple-700">Use AI version</button>
+                                    @endcanany
                                 </div>
                             </div>
+                            @canany(['translations.manage', 'layout.review'])
                             <button wire:click="resetFix" class="mt-3 text-xs text-gray-400 hover:text-gray-600">Cancel</button>
+                            @endcanany
                         @elseif($fixState === 'applied')
                             <div class="mt-3 p-2 rounded bg-green-100 text-green-800 text-sm">
                                 ✓ Applied.
                                 @if($fixRecompare)
                                     Re-check: <strong>{{ $fixRecompare }}</strong>.
                                 @endif
+                                @canany(['translations.manage', 'layout.review'])
                                 <button wire:click="resetFix" class="ml-2 text-xs text-green-700 underline">Done</button>
+                                @endcanany
                             </div>
                         @elseif($fixState === 'failed')
                             <div class="mt-3 p-2 rounded bg-red-100 text-red-800 text-sm">
                                 Could not produce an AI fix: {{ $fixReason }}.
+                                @canany(['translations.manage', 'layout.review'])
                                 <button wire:click="resetFix" class="ml-2 text-xs text-red-700 underline">Dismiss</button>
+                                @endcanany
                             </div>
                         @endif
                     </div>
@@ -207,16 +222,20 @@
                 {{-- Approval tracks (R10.4) + overlay toggle --}}
                 <div class="flex items-center gap-2 mb-4 flex-wrap">
                     @foreach(['language' => 'Language', 'layout' => 'Layout', 'artwork' => 'Artwork'] as $tk => $lbl)
+                        @can($tk === 'language' ? 'translations.review' : 'layout.review')
                         <button wire:click="approveTrack('{{ $tk }}')"
                                 class="px-3 py-1.5 rounded text-sm {{ ($approvalTracks[$tk] ?? false) ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200' }}">
                             {{ ($approvalTracks[$tk] ?? false) ? '✅' : '○' }} {{ $lbl }}
                         </button>
+                        @endcan
                     @endforeach
                     @if($approvalTracks['artwork'] ?? false)
+                        @can('layout.review')
                         <button wire:click="reuseArtworkAcrossLanguages"
                                 class="px-3 py-1.5 rounded text-sm bg-indigo-600 text-white hover:bg-indigo-700">
                             ♻️ Reuse artwork across languages
                         </button>
+                        @endcan
                     @endif
                     <button wire:click="toggleOverlay"
                             class="ml-auto px-3 py-1.5 rounded text-sm {{ $showOverlay ? 'bg-brand-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200' }}">
@@ -320,12 +339,19 @@
 
                 {{-- Translation text (editable) --}}
                 <div class="border rounded-lg p-4">
+                    @can('translations.review')
                     <label class="block text-sm font-semibold mb-2">Translated Text (editable)</label>
                     <textarea
                         class="w-full h-32 p-3 border rounded-lg text-sm font-mono resize-y"
                         wire:change="updateTranslation({{ $currentPageData['id'] }}, $event.target.value)"
                     >{{ $currentPageData['translated_text'] }}</textarea>
                     <p class="text-xs text-gray-400 mt-1">Edit the text above and click outside to save. Page will be re-rendered on next render cycle.</p>
+                    @else
+                    <label class="block text-sm font-semibold mb-2">Translated Text</label>
+                    <textarea readonly
+                        class="w-full h-32 p-3 border rounded-lg text-sm font-mono resize-y bg-gray-50 text-gray-600"
+                    >{{ $currentPageData['translated_text'] }}</textarea>
+                    @endcan
                 </div>
             @else
                 <div class="flex items-center justify-center h-64 text-gray-400">

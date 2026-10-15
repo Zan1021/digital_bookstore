@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use Tests\Concerns\ActsAsSuperAdmin;
 use App\Livewire\Admin\BookReviewer;
 use App\Models\Book;
 use App\Models\BookPage;
@@ -23,7 +24,7 @@ use Tests\TestCase;
  */
 class ReviewApprovalConsolidationTest extends TestCase
 {
-    use RefreshDatabase;
+    use ActsAsSuperAdmin, RefreshDatabase;
 
     private Book $book;
 

@@ -2,9 +2,9 @@
 
 namespace App\Http\Middleware;
 
+use App\Auth\StaffAuthorization;
 use Closure;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
@@ -13,26 +13,17 @@ use Symfony\Component\HttpFoundation\Response;
  * 403 (Req 1.1, 1.4). Runs after `auth`, so guests never reach it.
  *
  * Registered as Livewire persistent middleware, so component updates are re-checked too.
+ * Individual actions inside admin pages are checked by #[Can] (App\Livewire\Attributes).
  */
 class EnsureStaffPermission
 {
     public function handle(Request $request, Closure $next, string $permissions): Response
     {
-        $user = $request->user();
-        $required = explode('|', $permissions);
-
-        if (! $user || ! $user->can('admin.access') || ! $user->canAny($required)) {
-            Log::warning('Admin access denied', [
-                'user_id' => $user?->id,
-                'route' => $request->route()?->getName(),
-                'path' => $request->path(),
-                'method' => $request->method(),
-                'required' => $required,
-                'ip' => $request->ip(),
-            ]);
-
-            abort(403);
-        }
+        StaffAuthorization::ensure($permissions, [
+            'route' => $request->route()?->getName(),
+            'path' => $request->path(),
+            'method' => $request->method(),
+        ]);
 
         return $next($request);
     }

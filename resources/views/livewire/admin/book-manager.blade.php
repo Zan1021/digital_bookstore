@@ -86,11 +86,13 @@
                 </dl>
 
                 <div class="mt-6 pt-4 border-t">
+                    @can('books.manage')
                     <button wire:click="suggestMetadata" wire:loading.attr="disabled"
                             class="w-full bg-purple-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-purple-700 transition">
                         <span wire:loading.remove wire:target="suggestMetadata">AI Suggest Metadata</span>
                         <span wire:loading wire:target="suggestMetadata">Analysing...</span>
                     </button>
+                    @endcan
                 </div>
 
                 @if($suggestedMetadata)
@@ -104,9 +106,11 @@
                                 </div>
                             @endforeach
                         </dl>
+                        @can('books.manage')
                         <button wire:click="applyMetadata" class="mt-3 bg-purple-600 text-white px-3 py-1 rounded text-xs hover:bg-purple-700">
                             Apply Suggestions
                         </button>
+                        @endcan
                     </div>
                 @endif
             </div>
@@ -215,6 +219,7 @@
                         @endforeach
                     </select>
                 </div>
+                @can('translations.manage')
                 <button wire:click="translate" wire:loading.attr="disabled"
                         class="bg-brand-500 text-white px-6 py-2 rounded-lg text-sm hover:bg-brand-600 transition disabled:opacity-50"
                         @if(empty($selectedLanguage)) disabled @endif>
@@ -227,6 +232,7 @@
                         Translating...
                     </span>
                 </button>
+                @endcan
             </div>
 
             {{-- Existing Translations --}}
@@ -278,11 +284,14 @@
                                         Compare &amp; Review
                                     </a>
                                     @if(in_array($translation->render_status, ['NEEDS_LANGUAGE_REVIEW','NEEDS_LAYOUT_REVIEW']))
+                                        @can('translations.manage')
                                         <button wire:click="retryTranslation({{ $translation->id }})"
                                                 class="inline-flex items-center gap-1 text-xs bg-yellow-500 text-white px-3 py-1.5 rounded-lg hover:bg-yellow-600 transition">
                                             Retry
                                         </button>
+                                        @endcan
                                     @endif
+                                    @canany(['translations.manage', 'layout.review'])
                                     <button wire:click="renderPdf({{ $translation->id }})"
                                             wire:loading.attr="disabled"
                                             wire:target="renderPdf({{ $translation->id }})"
@@ -298,6 +307,8 @@
                                             Rendering...
                                         </span>
                                     </button>
+                                    @endcanany
+                                    @can('translations.manage')
                                     <button wire:click="deleteTranslation({{ $translation->id }})"
                                             wire:confirm="Delete {{ $translation->language_name }} translation? This cannot be undone."
                                             class="inline-flex items-center gap-1 text-xs bg-red-100 text-red-600 px-3 py-1.5 rounded-lg hover:bg-red-200 transition">
@@ -306,6 +317,7 @@
                                         </svg>
                                         Delete
                                     </button>
+                                    @endcan
                                 </div>
                             </div>
                             {{-- Rendered PDF download --}}
@@ -367,11 +379,13 @@
             </div>
 
             @if(empty($availableVoices))
+                @can('narration.manage')
                 <button wire:click="loadVoices" wire:loading.attr="disabled"
                         class="bg-gray-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-gray-700 transition mb-6">
                     <span wire:loading.remove wire:target="loadVoices">Load Available Voices</span>
                     <span wire:loading wire:target="loadVoices">Fetching voices...</span>
                 </button>
+                @endcan
             @endif
 
             @if(!empty($availableVoices))
@@ -401,6 +415,7 @@
                         </select>
                     </div>
                     <div class="flex items-end">
+                        @can('narration.manage')
                         <button wire:click="narrate" wire:loading.attr="disabled"
                                 class="w-full bg-brand-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-brand-600 transition disabled:opacity-50"
                                 @if(empty($selectedVoice) || empty($selectedLanguage)) disabled @endif>
@@ -413,6 +428,7 @@
                                 Generating...
                             </span>
                         </button>
+                        @endcan
                     </div>
                 </div>
             @endif
@@ -429,6 +445,7 @@
                                         <h5 class="font-medium text-gray-800">{{ $narration->language_name }}</h5>
                                         <p class="text-xs text-gray-500">Voice: {{ $narration->voice_name }}</p>
                                     </div>
+                                    @can('narration.manage')
                                     <button wire:click="deleteNarration({{ $narration->id }})"
                                             wire:confirm="Delete {{ $narration->language_name }} narration? Audio files will be permanently removed."
                                             class="inline-flex items-center gap-1 text-xs bg-red-100 text-red-600 px-3 py-1.5 rounded-lg hover:bg-red-200 transition">
@@ -437,6 +454,7 @@
                                         </svg>
                                         Delete
                                     </button>
+                                    @endcan
                                 </div>
                                 @if($narration->audio_path)
                                     <audio controls class="w-full mt-2">
@@ -540,10 +558,12 @@
             </div>
 
             <div class="mt-8 pt-6 border-t flex justify-end">
+                @can('books.manage')
                 <button wire:click="saveSettings"
                         class="bg-brand-500 text-white px-6 py-2 rounded-lg text-sm hover:bg-brand-600 transition">
                     Save Settings
                 </button>
+                @endcan
             </div>
         </div>
     @endif

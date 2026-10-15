@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Admin;
 
+use App\Livewire\Attributes\Can;
 use App\Models\Book;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Storage;
@@ -49,6 +50,7 @@ class FontManager extends Component
      * against the approved fonts dir by Book::setRoleFont (rejects paths/unknown fonts).
      * An empty selection clears that role (reverts to source > house font).
      */
+    #[Can('books.manage')]
     public function saveTypographyPolicy(): void
     {
         try {
@@ -63,6 +65,7 @@ class FontManager extends Component
         }
     }
 
+    #[Can('books.manage')]
     public function clearTypographyPolicy(): void
     {
         $meta = $this->book->metadata ?? [];
@@ -123,6 +126,7 @@ class FontManager extends Component
         }
     }
 
+    #[Can('books.manage')]
     public function uploadFont()
     {
         if (!$this->fontUpload) return;

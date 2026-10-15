@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Admin;
 
+use App\Livewire\Attributes\Can;
 use App\Models\Book;
 use App\Models\Translation;
 use App\Models\TranslatedPage;
@@ -140,6 +141,7 @@ class ReviewQueue extends Component
         return $url . (str_contains($url, '?') ? '&' : '?') . 'v=' . $v;
     }
 
+    #[Can('translations.review|layout.review')]
     public function selectPage(int $pageNum)
     {
         $this->currentPage = $pageNum;
@@ -155,6 +157,7 @@ class ReviewQueue extends Component
      * Phase 7.2 / UI1 — toggle the interactive overlay and (lazily) load its box data for
      * the current page from the engine's overlay-data command.
      */
+    #[Can('translations.review|layout.review')]
     public function toggleOverlay(): void
     {
         $this->showOverlay = ! $this->showOverlay;
@@ -163,6 +166,7 @@ class ReviewQueue extends Component
         }
     }
 
+    #[Can('translations.review|layout.review')]
     public function toggleOverlayLayer(string $layer): void
     {
         if (array_key_exists($layer, $this->overlayToggles)) {
@@ -170,12 +174,14 @@ class ReviewQueue extends Component
         }
     }
 
+    #[Can('translations.review|layout.review')]
     public function selectRegion(?string $regionId): void
     {
         $this->selectedRegionId = $regionId;
     }
 
     /** Load the overlay-data payload (image + per-region boxes) for the current page. */
+    #[Can('translations.review|layout.review')]
     public function loadOverlay(): void
     {
         if (! $this->translation || ! $this->currentPage) {
@@ -190,12 +196,14 @@ class ReviewQueue extends Component
         }
     }
 
+    #[Can('translations.review|layout.review')]
     public function setFilter(string $filter)
     {
         $this->filter = $filter;
         $this->loadTranslation();
     }
 
+    #[Can('translations.review|layout.review')]
     public function approvePage(int $pageId)
     {
         $tp = TranslatedPage::find($pageId);
@@ -211,6 +219,7 @@ class ReviewQueue extends Component
         }
     }
 
+    #[Can('translations.review|layout.review')]
     public function rejectPage(int $pageId)
     {
         $tp = TranslatedPage::find($pageId);
@@ -224,6 +233,7 @@ class ReviewQueue extends Component
         }
     }
 
+    #[Can('translations.review|layout.review')]
     public function flagForReview(int $pageId)
     {
         $tp = TranslatedPage::find($pageId);
@@ -244,6 +254,7 @@ class ReviewQueue extends Component
      * re-render via the proven contract path avoids reintroducing the English-leak
      * fallback that a bespoke partial render risked.
      */
+    #[Can('translations.review')]
     public function updateTranslation(int $pageId, string $newText)
     {
         $tp = TranslatedPage::find($pageId);
@@ -289,6 +300,7 @@ class ReviewQueue extends Component
      *
      * @param array $fields subset of ['translation','font_role','translation_policy','container']
      */
+    #[Can('translations.review|layout.review')]
     public function updateRegion(string $regionId, array $fields): void
     {
         if (! $this->translation) {
@@ -334,8 +346,14 @@ class ReviewQueue extends Component
     }
 
     /** Approve one of the separate tracks (language | layout | artwork) — R10.4. */
+    #[Can('translations.review|layout.review')]
     public function approveTrack(string $track): void
     {
+        // Each approval track belongs to one reviewer area (language vs layout/artwork).
+        \App\Auth\StaffAuthorization::ensure($track === 'language' ? 'translations.review' : 'layout.review', [
+            'component' => static::class, 'action' => 'approveTrack', 'track' => $track,
+        ]);
+
         try {
             $this->translation?->approveTrack($track);
             session()->flash('success', ucfirst($track) . ' approved for this edition.');
@@ -350,6 +368,7 @@ class ReviewQueue extends Component
      * incoming box is in IMAGE PIXELS at the overlay dpi; convert to PDF points and persist
      * it as a per-region container override via updateRegion (which re-renders + invalidates).
      */
+    #[Can('layout.review')]
     public function updateRegionContainer(string $regionId, float $x0, float $y0, float $x1, float $y1): void
     {
         $dpi = (float) ($this->overlay['dpi'] ?? 110);
@@ -372,6 +391,7 @@ class ReviewQueue extends Component
      * cleaned artwork without re-approving it. The artwork is language-independent (only the
      * overlaid text differs), so a one-time approval is reusable across languages.
      */
+    #[Can('layout.review')]
     public function reuseArtworkAcrossLanguages(): void
     {
         if (! $this->translation || ! $this->translation->isTrackApproved('artwork')) {
@@ -405,6 +425,7 @@ class ReviewQueue extends Component
 
     /** Is the current page flagged (yellow/red or a render deviation)? The button only
      *  appears on flagged pages — a clean page never offers a paid AI fix. */
+    #[Can('translations.review|layout.review')]
     public function currentPageIsFlagged(): bool
     {
         $pd = collect($this->pages)->firstWhere('page_number', $this->currentPage);
@@ -421,6 +442,7 @@ class ReviewQueue extends Component
      * sets state to 'running'. The UI polls pollFix() for completion. The ONLY production
      * trigger of a generative call. In tests the job runs sync for determinism.
      */
+    #[Can('translations.manage')]
     public function fixWithAi(): void
     {
         if (!$this->translation || !$this->currentPage) {
@@ -442,6 +464,7 @@ class ReviewQueue extends Component
      * Poll the background repair job (G6). Called by the UI on a short interval while
      * fixState === 'running'. Transitions running → choose (two images) or → failed.
      */
+    #[Can('translations.manage|layout.review')]
     public function pollFix(): void
     {
         if ($this->fixState !== 'running' || !$this->translation || !$this->currentPage) {
@@ -469,6 +492,7 @@ class ReviewQueue extends Component
      * Apply the publisher's pick for the current page: 'keep_cheap' or 'use_generative'.
      * Delegates to applyPageVersion (G2), then reflects the outcome + re-compare verdict.
      */
+    #[Can('translations.manage|layout.review')]
     public function applyFix(string $choice): void
     {
         if (!$this->translation || !$this->currentPage) {
@@ -494,6 +518,7 @@ class ReviewQueue extends Component
     }
 
     /** Reset the Fix-with-AI panel back to idle (e.g. on page switch or cancel). */
+    #[Can('translations.manage|layout.review')]
     public function resetFix(): void
     {
         $this->fixState = 'idle';
@@ -522,6 +547,7 @@ class ReviewQueue extends Component
      * Promote the edition to APPROVED once every page is approved and layout QA is
      * clear (spec Req 5.2). Narration for the edition unlocks only after this.
      */
+    #[Can('translations.review')]
     public function approveEdition()
     {
         if (! $this->translation) {

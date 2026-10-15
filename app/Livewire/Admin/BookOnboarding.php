@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Admin;
 
+use App\Livewire\Attributes\Can;
 use App\Models\Book;
 use App\Services\NarrationService;
 use App\Services\PdfService;
@@ -85,6 +86,7 @@ class BookOnboarding extends Component
     // STEP 2: Crop Detection
     // =========================================================================
 
+    #[Can('books.manage')]
     public function confirmCrop()
     {
         // Detect fonts from the PDF
@@ -92,6 +94,7 @@ class BookOnboarding extends Component
         $this->currentStep = 'font';
     }
 
+    #[Can('books.manage')]
     public function skipCrop()
     {
         $this->hasCropMarks = false;
@@ -150,6 +153,7 @@ class BookOnboarding extends Component
         $this->processing = false;
     }
 
+    #[Can('books.manage')]
     public function uploadFont()
     {
         if ($this->fontUpload && $this->fontUploadTarget) {
@@ -173,6 +177,7 @@ class BookOnboarding extends Component
         }
     }
 
+    #[Can('books.manage')]
     public function confirmFonts()
     {
         // Process the book
@@ -218,6 +223,7 @@ class BookOnboarding extends Component
         $this->processing = false;
     }
 
+    #[Can('books.manage')]
     public function confirmPreview()
     {
         $this->currentStep = 'narrate';
@@ -240,6 +246,7 @@ class BookOnboarding extends Component
         }
     }
 
+    #[Can('narration.manage')]
     public function confirmNarration()
     {
         // Generate narration for original language
@@ -262,6 +269,7 @@ class BookOnboarding extends Component
         $this->currentStep = 'signoff';
     }
 
+    #[Can('books.manage')]
     public function skipNarration()
     {
         $this->enableNarration = false;
@@ -272,6 +280,7 @@ class BookOnboarding extends Component
     // STEP 6: Admin Sign-Off
     // =========================================================================
 
+    #[Can('books.manage')]
     public function signOff()
     {
         if ($this->book) {
@@ -284,6 +293,7 @@ class BookOnboarding extends Component
     // Navigation
     // =========================================================================
 
+    #[Can('books.manage')]
     public function goToStep(string $step)
     {
         $allowed = ['upload', 'crop', 'font', 'preview', 'narrate', 'signoff'];
@@ -292,6 +302,7 @@ class BookOnboarding extends Component
         }
     }
 
+    #[Can('books.manage')]
     public function prevStep()
     {
         $steps = ['upload', 'crop', 'font', 'preview', 'narrate', 'signoff'];

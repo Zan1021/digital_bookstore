@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Admin;
 
+use App\Livewire\Attributes\Can;
 use App\Models\Book;
 use App\Models\ProcessingJob;
 use App\Models\Translation;
@@ -14,21 +15,25 @@ class Dashboard extends Component
     public string $search = '';
     public string $filter = 'all'; // all, ready, processing, translated, narrated
 
+    #[Can('books.manage')]
     public function confirmDelete(int $bookId)
     {
         $this->confirmingDelete = $bookId;
     }
 
+    #[Can('books.manage')]
     public function cancelDelete()
     {
         $this->confirmingDelete = null;
     }
 
+    #[Can('admin.access')]
     public function setFilter(string $filter)
     {
         $this->filter = $filter;
     }
 
+    #[Can('books.manage')]
     public function deleteBook(int $bookId)
     {
         // Resolve without throwing: if the card was already deleted (e.g. a

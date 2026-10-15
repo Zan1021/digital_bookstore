@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Admin;
 
+use App\Livewire\Attributes\Can;
 use App\Models\Book;
 use App\Models\Translation;
 use App\Services\PdfTranslationService;
@@ -71,6 +72,7 @@ class EngineCompare extends Component
             ->first();
     }
 
+    #[Can('translations.manage|layout.review')]
     public function renderV8()
     {
         $this->rendering = true;

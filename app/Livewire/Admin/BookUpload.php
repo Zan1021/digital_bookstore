@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Admin;
 
+use App\Livewire\Attributes\Can;
 use App\Models\Book;
 use App\Services\PdfService;
 use Livewire\Component;
@@ -71,6 +72,7 @@ class BookUpload extends Component
         }
     }
 
+    #[Can('books.manage')]
     public function nextStep()
     {
         $steps = ['upload', 'crop', 'fonts', 'translate', 'processing', 'done'];
@@ -85,6 +87,7 @@ class BookUpload extends Component
         }
     }
 
+    #[Can('books.manage')]
     public function prevStep()
     {
         $steps = ['upload', 'crop', 'fonts', 'translate', 'processing', 'done'];
@@ -94,6 +97,7 @@ class BookUpload extends Component
         }
     }
 
+    #[Can('books.manage')]
     public function goBack()
     {
         $this->currentStep = 'upload';
@@ -104,6 +108,7 @@ class BookUpload extends Component
      * chosen deliberately afterwards on the book's management page
      * (gated-translation-narration-flow Req 1). No API calls happen here.
      */
+    #[Can('books.manage')]
     public function startProcessing()
     {
         $this->validate([
@@ -196,6 +201,7 @@ class BookUpload extends Component
      * (creates/updates the Translation edition + dispatches TranslateEditionJob). Kept OUT
      * of startProcessing so upload itself never spends — the publisher clicks this.
      */
+    #[Can('translations.manage')]
     public function translateCreated()
     {
         if ($this->targetLanguage === '') {
@@ -222,6 +228,7 @@ class BookUpload extends Component
         session()->flash('success', "{$langName} translation queued for the new book(s).");
     }
 
+    #[Can('books.manage')]
     public function uploadMore()
     {
         $this->reset(['files', 'results', 'processed', 'total', 'currentStep',

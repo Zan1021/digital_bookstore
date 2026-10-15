@@ -2,7 +2,9 @@
 
 namespace App\Providers;
 
+use App\Auth\StaffAuthorization;
 use App\Http\Middleware\EnsureStaffPermission;
+use App\Livewire\Attributes\Can;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\ServiceProvider;
 use Livewire\Livewire;
@@ -34,5 +36,21 @@ class AppServiceProvider extends ServiceProvider
 
         // Re-check staff permissions on Livewire update requests, not only on page load.
         Livewire::addPersistentMiddleware([EnsureStaffPermission::class]);
+
+        // Fail closed: an admin component action without a #[Can] declaration is refused.
+        // Livewire's own magic actions ($refresh, $set, ...) and its trait plumbing
+        // (file-upload handshakes) are not app actions and pass through.
+        \Livewire\on('call', function ($component, string $method) {
+            if (str_starts_with($component::class, 'App\\Livewire\\Admin\\')
+                && ! str_starts_with($method, '$')
+                && ! Can::isFrameworkMethod($component, $method)
+                && ! Can::declaredOn($component, $method)) {
+                StaffAuthorization::deny([
+                    'component' => $component::class,
+                    'action' => $method,
+                    'reason' => 'action declares no #[Can] permission',
+                ]);
+            }
+        });
     }
 }

@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use Tests\Concerns\ActsAsSuperAdmin;
 use App\Livewire\Admin\ReviewQueue;
 use App\Models\Book;
 use App\Models\BookPage;
@@ -22,7 +23,7 @@ use Tests\TestCase;
  */
 class ReviewQueueFixWithAiTest extends TestCase
 {
-    use RefreshDatabase;
+    use ActsAsSuperAdmin, RefreshDatabase;
 
     private Book $book;
     private Translation $edition;
