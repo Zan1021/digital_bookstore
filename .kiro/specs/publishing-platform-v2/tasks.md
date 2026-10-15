@@ -36,8 +36,10 @@ Work top to bottom. Each phase ends with a **checkpoint** that must pass before 
 
 - [ ] 3. Move protected assets to private storage
   - [x] 3.1 Add a `private` disk (local now, S3-compatible later) and an `AssetController` that checks permission (staff, entitlement or preview) and redirects to a short-lived signed URL.
-  - [ ] 3.2 Replace the 51 `Storage::disk('public')` uses for books, translations, plates and audio; keep `public` only for store marketing images.
-  - [ ] 3.3 Artisan command to move existing files and update stored paths; verify the existing book still opens in the reader.
+  - [x] 3.2 Replace the 51 `Storage::disk('public')` uses for books, translations, plates and audio; keep `public` only for store marketing images.
+    - _Note:_ found that the store drew every cover by loading the whole source PDF in the visitor's browser (anyone could download every book). Covers are now `covers/{id}.jpg` on the public disk, rendered from page 1 with the reader's trim (`scripts/render_cover.py`, redrawn when the crop changes). Readers use the asset gatekeeper; admin working files use signed staff-only `/assets/file` links. Checked by looking: store home, book page, browse, dashboard, reader (af), flipbook (af), review queue.
+  - [x] 3.3 Artisan command to move existing files and update stored paths; verify the existing book still opens in the reader.
+    - _Note:_ `php artisan assets:move-to-private` (`--dry-run`, `--keep-originals`) moved 41 files / 142.7 MB with SHA-256 verification and created the missing cover. Stored paths are relative and unchanged (no absolute paths found in the DB or JSON), so no path rewrite was needed. Also found `public/storage` was an empty folder, not the storage link — `/storage` URLs never worked locally (the cause of the blank reader seen earlier); fixed with `php artisan storage:link`. Book 10002 opens in the reader and flipbook in Afrikaans. Production deploys must run `storage:link` and this command once.
   - [ ] 3.4 Remove the `/raw-pdf/{book}` public route or put it behind staff auth.
   - _Requirements: 20.1, 20.2_
 
