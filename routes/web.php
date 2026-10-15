@@ -244,24 +244,11 @@ Route::get('/read-curl/{book}', function (Book $book) {
     return view('read-curl', compact('book', 'pdfPath', 'pdfUrl', 'lang'));
 })->name('read-curl');
 
-// RAW PDF — serve the translated PDF directly, no reader/crop, for debugging the engine output.
+// RAW PDF — the plain PDF for checking engine output (task 3.4). Staff only (this group)
+// and no longer a second way of serving files: it redirects to the asset gatekeeper,
+// which serves from the private disk through a short-lived signed URL.
 Route::get('/raw-pdf/{book}', function (Book $book) {
-    $lang = request()->query('lang', 'af');
-    $pdfPath = $book->pdf_path;
-
-    if ($lang !== 'en') {
-        $translation = $book->translations->where('language_code', $lang)->first();
-        if ($translation && $translation->rendered_pdf_path && \App\Assets\AssetStorage::disk()->exists($translation->rendered_pdf_path)) {
-            $pdfPath = $translation->rendered_pdf_path;
-        }
-    }
-
-    abort_unless(\App\Assets\AssetStorage::disk()->exists($pdfPath), 404, 'PDF not found');
-
-    return response(\App\Assets\AssetStorage::disk()->get($pdfPath), 200, [
-        'Content-Type' => 'application/pdf',
-        'Content-Disposition' => 'inline; filename="' . basename($pdfPath) . '"',
-    ]);
+    return redirect(\App\Assets\AssetStorage::pdfUrl($book, request()->query('lang', 'af')));
 })->name('raw-pdf');
 
 }); // end staff-only readers

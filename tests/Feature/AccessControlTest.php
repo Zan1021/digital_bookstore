@@ -130,8 +130,28 @@ class AccessControlTest extends TestCase
         $admin = $this->staff('Super Admin');
 
         $this->actingAs($admin)->get(route('admin.dashboard'))->assertOk();
+
+        // raw-pdf is only a staff shortcut to the asset gatekeeper (task 3.4), which then
+        // serves the private file through a signed URL.
         $this->actingAs($admin)->get(route('raw-pdf', ['book' => $this->book->id, 'lang' => 'en']))
+            ->assertRedirect(route('assets.show', ['book' => $this->book->id, 'kind' => 'source-pdf']));
+        $this->actingAs($admin)->followingRedirects()
+            ->get(route('raw-pdf', ['book' => $this->book->id, 'lang' => 'en']))
             ->assertOk()->assertHeader('Content-Type', 'application/pdf');
+    }
+
+    public function test_raw_pdf_picks_the_edition_and_falls_back_to_the_source(): void
+    {
+        $admin = $this->staff('Super Admin');
+        \App\Models\Translation::create([
+            'book_id' => $this->book->id, 'language_code' => 'af', 'language_name' => 'Afrikaans',
+            'status' => 'draft', 'rendered_pdf_path' => 'books/translated/a_af.pdf',
+        ]);
+
+        $this->actingAs($admin)->get(route('raw-pdf', ['book' => $this->book->id, 'lang' => 'af']))
+            ->assertRedirect(route('assets.show', ['book' => $this->book->id, 'kind' => 'edition-pdf', 'lang' => 'af']));
+        $this->actingAs($admin)->get(route('raw-pdf', ['book' => $this->book->id, 'lang' => 'zu']))
+            ->assertRedirect(route('assets.show', ['book' => $this->book->id, 'kind' => 'source-pdf']));
     }
 
     public function test_staff_are_limited_to_their_permissions(): void
