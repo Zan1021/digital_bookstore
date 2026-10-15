@@ -56,7 +56,8 @@ Work top to bottom. Each phase ends with a **checkpoint** that must pass before 
   - _Requirements: 27.1, 27.2, 7.3_
 
 - [ ] 5. Production-ready infrastructure settings
-  - [ ] 5.1 Check all migrations run on PostgreSQL as well as SQLite (CI matrix).
+  - [x] 5.1 Check all migrations run on PostgreSQL as well as SQLite (CI matrix).
+    - _Note:_ checked locally on PostgreSQL 16.10 (throwaway Docker container): all 38 migrations run, reset and re-run cleanly; the full PHP suite passes (374). Two store-search tests failed on PostgreSQL — `BookQuery` used SQLite-only `json_extract()`, and `LIKE` is case-sensitive on PostgreSQL — fixed with `whereLike()` (ILIKE on PostgreSQL) and a `translations->en` JSON path, plus the admin dashboard search; two tests added. CI's PHP job is now a sqlite/pgsql matrix with a postgres:16.10 service and a migrations up/down step; it runs once the branch is pushed.
   - [ ] 5.2 Configure Redis queues and Horizon with queues `intake`, `ai`, `layout`, `exports`, `mail`.
   - [ ] 5.3 Add a `jobs_runs` table and a small helper that records stage start, end, duration, status and error.
   - _Requirements: 3.1, 3.3; design §20_

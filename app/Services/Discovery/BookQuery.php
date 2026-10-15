@@ -132,21 +132,24 @@ class BookQuery
         }
         $like = '%' . $term . '%';
 
+        // whereLike(..., caseSensitive: false) is case-insensitive on every database (LIKE on
+        // SQLite, ILIKE on PostgreSQL), and 'translations->en' compiles to each database's
+        // own JSON lookup, so search behaves the same in development and production.
         // Resolve any category/tag whose label OR alias matches -> their ids.
-        $tagIds = Tag::where('canonical_name', 'like', $like)
-            ->orWhereHas('translationsRel', fn ($t) => $t->where('label', 'like', $like))
-            ->orWhereHas('aliases', fn ($a) => $a->where('alias', 'like', $like))
+        $tagIds = Tag::whereLike('canonical_name', $like)
+            ->orWhereHas('translationsRel', fn ($t) => $t->whereLike('label', $like))
+            ->orWhereHas('aliases', fn ($a) => $a->whereLike('alias', $like))
             ->pluck('id');
-        $catIds = Category::where('slug', 'like', $like)
-            ->orWhereRaw("json_extract(translations, '$.en') like ?", [$like])
+        $catIds = Category::whereLike('slug', $like)
+            ->orWhereLike('translations->en', $like)
             ->pluck('id');
 
         return $q->where(function ($w) use ($like, $tagIds, $catIds) {
-            $w->where('title', 'like', $like)
-              ->orWhere('series', 'like', $like)
-              ->orWhere('author', 'like', $like)
-              ->orWhere('illustrator', 'like', $like)
-              ->orWhere('sku', 'like', $like);
+            $w->whereLike('title', $like)
+              ->orWhereLike('series', $like)
+              ->orWhereLike('author', $like)
+              ->orWhereLike('illustrator', $like)
+              ->orWhereLike('sku', $like);
             if ($tagIds->isNotEmpty()) {
                 $w->orWhereHas('tags', fn ($t) => $t->whereIn('tags.id', $tagIds));
             }

@@ -111,9 +111,10 @@ class Dashboard extends Component
 
         if (!empty($this->search)) {
             $query->where(function ($q) {
-                $q->where('title', 'like', '%' . $this->search . '%')
-                  ->orWhere('sku', 'like', '%' . $this->search . '%')
-                  ->orWhere('author', 'like', '%' . $this->search . '%');
+                // Case-insensitive on every database (ILIKE on PostgreSQL).
+                $q->whereLike('title', '%' . $this->search . '%')
+                  ->orWhereLike('sku', '%' . $this->search . '%')
+                  ->orWhereLike('author', '%' . $this->search . '%');
             });
         }
 

@@ -88,6 +88,25 @@ class StoreCatalogTest extends TestCase
             ->assertDontSee('Rocket to Mars');
     }
 
+    /** Same on SQLite and PostgreSQL (task 5.1): search ignores case. */
+    public function test_search_ignores_case(): void
+    {
+        $this->publishedBook(['title' => 'The Lonely Elephant']);
+
+        Livewire::test(Catalog::class)->set('search', 'lonely ELEPHANT')->assertSee('The Lonely Elephant');
+    }
+
+    /** Same on SQLite and PostgreSQL (task 5.1): a category's English label is searchable. */
+    public function test_search_matches_a_category_label(): void
+    {
+        $book = $this->publishedBook(['title' => 'Counting Stars']);
+        $category = \App\Models\Category::create(['slug' => 'numbers', 'translations' => ['en' => 'Maths and Counting']]);
+        $book->categories()->attach($category->id, ['is_primary' => true]);
+
+        $this->assertSame([$book->id],
+            (new \App\Services\Discovery\BookQuery([]))->search('maths')->pluck('books.id')->all());
+    }
+
     public function test_clear_single_filter(): void
     {
         $this->publishedBook(['title' => 'Picture Book A']);
