@@ -23,6 +23,9 @@ class AppServiceProvider extends ServiceProvider
             \App\Services\Classification\LlmClient::class,
             \App\Services\Classification\NullLlmClient::class
         );
+
+        // Customer entitlements arrive with commerce (Phase 4); until then nobody owns a book.
+        $this->app->bind(\App\Assets\Entitlements::class, \App\Assets\NoEntitlements::class);
     }
 
     /**

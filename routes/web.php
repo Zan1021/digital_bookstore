@@ -65,6 +65,14 @@ Route::prefix('admin')->middleware(['auth', 'verified', 'staff:admin.access'])->
     Route::get('/fonts/{book}', \App\Livewire\Admin\FontManager::class)->middleware('staff:books.manage')->name('admin.fonts');
 });
 
+// Protected book files (Req 20.2): check staff / entitlement / preview, then hand out a
+// short-lived signed URL bound to the user. Open to guests so preview pages can work.
+$assetKinds = implode('|', \App\Assets\AssetResolver::KINDS);
+Route::get('/assets/books/{book}/{kind}', [\App\Http\Controllers\AssetController::class, 'show'])
+    ->where('kind', $assetKinds)->middleware('throttle:120,1')->name('assets.show');
+Route::get('/assets/serve/{book}/{kind}', [\App\Http\Controllers\AssetController::class, 'serve'])
+    ->where('kind', $assetKinds)->middleware(['signed', 'throttle:120,1'])->name('assets.serve');
+
 // Readers and raw PDFs: staff only until customer entitlements and previews exist
 // (task 3.1 replaces this with an entitlement/preview check).
 Route::middleware(['auth', 'verified', 'staff:books.view'])->group(function () {

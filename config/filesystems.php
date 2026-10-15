@@ -47,6 +47,17 @@ return [
             'report' => false,
         ],
 
+        // Protected book assets (source PDFs, editions, plates, page text, audio): never
+        // reachable by URL; delivered only through AssetController (Req 20.1, 20.2).
+        // Production can point ASSETS_DISK at an S3-compatible disk instead.
+        'private' => [
+            'driver' => 'local',
+            'root' => storage_path('app/private/assets'),
+            'serve' => false,
+            'throw' => false,
+            'report' => false,
+        ],
+
         's3' => [
             'driver' => 's3',
             'key' => env('AWS_ACCESS_KEY_ID'),
