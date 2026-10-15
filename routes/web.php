@@ -28,6 +28,18 @@ Route::get('/store/book/{book}', function (Book $book) {
 // (wires the tested App\Services\Discovery\BookQuery engine to a real UI).
 Route::get('/browse', \App\Livewire\Store\Catalog::class)->name('store.browse');
 
+// Customer account (Laravel Breeze, Livewire stack): login, registration, password reset,
+// email verification (routes/auth.php), plus the signed-in account pages (Req 1.2).
+Route::view('dashboard', 'dashboard')
+    ->middleware(['auth', 'verified'])
+    ->name('dashboard');
+
+Route::view('profile', 'profile')
+    ->middleware(['auth'])
+    ->name('profile');
+
+require __DIR__.'/auth.php';
+
 // Admin routes (no auth for POC - add later)
 Route::prefix('admin')->group(function () {
     Route::get('/', Dashboard::class)->name('admin.dashboard');

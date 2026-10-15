@@ -38,6 +38,14 @@ jobs:
 
       - run: composer install --no-interaction --no-progress --prefer-dist
 
+      # Auth pages (Breeze layouts) load the Vite build; tests render them.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
       - name: Prepare environment
         run: |
           cp .env.example .env
