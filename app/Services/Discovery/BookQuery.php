@@ -59,7 +59,8 @@ class BookQuery
             $q->where('book_type', $this->filters['book_type']);
         }
         if (!empty($this->filters['series'])) {
-            $q->where('series', $this->filters['series']);
+            // Series are records since task 6.2; the filter value is the series name.
+            $q->whereHas('series', fn ($s) => $s->where('name', $this->filters['series']));
         }
         if (isset($this->filters['age'])) {
             $age = (int) $this->filters['age'];
@@ -146,7 +147,7 @@ class BookQuery
 
         return $q->where(function ($w) use ($like, $tagIds, $catIds) {
             $w->whereLike('title', $like)
-              ->orWhereLike('series', $like)
+              ->orWhereHas('series', fn ($s) => $s->whereLike('name', $like))
               ->orWhereLike('author', $like)
               ->orWhereLike('illustrator', $like)
               ->orWhereLike('sku', $like);
@@ -170,15 +171,27 @@ class BookQuery
             'book_type' => $base->clone()->whereNotNull('book_type')
                 ->selectRaw('book_type as v, count(*) as c')->groupBy('book_type')
                 ->pluck('c', 'v')->toArray(),
-            'series' => $base->clone()->whereNotNull('series')
-                ->selectRaw('series as v, count(*) as c')->groupBy('series')
-                ->pluck('c', 'v')->toArray(),
+            'series' => $this->seriesFacet($base),
             'category' => Category::active()->get()
                 ->mapWithKeys(fn ($c) => [$c->slug => (clone $base)->whereHas('categories',
                     fn ($q) => $q->where('slug', $c->slug))->count()])
                 ->filter(fn ($n) => $n > 0)->toArray(),
             default => [],
         };
+    }
+
+    /**
+     * Series name => book count. Grouped by series_id and named afterwards rather than
+     * joined, so the base query's unqualified columns (e.g. status) stay unambiguous.
+     */
+    private function seriesFacet(Builder $base): array
+    {
+        $counts = $base->clone()->whereNotNull('series_id')
+            ->selectRaw('series_id as v, count(*) as c')->groupBy('series_id')
+            ->pluck('c', 'v');
+        $names = \App\Models\Series::whereIn('id', $counts->keys())->pluck('name', 'id');
+
+        return $counts->mapWithKeys(fn ($count, $id) => [$names[$id] => (int) $count])->toArray();
     }
 
     private function resolveTagId(string $slugOrId): ?int

@@ -125,7 +125,7 @@ class Catalog extends Component
             ? $query->search($this->search)
             : $query->base();
 
-        $builder->with(['translations', 'narrations']);
+        $builder->with(['translations', 'narrations', 'series']);
 
         // Collection scope (brief Req 9): when a collection is selected, restrict the
         // result set to the books it resolves to (manual pins or rule-based via BookQuery),

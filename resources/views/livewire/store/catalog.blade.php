@@ -231,7 +231,7 @@
                             </div>
                             <h3 class="text-sm font-semibold text-gray-800 leading-snug group-hover:text-brand-600">{{ $book->title }}</h3>
                             <p class="text-xs text-gray-400 mt-0.5">
-                                @if($book->series){{ $book->series }} &middot; @endif{{ $book->translations->count() }} language{{ $book->translations->count() === 1 ? '' : 's' }}
+                                @if($book->series){{ $book->series->name }} &middot; @endif{{ $book->translations->count() }} language{{ $book->translations->count() === 1 ? '' : 's' }}
                             </p>
                         </a>
                     @endforeach

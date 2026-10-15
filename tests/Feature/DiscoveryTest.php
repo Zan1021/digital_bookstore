@@ -164,10 +164,28 @@ class DiscoveryTest extends TestCase
         $this->assertContains('US Only', $us);
     }
 
+    /** Task 6.2: series is a record; filter, facet and search go through it. */
+    public function test_series_filter_facet_and_search_use_the_series_record(): void
+    {
+        $kolulu = \App\Models\Series::create(['name' => 'Kolulu Series 3']);
+        $other = \App\Models\Series::create(['name' => 'Wild Numbers']);
+        $this->publishedBook(['title' => 'Home', 'series_id' => $kolulu->id, 'series_position' => 1]);
+        $this->publishedBook(['title' => 'A Fun Place', 'series_id' => $kolulu->id, 'series_position' => 2]);
+        $this->publishedBook(['title' => 'Count', 'series_id' => $other->id, 'series_position' => 1]);
+        $this->publishedBook(['title' => 'Standalone']);
+
+        $this->assertSame(2, (new BookQuery(['series' => 'Kolulu Series 3']))->base()->count());
+        $this->assertSame(['Kolulu Series 3' => 2, 'Wild Numbers' => 1],
+            collect((new BookQuery([]))->facetCounts('series'))->sortKeys()->all());
+        $this->assertEqualsCanonicalizing(['Home', 'A Fun Place'],
+            (new BookQuery([]))->search('kolulu series')->pluck('title')->all());
+    }
+
     public function test_series_progression_next_book(): void
     {
-        $b1 = $this->publishedBook(['title' => 'Vol1', 'series' => 'Kolulu', 'series_volume' => 1]);
-        $b2 = $this->publishedBook(['title' => 'Vol2', 'series' => 'Kolulu', 'series_volume' => 2],
+        $series = \App\Models\Series::create(['name' => 'Kolulu']);
+        $b1 = $this->publishedBook(['title' => 'Vol1', 'series_id' => $series->id, 'series_position' => 1]);
+        $b2 = $this->publishedBook(['title' => 'Vol2', 'series_id' => $series->id, 'series_position' => 2],
             ['language_code' => 'en', 'language_name' => 'English']);
 
         $next = $b1->nextInSeries();

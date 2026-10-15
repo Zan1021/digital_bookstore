@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\Storage;
 
@@ -40,8 +41,8 @@ class Book extends Model
         'age_min',
         'age_max',
         'audience_range_id',
-        'series',
-        'series_volume',
+        'series_id',
+        'series_position',
     ];
 
     protected $casts = [
@@ -239,6 +240,30 @@ class Book extends Model
         return $this->belongsTo(Publisher::class);
     }
 
+    public function series(): BelongsTo
+    {
+        return $this->belongsTo(Series::class);
+    }
+
+    public function contributors(): BelongsToMany
+    {
+        return $this->belongsToMany(Contributor::class, 'book_contributor')
+            ->withPivot(['role', 'position'])->withTimestamps();
+    }
+
+    /** Link this book's author/illustrator columns to contributor records (task 6.2). */
+    public function syncContributorsFromColumns(): void
+    {
+        foreach (['author', 'illustrator'] as $role) {
+            $this->contributors()->wherePivot('role', $role)->detach();
+            $name = trim((string) $this->getAttribute($role));
+            if ($name !== '') {
+                $contributor = Contributor::firstOrCreate(['name' => $name]);
+                $this->contributors()->attach($contributor->id, ['role' => $role, 'position' => 0]);
+            }
+        }
+    }
+
     public function translations(): HasMany
     {
         return $this->hasMany(Translation::class);
@@ -312,12 +337,12 @@ class Book extends Model
      */
     public function nextInSeries(?int $readingLevelRank = null): ?Book
     {
-        if (empty($this->series) || $this->series_volume === null) {
+        if ($this->series_id === null || $this->series_position === null) {
             return null;
         }
-        $laterVolumes = static::where('series', $this->series)
-            ->where('series_volume', '>', $this->series_volume)
-            ->orderBy('series_volume')
+        $laterVolumes = static::where('series_id', $this->series_id)
+            ->where('series_position', '>', $this->series_position)
+            ->orderBy('series_position')
             ->get();
 
         if ($laterVolumes->isEmpty()) {
@@ -465,6 +490,14 @@ class Book extends Model
         static::deleting(function (Book $book) {
             $book->deleteAssociatedFiles();
             $book->deleteAssociatedRecords();
+        });
+
+        // Contributors (task 6.2): author/illustrator are still the edited fields; keep the
+        // contributor records in step with them, one way, so the two never disagree.
+        static::saved(function (Book $book) {
+            if ($book->wasRecentlyCreated || $book->wasChanged(['author', 'illustrator'])) {
+                $book->syncContributorsFromColumns();
+            }
         });
 
         // The store cover is trimmed like the reader page; redraw it when the trim changes.
