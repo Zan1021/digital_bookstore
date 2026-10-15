@@ -23,9 +23,51 @@ import argparse
 import io
 import json
 import os
+import sys
 
 import pymupdf
 from PIL import Image, ImageDraw
+
+
+# --- Real corpus books -------------------------------------------------------------------
+# The real source PDFs live OUTSIDE the repo (copyright), next to it: ../<book>.pdf and
+# ../Book_Pdfs/<publisher>/<book>.pdf. BOOKSTORE_CORPUS_DIR (os.pathsep-separated) adds
+# other roots, e.g. on CI. Tests that need a book they cannot find exit with SKIP_EXIT,
+# which run_python_tests.py reports as SKIP — never as a pass.
+SKIP_EXIT = 77
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _corpus_roots():
+    roots = [r for r in os.environ.get("BOOKSTORE_CORPUS_DIR", "").split(os.pathsep) if r]
+    parent = os.path.dirname(_REPO)
+    return roots + [parent, os.path.join(parent, "Book_Pdfs")]
+
+
+def find_corpus_book(filename):
+    """Absolute path of a real corpus PDF by file name, or None if it is not on this machine."""
+    parent = os.path.dirname(_REPO)
+    for root in _corpus_roots():
+        if not os.path.isdir(root):
+            continue
+        if os.path.isfile(os.path.join(root, filename)):
+            return os.path.join(root, filename)
+        if root == parent:
+            continue  # the repo's parent holds the repo itself; only look at its top level
+        for dirpath, _dirs, files in os.walk(root):
+            if filename in files:
+                return os.path.join(dirpath, filename)
+    return None
+
+
+def require_corpus_book(filename):
+    """Like find_corpus_book, but a missing book ends the test script as SKIP."""
+    path = find_corpus_book(filename)
+    if path is None:
+        print(f"SKIP: corpus book not found: {filename} "
+              f"(searched {', '.join(_corpus_roots())}; set BOOKSTORE_CORPUS_DIR)")
+        sys.exit(SKIP_EXIT)
+    return path
 
 
 def _baked_image(w, h, bg, text_boxes):

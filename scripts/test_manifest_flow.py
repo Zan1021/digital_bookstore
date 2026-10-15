@@ -1,106 +1,81 @@
 """
-Test the full manifest → translation request → legacy conversion flow.
-Validates that existing translations can be mapped to stable content IDs.
+Manifest -> translation request -> response validation -> page translations map.
+
+Builds the page manifest of a real corpus book (skips if absent), turns it into a
+translation request, and checks the request/response contract: every translatable item
+becomes one unit with a stable unique id, preserved regions are not sent, a complete
+response validates, an incomplete or duplicated one does not, and a validated response
+maps back onto the right pages. Synthetic responses only — no AI calls, no database.
+
+Run: python scripts/test_manifest_flow.py
 """
-import json
 import os
-import sqlite3
 import sys
 
-base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(base_dir, "scripts"))
-
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from corpus_fixtures import require_corpus_book
 from page_manifest import build_document_manifest
-from translation_request import (
-    build_translation_request,
-    legacy_text_to_manifest_items,
-    validate_response,
-    response_to_translations_map,
-)
+from translation_request import build_translation_request, response_to_translations_map, validate_response
 
-# Paths
-pdf_path = os.path.join(base_dir, "storage", "app", "public", "books", "pdfs",
-                         "1787824220_Kolulu Engl Series 3 - 2 - A Fun Place.pdf")
-db_path = os.path.join(base_dir, "database", "database.sqlite")
+_passed = _failed = 0
+
+
+def check(name, ok):
+    global _passed, _failed
+    print(f"  [{'OK' if ok else 'FAIL'}] {name}")
+    if ok:
+        _passed += 1
+    else:
+        _failed += 1
+
+
+pdf = require_corpus_book("Kolulu Engl Series 3 - 2 - A Fun Place.pdf")
 
 print("=" * 60)
-print("MANIFEST + TRANSLATION REQUEST FLOW TEST")
+print("MANIFEST + TRANSLATION REQUEST FLOW")
 print("=" * 60)
 
-# Step 1: Build manifest
-print("\n1. Building document manifest...")
-manifest = build_document_manifest(pdf_path)
-print(f"   Pages: {manifest['page_count']}")
-for page in manifest["pages"]:
-    regions = page.get("regions", [])
-    items = sum(len(r.get("items", [])) for r in regions)
-    print(f"   Page {page['page_number']:2d}: {page['page_type']:12s} — {len(regions)} regions, {items} items")
+manifest = build_document_manifest(pdf)
+pages = manifest["pages"]
+check("manifest has one entry per page", manifest["page_count"] == len(pages) > 0)
 
-# Step 2: Build translation request
-print("\n2. Building translation request...")
+translatable, preserved = set(), set()
+for page in pages:
+    for region in page.get("regions", []):
+        ids = {item["id"] for item in region.get("items", [])}
+        (preserved if region.get("translation_policy", "preserve") == "preserve" else translatable).update(ids)
+check("manifest has translatable items", len(translatable) > 0)
+
 request = build_translation_request(manifest, "af", "Afrikaans")
-print(f"   Total translation units: {request['total_units']}")
-print(f"   System prompt length: {len(request['system_prompt'])} chars")
+units = request["translation_units"]
+unit_ids = [u["id"] for u in units]
+check("request has one unit per translatable item", set(unit_ids) == translatable)
+check("unit ids are unique", len(unit_ids) == len(set(unit_ids)))
+check("preserved items are not sent for translation", not (set(unit_ids) & preserved))
+check("every unit carries its source text", all(u["source_text"].strip() for u in units))
+check("system prompt names the target language", "Afrikaans" in request["system_prompt"])
 
-# Step 3: Load existing translations from DB
-print("\n3. Loading existing translations from database...")
-conn = sqlite3.connect(db_path)
-conn.row_factory = sqlite3.Row
-cursor = conn.cursor()
-cursor.execute("""
-    SELECT page_number, translated_text 
-    FROM translated_pages 
-    WHERE translation_id = 4 
-    ORDER BY page_number
-""")
-rows = cursor.fetchall()
-conn.close()
-print(f"   Found {len(rows)} translated pages")
+full = [{"id": u["id"], "translation": f"[af] {u['source_text']}"} for u in units]
+ok = validate_response(request, full)
+check("complete response is valid", ok["valid"] and ok["coverage"]["received"] == len(units))
 
-# Step 4: Convert legacy translations to manifest items
-print("\n4. Converting legacy translations to manifest items...")
-all_legacy_items = []
-for row in rows:
-    page_num = row["page_number"]
-    text = row["translated_text"]
-    if not text or not text.strip():
-        continue
-    
-    # Find page manifest
-    page_manifest = next((p for p in manifest["pages"] if p["page_number"] == page_num), None)
-    if not page_manifest:
-        continue
-    
-    items = legacy_text_to_manifest_items(text, page_manifest)
-    all_legacy_items.extend(items)
-    print(f"   Page {page_num:2d}: {len(items)} items mapped")
+dropped = validate_response(request, full[1:])
+check("response missing an item is invalid and names it",
+      not dropped["valid"] and dropped["coverage"]["missing_ids"] == [full[0]["id"]])
 
-print(f"\n   Total legacy items mapped: {len(all_legacy_items)}")
+duplicated = validate_response(request, full + [full[0]])
+check("duplicate id is an error", not duplicated["valid"])
 
-# Step 5: Validate coverage
-print("\n5. Validating coverage...")
-validation = validate_response(request, all_legacy_items)
-print(f"   Valid: {validation['valid']}")
-print(f"   Expected: {validation['coverage']['expected']}")
-print(f"   Received: {validation['coverage']['received']}")
-if validation['coverage']['missing_ids']:
-    print(f"   Missing: {len(validation['coverage']['missing_ids'])} IDs")
-    print(f"   First few: {validation['coverage']['missing_ids'][:5]}")
-if validation['errors']:
-    print(f"   Errors: {validation['errors'][:3]}")
-if validation['warnings']:
-    print(f"   Warnings: {validation['warnings'][:3]}")
+check("non-list response is invalid", not validate_response(request, {"id": "x"})["valid"])
 
-# Step 6: Show vocab page mapping
-print("\n6. Vocabulary page (15) mapping sample:")
-vocab_page = next((p for p in manifest["pages"] if p["page_number"] == 15), None)
-if vocab_page:
-    vocab_items = [i for i in all_legacy_items if i["id"].startswith("p15-")]
-    print(f"   Total vocab items mapped: {len(vocab_items)}")
-    print(f"   First 10:")
-    for item in vocab_items[:10]:
-        print(f"     {item['id']}: '{item['translation']}'")
+page_map = response_to_translations_map(full, manifest)
+mapped = {item_id: (page_num, text) for page_num, entry in page_map.items()
+          for item_id, text in entry["items"].items()}
+unit_page = {u["id"]: u["page_number"] for u in units}
+check("every translation maps back to its own page",
+      set(mapped) == set(unit_page) and all(mapped[i][0] == unit_page[i] for i in unit_page))
 
-print("\n" + "=" * 60)
-print("DONE")
 print("=" * 60)
+print(f"RESULTS: {_passed} passed, {_failed} failed")
+print("=" * 60)
+sys.exit(1 if _failed else 0)

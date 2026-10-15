@@ -20,6 +20,7 @@ import time
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 BASE = os.path.dirname(SCRIPTS)
 TAIL_LINES = 25
+SKIP_EXIT = 77  # a test that cannot run here (e.g. corpus book absent); see corpus_fixtures
 
 
 def find_tests(terms):
@@ -43,7 +44,12 @@ def run_one(path, timeout):
             encoding="utf-8",
             errors="replace",
         )
-        status = "PASS" if proc.returncode == 0 else f"FAIL (exit {proc.returncode})"
+        if proc.returncode == 0:
+            status = "PASS"
+        elif proc.returncode == SKIP_EXIT:
+            status = "SKIP"
+        else:
+            status = f"FAIL (exit {proc.returncode})"
         output = proc.stdout or ""
     except subprocess.TimeoutExpired as exc:
         status = f"TIMEOUT (>{timeout}s)"
@@ -74,17 +80,21 @@ def main():
         print(f"{name:<{width}}  {status:<22} {seconds:7.1f}s", flush=True)
         if args.verbose:
             print(output)
+        elif status == "SKIP":
+            print(f"    | {output.strip().splitlines()[-1] if output.strip() else ''}")
         elif status != "PASS":
             lines = output.rstrip().splitlines()
             for line in lines[-TAIL_LINES:]:
                 print(f"    | {line}")
 
-    failed = [r for r in results if r[1] != "PASS"]
+    failed = [r for r in results if r[1] not in ("PASS", "SKIP")]
+    skipped = [r for r in results if r[1] == "SKIP"]
+    passed = len(results) - len(failed) - len(skipped)
     total_time = sum(r[2] for r in results)
     print("=" * 60)
-    print(f"PYTHON TESTS: {len(results) - len(failed)} passed, {len(failed)} failed, "
+    print(f"PYTHON TESTS: {passed} passed, {len(failed)} failed, {len(skipped)} skipped, "
           f"{len(results)} files, {total_time:.1f}s")
-    for name, status, _ in failed:
+    for name, status, _ in failed + skipped:
         print(f"  {status:<22} {name}")
     print("=" * 60)
     return 1 if failed else 0
