@@ -8,6 +8,7 @@ use App\Intake\TitleChooser;
 use App\Models\Book;
 use App\Models\ProcessingJob;
 use App\Models\SourcePage;
+use App\Scene\PageBatch;
 use App\Services\PdfService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -82,11 +83,29 @@ class IntakeBookJob implements ShouldQueue
 
             $row->update(['status' => 'completed', 'progress' => 100, 'completed_at' => now(),
                 'details' => array_merge($row->details ?? [], ['title' => $book->title, 'pages' => $book->page_count])]);
+
+            // Scene Engine stage 2 (task 11.1): read the text blocks of every page, in parallel.
+            // Its own batch records page failures; a problem there does not undo a finished intake.
+            try {
+                app(PageBatch::class)->dispatch($book, 'extract');
+            } catch (\Throwable $e) {
+                Log::warning("Text extraction could not start for book #{$book->id}: ".$e->getMessage());
+            }
         } catch (\Throwable $e) {
             Log::error("IntakeBookJob failed for book #{$book->id}: ".$e->getMessage());
             $book->update(['status' => 'failed']);
             $row->update(['status' => 'failed', 'error_message' => self::plainError($e), 'completed_at' => now()]);
         }
+    }
+
+    /** Source pages for a book that was imported before intake made them (task 11.1, existing books). */
+    public static function savePagesFromCheck(Book $book): void
+    {
+        $check = app(IntakePreflight::class)->run(AssetStorage::disk()->path($book->pdf_path));
+        if (! $check['ok']) {
+            throw new \RuntimeException("Book {$book->id} failed the intake check: ".implode(' ', array_column($check['rejections'], 'message')));
+        }
+        (new self($book->id))->savePages($book, $check);
     }
 
     /** Refused by the security check: keep the record and the reason, delete the file (Req 2.3). */
