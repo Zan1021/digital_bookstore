@@ -261,13 +261,25 @@ def order_units(units: list[dict], column: tuple[int, int] | None = None) -> lis
 
 # ----------------------------------------------------------------------------- page
 
-def structure_page(blocks: list[dict]) -> list[dict]:
-    """Blocks → reading-ordered blocks with kind / parent / structure (list parents included)."""
-    units = order_units(find_lists(join_paragraphs(blocks)))
+def structure_page(blocks: list[dict], tables: list[dict] | None = None) -> list[dict]:
+    """Blocks (and tables from scene_tables.py, task 11.3) → reading-ordered blocks with
+    kind / parent / structure; list and table parents come before their items and cells."""
+    units = order_units(find_lists(join_paragraphs(blocks)) + list(tables or []))
     out: list[dict] = []
     for u in units:
         col = u.pop("_column", None)
         column = {"column": col[0], "columns": col[1]} if col else None
+        if u.get("kind") == "table":
+            parent_index = len(out)
+            cells = u["cells"]
+            out.append({"bbox": u["bbox"], "text": "\n".join(c["text"] for c in cells),
+                        "lines": [l for c in cells for l in c["lines"]], "style": u["style"],
+                        "unmapped": sum(c["unmapped"] for c in cells), "kind": "table", "parent": None,
+                        "structure": dict(u["structure"], **(column or {}))})
+            for cell in cells:
+                out.append(dict({k: v for k, v in cell.items() if k != "cell_box"}, parent=parent_index,
+                                allowed_area=cell["cell_box"]))
+            continue
         if u.get("kind") == "list":
             parent_index = len(out)
             items = u["items"]

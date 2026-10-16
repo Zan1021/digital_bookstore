@@ -17,7 +17,7 @@ Work rules for the task list:
 
 ## Where we are (update at the end of each session)
 
-- **Phase 1 started (branch phase-1-scene-engine).** Checkpoint 0 signed off 2026-10-16. Resume at the first unticked Phase 1 task (9.x). 8.1 and 8.3 wait for the three outside books. Zan should check the AI prices in config/ai.php. (6.4 was reduced; its data move is task 32.5.)
+- **Phase 1 started (branch phase-1-scene-engine).** Checkpoint 0 signed off 2026-10-16. Resume at the first unticked Phase 1 task (11.4 next; 10.5's timing check waits for task 12). 8.1 and 8.3 wait for the three outside books. Zan should check the AI prices in config/ai.php. (6.4 was reduced; its data move is task 32.5.)
 - Pushing: the remote URL has no token; Git Credential Manager uses Zan's browser login. Zan should delete the old token on GitHub.
 - Zan's open items: set `SUPER_ADMIN_EMAIL` in `.env` + run `SuperAdminSeeder` (local DB has no users); `APP_URL=http://127.0.0.1:8080`; confirm sky/leaf/sun colours in `resources/css/tokens.css`; try a reader page turn by hand.
 - Explain decisions to Zan in plain words with simple numbered options, and offer to do the simple thing for them.

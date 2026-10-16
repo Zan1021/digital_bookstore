@@ -33,6 +33,7 @@ import sys
 import pymupdf
 
 from scene_structure import structure_page
+from scene_tables import find_tables
 
 SIZE_TOLERANCE = 0.10      # a size change beyond 10 % starts a new block
 GAP_FACTOR = 1.6           # a gap wider than 1.6 × the line height starts a new block
@@ -155,8 +156,10 @@ def extract_page(page, raw_blocks: bool = False) -> dict:
     if raw_blocks:
         blocks.sort(key=lambda b: (round(b["bbox"][1] / 4), b["bbox"][0]))
     else:
-        # Task 11.2: paragraphs, lists, columns and reading order (scene_structure.py).
-        blocks = structure_page(blocks)
+        # Task 11.3: tables first (so text inside cells is not read as lists or paragraphs),
+        # then task 11.2: paragraphs, lists, columns and reading order.
+        tables, rest = find_tables(page, blocks)
+        blocks = structure_page(rest, tables)
     return {"number": page.number + 1, "width": round(page.rect.width, 2), "height": round(page.rect.height, 2),
             "rotation": page.rotation, "blocks": blocks}
 

@@ -18,8 +18,8 @@ use Illuminate\Support\Facades\DB;
  */
 class BlockStore
 {
-    /** The kinds extraction decides (task 11.2); other kinds belong to later stages. */
-    public const OWN_KINDS = ['paragraph', 'list', 'list_item'];
+    /** The kinds extraction decides (tasks 11.2, 11.3); other kinds belong to later stages. */
+    public const OWN_KINDS = ['paragraph', 'list', 'list_item', 'table', 'cell'];
 
     /** @param list<array{bbox: array, text: string, lines: array, style: array, unmapped: int}> $extracted */
     public function replacePage(SourcePage $page, array $extracted): array
@@ -56,24 +56,29 @@ class BlockStore
                     'source_text' => $new['text'],
                 ];
                 $kind = $new['kind'] ?? 'paragraph';
+                // A table cell's allowed area is its cell (task 11.3); other blocks get theirs later (task 15).
+                $area = $new['allowed_area'] ?? null;
                 if (isset($assigned[$i])) {
                     $block = $existing[$assigned[$i]];
-                    // Extraction owns paragraph / list / list_item; a kind a later stage chose (a table
-                    // cell, a heading, a bubble) and its structure are kept.
+                    // Extraction owns paragraph / list / list_item / table / cell; a kind a later stage
+                    // chose (a heading, a bubble) and its structure are kept.
                     if (in_array($block->kind, self::OWN_KINDS, true)) {
                         $values += ['kind' => $kind, 'structure' => $new['structure'] ?? null];
+                        if ($area !== null || $block->kind === 'cell') {
+                            $values['allowed_area'] = $area;
+                        }
                     }
                     $block->update($values);
                 } else {
                     // Role is provisional until classification (task 14) decides.
                     $block = Block::create($values + ['book_id' => $page->book_id, 'page_id' => $page->id,
-                        'kind' => $kind, 'role' => 'body', 'structure' => $new['structure'] ?? null]);
+                        'kind' => $kind, 'role' => 'body', 'structure' => $new['structure'] ?? null, 'allowed_area' => $area]);
                     $stats['added']++;
                 }
                 $ids[$i] = $block->id;
             }
 
-            // List items point at their list (task 11.2); set once every block has its ID.
+            // List items point at their list, cells at their table; set once every block has its ID.
             foreach ($extracted as $i => $new) {
                 if (in_array(Block::whereKey($ids[$i])->value('kind'), self::OWN_KINDS, true)) {
                     Block::whereKey($ids[$i])->update(['parent_id' => isset($new['parent']) ? $ids[$new['parent']] : null]);

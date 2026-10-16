@@ -16,7 +16,7 @@ return [
 
     'stages' => [
         // Book stages: one result per page, whatever the language.
-        'extract' => ['scope' => 'book', 'version' => 2, 'queue' => 'intake', 'handler' => \App\Scene\Stages\ExtractStage::class],
+        'extract' => ['scope' => 'book', 'version' => 3, 'queue' => 'intake', 'handler' => \App\Scene\Stages\ExtractStage::class],
         'structure' => ['scope' => 'book', 'version' => 1, 'queue' => 'intake', 'handler' => null],
         'classify' => ['scope' => 'book', 'version' => 1, 'queue' => 'ai', 'handler' => null],
         'plates' => ['scope' => 'book', 'version' => 1, 'queue' => 'intake', 'handler' => null],

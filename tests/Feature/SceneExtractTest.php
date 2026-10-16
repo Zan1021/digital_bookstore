@@ -162,13 +162,57 @@ PY, $path, $paragraphFirstLine]);
     {
         $store = app(BlockStore::class);
         $store->replacePage($this->page, [self::extracted('WORDS', [74, 96, 146, 123]) + ['kind' => 'paragraph', 'parent' => null, 'structure' => null]]);
-        $cell = $this->page->blocks()->sole();
-        $cell->update(['kind' => 'cell', 'structure' => ['row' => 0, 'col' => 0, 'header' => true]]); // as task 11.3 will
+        $bubble = $this->page->blocks()->sole();
+        $bubble->update(['kind' => 'bubble', 'structure' => ['tail' => 'left']]); // as classification (task 14) will
 
         $store->replacePage($this->page, [self::extracted('WORDS', [74, 96, 146, 123]) + ['kind' => 'paragraph', 'parent' => null, 'structure' => ['column' => 0, 'columns' => 3]]]);
 
-        $kept = $cell->fresh();
-        $this->assertSame(['cell', ['row' => 0, 'col' => 0, 'header' => true]], [$kept->kind, $kept->structure]);
+        $kept = $bubble->fresh();
+        $this->assertSame(['bubble', ['tail' => 'left']], [$kept->kind, $kept->structure]);
+    }
+
+    public function test_a_ruled_table_in_a_real_pdf_becomes_a_table_with_cells(): void
+    {
+        // Task 11.3: a word table whose "WORDS" heading spans two columns.
+        $path = Storage::disk(config('assets.disk'))->path('books/pdfs/kite.pdf');
+        @mkdir(dirname($path), 0775, true);
+        $make = new Process(['python', '-c', <<<'PY'
+import sys, pymupdf
+doc = pymupdf.open(); page = doc.new_page(width=420, height=595)
+xs, ys = [40, 140, 240, 340], [60, 90, 300]
+for y in ys:
+    page.draw_line((xs[0], y), (xs[-1], y))
+for k, x in enumerate(xs):
+    page.draw_line((x, ys[1] if k == 1 else ys[0]), (x, ys[-1]))
+font = pymupdf.Font("helv"); tw = pymupdf.TextWriter(page.rect)
+for x, y, lines in [(110, 80, ["WORDS"]), (250, 80, ["SOUNDS"]), (50, 110, ["cat", "dog", "sun", "hat"]),
+                    (150, 110, ["run", "fun", "bun", "nut"]), (250, 110, ["- sh", "- ch"])]:
+    for i, line in enumerate(lines):
+        tw.append((x, y + i * 15.6), line, font=font, fontsize=12)
+tw.write_text(page)
+doc.save(sys.argv[1])
+PY, $path]);
+        $make->run();
+        if (! $make->isSuccessful()) {
+            $this->markTestSkipped('Python with PyMuPDF is needed: '.$make->getErrorOutput());
+        }
+
+        $this->extract();
+
+        $blocks = $this->page->blocks()->get();
+        $this->assertSame(['table', 'cell', 'cell', 'cell', 'cell', 'cell'], $blocks->pluck('kind')->all());
+        $table = $blocks[0];
+        $this->assertSame([2, 3, true], [$table->structure['rows'], $table->structure['cols'], $table->structure['ruled']]);
+        $this->assertSame(array_fill(0, 5, $table->id), $blocks->skip(1)->pluck('parent_id')->values()->all());
+        $words = $blocks[1];
+        $this->assertSame('WORDS', $words->source_text);
+        $this->assertSame(['row' => 0, 'col' => 0, 'rowspan' => 1, 'colspan' => 2, 'header' => true], $words->structure);
+        $this->assertSame([40, 60, 240, 90], array_map('intval', $words->allowed_area));
+        $this->assertSame("- sh\n- ch", $blocks[5]->source_text, 'dash rows in a cell stay in the cell');
+
+        $this->extract();
+        $this->assertSame($blocks->pluck('id')->all(), $this->page->blocks()->pluck('id')->all(), 'ids survive a re-run');
+        $this->assertSame($table->id, Block::find($blocks[5]->id)->parent_id);
     }
 
     public function test_a_numbered_list_in_a_real_pdf_becomes_a_list(): void
