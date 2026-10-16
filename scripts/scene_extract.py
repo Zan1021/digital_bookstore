@@ -13,7 +13,8 @@ Each block carries:
                   (left/center/right/justify), rotation (degrees, counter-clockwise),
                   line_height (baseline step ÷ size, multi-line blocks only)
   unmapped        characters the font left unmapped (U+FFFD) — shown as unknown, never guessed
-Blocks are listed top to bottom, then left to right; real reading order is task 11.2.
+Blocks then go through scene_structure.py (task 11.2): paragraphs, lists (kind/parent/structure)
+and reading order. --raw skips that step.
 Book-agnostic: no fonts, titles or positions are known to the code.
 
 CLI: python scene_extract.py --input book.pdf [--page N]   (N is 1-based; default: all pages)
@@ -30,6 +31,8 @@ import statistics
 import sys
 
 import pymupdf
+
+from scene_structure import structure_page
 
 SIZE_TOLERANCE = 0.10      # a size change beyond 10 % starts a new block
 GAP_FACTOR = 1.6           # a gap wider than 1.6 × the line height starts a new block
@@ -63,6 +66,19 @@ def _line_style(line: dict) -> dict:
 def _same_style(a: dict, b: dict) -> bool:
     return (a["font"] == b["font"] and a["color"] == b["color"] and a["rotation"] == b["rotation"]
             and abs(a["size"] - b["size"]) <= SIZE_TOLERANCE * max(a["size"], b["size"]))
+
+
+def _stacks_under(prev: dict, prev_style: dict, line: dict, style: dict) -> bool:
+    """Does `line` continue the block whose last line is `prev` (directly below it)?"""
+    if not _same_style(prev_style, style):
+        return False
+    height = max(prev["bbox"][3] - prev["bbox"][1], 1.0)
+    gap = line["bbox"][1] - prev["bbox"][3]
+    if gap > GAP_FACTOR * height or line["bbox"][1] < prev["bbox"][1] + 0.5 * height:
+        return False                       # too far below, or on the same row (side by side)
+    overlap = min(prev["bbox"][2], line["bbox"][2]) - max(prev["bbox"][0], line["bbox"][0])
+    narrower = min(prev["bbox"][2] - prev["bbox"][0], line["bbox"][2] - line["bbox"][0])
+    return overlap > 0.3 * max(narrower, 1.0)
 
 
 def _line_text(line: dict) -> str:
@@ -115,41 +131,44 @@ def _make_block(lines: list[dict], styles: list[dict]) -> dict:
     }
 
 
-def extract_page(page) -> dict:
+def extract_page(page, raw_blocks: bool = False) -> dict:
     blocks = []
     for raw in page.get_text("dict")["blocks"]:
         if raw.get("type") != 0:
             continue
-        # PyMuPDF lists a block's lines in content order; work top to bottom.
+        # PyMuPDF lists a block's lines in content order; work top to bottom. A line joins the
+        # group whose last line sits directly above it (same style, overlapping horizontally,
+        # a normal gap); otherwise it starts a group. So text side by side in one PDF text
+        # object (a table's header row) becomes separate blocks.
         lines = sorted((l for l in raw["lines"] if _line_text(l).strip()), key=lambda l: (l["bbox"][1], l["bbox"][0]))
-        group, styles = [], []
+        groups: list[tuple[list, list]] = []
         for line in lines:
             style = _line_style(line)
-            if group:
-                prev = group[-1]
-                height = max(prev["bbox"][3] - prev["bbox"][1], 1.0)
-                gap = line["bbox"][1] - prev["bbox"][3]
-                if not _same_style(styles[-1], style) or gap > GAP_FACTOR * height:
-                    blocks.append(_make_block(group, styles))
-                    group, styles = [], []
-            group.append(line)
-            styles.append(style)
-        if group:
-            blocks.append(_make_block(group, styles))
+            home = next((g for g in reversed(groups) if _stacks_under(g[0][-1], g[1][-1], line, style)), None)
+            if home is None:
+                groups.append(([line], [style]))
+            else:
+                home[0].append(line)
+                home[1].append(style)
+        blocks.extend(_make_block(g_lines, g_styles) for g_lines, g_styles in groups)
 
-    blocks.sort(key=lambda b: (round(b["bbox"][1] / 4), b["bbox"][0]))
+    if raw_blocks:
+        blocks.sort(key=lambda b: (round(b["bbox"][1] / 4), b["bbox"][0]))
+    else:
+        # Task 11.2: paragraphs, lists, columns and reading order (scene_structure.py).
+        blocks = structure_page(blocks)
     return {"number": page.number + 1, "width": round(page.rect.width, 2), "height": round(page.rect.height, 2),
             "rotation": page.rotation, "blocks": blocks}
 
 
-def extract(path: str, page_number: int | None = None) -> dict:
+def extract(path: str, page_number: int | None = None, raw_blocks: bool = False) -> dict:
     doc = pymupdf.open(path)
     numbers = [page_number] if page_number else range(1, len(doc) + 1)
     pages = []
     for n in numbers:
         if not 1 <= n <= len(doc):
             raise ValueError(f"page {n} is outside 1–{len(doc)}")
-        pages.append(extract_page(doc[n - 1]))
+        pages.append(extract_page(doc[n - 1], raw_blocks))
     doc.close()
     return {"pages": pages}
 
@@ -161,9 +180,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--page", type=int)
+    ap.add_argument("--raw", action="store_true", help="blocks only, without paragraphs/lists/reading order")
     a = ap.parse_args(argv)
     try:
-        print(json.dumps(extract(a.input, a.page), ensure_ascii=False))
+        print(json.dumps(extract(a.input, a.page, a.raw), ensure_ascii=False))
     except Exception as e:  # a parseable failure, never a silent empty page
         print(json.dumps({"error": str(e)}))
         return 1

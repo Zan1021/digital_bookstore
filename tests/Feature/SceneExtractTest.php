@@ -135,6 +135,69 @@ PY, $path, $paragraphFirstLine]);
         $this->assertSame([0, 1, 2], $this->page->blocks()->pluck('reading_order')->all());
     }
 
+    public function test_lists_are_stored_with_their_items_and_keep_their_ids(): void
+    {
+        $item = fn (string $text, float $y) => self::extracted($text, [80, $y, 300, $y + 20]) + ['kind' => 'list_item', 'parent' => 1, 'structure' => ['marker' => strtok($text, ' ').' -']];
+        $page = [
+            self::extracted('Titles in the series:', [60, 40, 400, 60]) + ['kind' => 'paragraph', 'parent' => null, 'structure' => null],
+            self::extracted("1 - First\n2 - Second", [80, 80, 300, 124]) + ['kind' => 'list', 'parent' => null, 'structure' => null],
+            $item('1 - First', 80), $item('2 - Second', 104),
+        ];
+        $store = app(BlockStore::class);
+        $store->replacePage($this->page, $page);
+
+        $blocks = $this->page->blocks()->get();
+        $this->assertSame(['paragraph', 'list', 'list_item', 'list_item'], $blocks->pluck('kind')->all());
+        $list = $blocks[1];
+        $this->assertSame([$list->id, $list->id], [$blocks[2]->parent_id, $blocks[3]->parent_id]);
+        $this->assertSame(['marker' => '2 -'], $blocks[3]->structure);
+        $this->assertSame([$blocks[2]->id, $blocks[3]->id], $list->children()->pluck('id')->all());
+
+        $store->replacePage($this->page, $page);
+        $this->assertSame($blocks->pluck('id')->all(), $this->page->blocks()->pluck('id')->all(), 'ids survive a re-run');
+        $this->assertSame($list->id, Block::find($blocks[3]->id)->parent_id);
+    }
+
+    public function test_a_kind_chosen_by_a_later_stage_is_kept(): void
+    {
+        $store = app(BlockStore::class);
+        $store->replacePage($this->page, [self::extracted('WORDS', [74, 96, 146, 123]) + ['kind' => 'paragraph', 'parent' => null, 'structure' => null]]);
+        $cell = $this->page->blocks()->sole();
+        $cell->update(['kind' => 'cell', 'structure' => ['row' => 0, 'col' => 0, 'header' => true]]); // as task 11.3 will
+
+        $store->replacePage($this->page, [self::extracted('WORDS', [74, 96, 146, 123]) + ['kind' => 'paragraph', 'parent' => null, 'structure' => ['column' => 0, 'columns' => 3]]]);
+
+        $kept = $cell->fresh();
+        $this->assertSame(['cell', ['row' => 0, 'col' => 0, 'header' => true]], [$kept->kind, $kept->structure]);
+    }
+
+    public function test_a_numbered_list_in_a_real_pdf_becomes_a_list(): void
+    {
+        $path = Storage::disk(config('assets.disk'))->path('books/pdfs/kite.pdf');
+        @mkdir(dirname($path), 0775, true);
+        $make = new Process(['python', '-c', <<<'PY'
+import sys, pymupdf
+doc = pymupdf.open(); page = doc.new_page(width=420, height=595)
+page.insert_text((60, 60), "Titles in the series:", fontsize=16, fontname="helv")
+font = pymupdf.Font("helv"); tw = pymupdf.TextWriter(page.rect)
+for i, t in enumerate(["1 - The Lost Kite", "2 - A Windy Day", "3 - Home Again"]):
+    tw.append((80, 100 + i * 20), t, font=font, fontsize=14)
+tw.write_text(page)
+doc.save(sys.argv[1])
+PY, $path]);
+        $make->run();
+        if (! $make->isSuccessful()) {
+            $this->markTestSkipped('Python with PyMuPDF is needed: '.$make->getErrorOutput());
+        }
+
+        $this->extract();
+
+        $blocks = $this->page->blocks()->get();
+        $this->assertSame(['paragraph', 'list', 'list_item', 'list_item', 'list_item'], $blocks->pluck('kind')->all());
+        $this->assertSame(['1 - The Lost Kite', '2 - A Windy Day', '3 - Home Again'], $blocks->where('kind', 'list_item')->pluck('source_text')->values()->all());
+        $this->assertSame(3, $blocks[1]->children()->count());
+    }
+
     public function test_an_unreadable_page_fails_instead_of_saving_nothing(): void
     {
         Storage::disk(config('assets.disk'))->put('books/pdfs/kite.pdf', 'not a pdf at all');
