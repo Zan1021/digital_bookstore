@@ -92,6 +92,20 @@ class ClassificationPipelineTest extends TestCase
         $this->assertStringNotContainsString('@', $desc->short_text);
     }
 
+    public function test_suggestions_stay_drafts_until_accepted(): void
+    {
+        // Task 10.3 (Req 16.4): intake triggers this job; its output must not change the book.
+        $book = $this->makeBook();
+        $book->update(['description' => 'Written by the publisher.', 'category' => 'Stories', 'age_group' => '3-5']);
+        $before = $book->only(['title', 'description', 'category', 'age_group']);
+
+        AnalyzeBookClassificationJob::dispatchSync($book->id);
+
+        $this->assertSame($before, $book->refresh()->only(['title', 'description', 'category', 'age_group']));
+        $this->assertSame('suggested', $book->classification_status);
+        $this->assertSame(['suggested'], BookDescription::where('book_id', $book->id)->pluck('status')->unique()->values()->all());
+    }
+
     public function test_tag_resolution_matches_canonical_and_queues_unknown_as_pending(): void
     {
         $book = $this->makeBook();

@@ -306,6 +306,49 @@ class IntakeTest extends TestCase
             ->assertSee('usage restrictions');
     }
 
+    public function test_intake_sets_a_clean_title_before_the_metadata_suggestions_run(): void
+    {
+        $this->fakePdfService();
+        $this->fakePreflight(['pages' => [self::page(1)], 'meta' => ['title' => ''],
+            'cover_lines' => [['text' => "Kolulu\u{FFFD}s Home", 'size' => 49.0, 'y' => 400], ['text' => 'MTHOMBOTHI STUDIOS', 'size' => 16.8, 'y' => 700]]]);
+        $book = app(PdfService::class)->storeIntake(UploadedFile::fake()->createWithContent("Kolulu Engl Series 3 - 1 - Kolulu's Home.pdf", '%PDF-1.7 a'));
+        IntakeBookJob::row($book->id)->update(['details' => ['file' => "Kolulu Engl Series 3 - 1 - Kolulu's Home.pdf"]]);
+        $this->assertSame("Kolulu Engl Series 3 - 1 - Kolulu's Home", $book->title, 'file-name title at upload');
+
+        dispatch_sync(new IntakeBookJob($book->id));
+
+        $book->refresh();
+        $this->assertSame("Kolulu's Home", $book->title);
+        $this->assertSame(['chosen' => "Kolulu's Home", 'source' => 'cover+file_name', 'file_name' => "Kolulu Engl Series 3 - 1 - Kolulu's Home.pdf"],
+            $book->metadata['intake']['title']);
+    }
+
+    public function test_a_title_someone_typed_is_never_replaced(): void
+    {
+        $this->fakePdfService();
+        $this->fakePreflight(['pages' => [self::page(1)], 'cover_lines' => [['text' => 'Play with me', 'size' => 54.0, 'y' => 400]]]);
+        $book = app(PdfService::class)->storeIntake(UploadedFile::fake()->createWithContent('Kolulu S2 BK2 Engl - Play with me.pdf', '%PDF-1.7 b'));
+        IntakeBookJob::row($book->id)->update(['details' => ['file' => 'Kolulu S2 BK2 Engl - Play with me.pdf']]);
+        $book->update(['title' => 'Kolulu: Play With Me!']);
+
+        dispatch_sync(new IntakeBookJob($book->id));
+
+        $this->assertSame('Kolulu: Play With Me!', $book->refresh()->title);
+    }
+
+    public function test_clean_titles_for_existing_books_are_only_proposed_until_applied(): void
+    {
+        $this->fakePreflight(['cover_lines' => [['text' => 'Play with me', 'size' => 54.0, 'y' => 400]]]);
+        Storage::disk(config('assets.disk'))->put('books/pdfs/p.pdf', '%PDF-1.7 p');
+        $book = Book::create(['title' => 'Kolulu S2 BK2 Engl - Play with me', 'pdf_path' => 'books/pdfs/p.pdf', 'page_count' => 16]);
+
+        $this->artisan('books:clean-titles')->expectsOutputToContain('Run again with --apply')->assertSuccessful();
+        $this->assertSame('Kolulu S2 BK2 Engl - Play with me', $book->refresh()->title);
+
+        $this->artisan('books:clean-titles', ['--apply' => true])->expectsOutputToContain('Titles changed: 1.')->assertSuccessful();
+        $this->assertSame('Play with me', $book->refresh()->title);
+    }
+
     public function test_the_checksum_backfill_fills_only_what_is_missing(): void
     {
         $disk = Storage::disk(config('assets.disk'));

@@ -303,6 +303,12 @@ class PdfService
         return $title;
     }
 
+    /** The automatic title a book gets from its uploaded file name, before intake chooses a clean one. */
+    public static function fileNameTitle(string $clientName): string
+    {
+        return trim(str_replace(['_', '  '], [' ', ' '], pathinfo($clientName, PATHINFO_FILENAME)));
+    }
+
     /**
      * Generate V8 page manifest using the Python manifest builder.
      * Stores the manifest as JSON alongside the book's PDF.

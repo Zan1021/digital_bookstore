@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Assets\AssetStorage;
 use App\Intake\IntakePreflight;
+use App\Intake\TitleChooser;
 use App\Models\Book;
 use App\Models\ProcessingJob;
 use App\Models\SourcePage;
@@ -61,6 +62,8 @@ class IntakeBookJob implements ShouldQueue
                 return;
             }
             $notes = $this->savePages($book, $check);
+            // Task 10.3: a clean draft title before anything (e.g. the metadata suggestions) uses it.
+            $this->chooseTitle($book, $check, $row->details['file'] ?? null);
             $row->update(['progress' => 30, 'details' => array_merge($row->details ?? [], ['notes' => $notes])]);
 
             $pdfs->processBook($book);
@@ -140,6 +143,24 @@ class IntakeBookJob implements ShouldQueue
         }
 
         return $notes;
+    }
+
+    /**
+     * Req 2.7: replace the file-name title with one from the PDF title, cover and file name —
+     * only while the title is still the automatic one, so a title someone typed is never lost.
+     */
+    private function chooseTitle(Book $book, array $check, ?string $fileName): void
+    {
+        if ($fileName === null || $book->title !== PdfService::fileNameTitle($fileName)) {
+            return;
+        }
+        $choice = app(TitleChooser::class)->choose($check['meta']['title'] ?? null, $check['cover_lines'] ?? [], $fileName);
+        $book->update([
+            'title' => $choice['title'],
+            'metadata' => array_merge($book->metadata ?? [], ['intake' => array_merge($book->metadata['intake'] ?? [], [
+                'title' => ['chosen' => $choice['title'], 'source' => $choice['source'], 'file_name' => $fileName],
+            ])]),
+        ]);
     }
 
     /** A short reason a publisher can act on, not a stack trace. */

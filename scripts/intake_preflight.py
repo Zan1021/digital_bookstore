@@ -53,8 +53,22 @@ def _page_kind(page) -> tuple[str, int]:
     return ("scanned" if covered >= SCANNED_IMAGE_COVERAGE else "no_text"), chars
 
 
+def _cover_lines(page) -> list[dict]:
+    """Text lines of the cover with their largest font size, top to bottom. Characters the
+    font does not map come through as U+FFFD; the title chooser treats them as unknown."""
+    lines = []
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            text = " ".join("".join(s["text"] for s in line["spans"]).split())
+            if any(ch.isalpha() for ch in text):
+                lines.append({"text": text, "size": round(max(s["size"] for s in line["spans"]), 1),
+                              "y": round(line["bbox"][1], 1)})
+    return sorted(lines, key=lambda ln: ln["y"])[:40]
+
+
 def preflight(path: str, max_mb: float = 100, max_pages: int = 500) -> dict:
-    out = {"ok": False, "rejections": [], "warnings": [], "page_count": 0, "pages": [], "crop": None}
+    out = {"ok": False, "rejections": [], "warnings": [], "page_count": 0, "pages": [], "crop": None,
+           "meta": {}, "cover_lines": []}
     reject = lambda code, msg: out["rejections"].append(_reason(code, msg))  # noqa: E731
 
     size = os.path.getsize(path)
@@ -104,6 +118,11 @@ def preflight(path: str, max_mb: float = 100, max_pages: int = 500) -> dict:
             reject("script_links", "The PDF contains links that run scripts or open local files, which is not allowed.")
     if out["rejections"]:
         return out
+
+    # Title clues (task 10.3, Req 2.7): the PDF's own metadata and the cover's text lines.
+    md = doc.metadata or {}
+    out["meta"] = {k: (md.get(k) or "").strip() for k in ("title", "author", "subject")}
+    out["cover_lines"] = _cover_lines(doc[0])
 
     crop = detect_crop_marks_document(path)
     consensus = crop.get("consensus_trim_box") if crop.get("has_crop_marks") else None
