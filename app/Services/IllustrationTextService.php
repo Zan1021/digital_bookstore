@@ -260,11 +260,15 @@ class IllustrationTextService
             }
 
             $applied = $this->repair(
-                $book, $translation, $pdfPath, $pageIndex, $ppi, $regions, $generative
+                $book, $translation, $pdfPath, $pageIndex, $ppi, $regions,
+                $this->generativeAllowed($generative, $usedNative)
             );
             if ($applied['modified'] ?? false) {
                 $result['modified_pages'][] = $pageNumber;
                 $result['coverage'][$pageNumber] = 'resolved';
+            } elseif ($usedNative) {
+                // Inspected: its text is a real text layer, not painted into the picture.
+                $result['coverage'][$pageNumber] = 'native-text';
             }
             if (!empty($applied['overflow'])) {
                 $result['review_pages'][] = $pageNumber;
@@ -1130,6 +1134,17 @@ SYS;
      * Safety: background-only prompt, explicit alpha mask limits regeneration to the text
      * regions, and the whole route is review-gated by the caller. Never auto-approved.
      */
+    /**
+     * The AI image model may redraw artwork only behind text PAINTED INTO the picture (found
+     * by the vision path). Text from a real text layer is not in the pixels: removing it
+     * leaves the artwork intact, so there is nothing to redraw. (Corpus baseline 2026-10-16:
+     * without this rule every story page sent its normal text to the image model.)
+     */
+    protected function generativeAllowed(bool $generativeEnabled, bool $usedNative): bool
+    {
+        return $generativeEnabled && ! $usedNative;
+    }
+
     private function generativeBackground(string $pdfPath, int $pageIndex, int $ppi, array $regions): ?string
     {
         try {
