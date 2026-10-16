@@ -275,8 +275,8 @@
                                         @if($book->narrations->where('status', 'completed')->count() > 0)
                                             <span class="bg-purple-500 text-white text-[9px] px-2 py-0.5 rounded-full font-medium">AUDIO</span>
                                         @endif
-                                        @if($book->translations->count() > 0)
-                                            <span class="bg-blue-500 text-white text-[9px] px-2 py-0.5 rounded-full font-medium">{{ $book->translations->count() + 1 }} LANGS</span>
+                                        @if($book->languageCount() > 1)
+                                            <span class="bg-blue-500 text-white text-[9px] px-2 py-0.5 rounded-full font-medium">{{ $book->languageCount() }} LANGS</span>
                                         @endif
                                     </div>
                                 </div>

@@ -61,8 +61,8 @@
                     @if($book->narrations->where('status', 'completed')->count() > 0)
                         <span class="bg-brand-100 text-brand-600 text-xs px-3 py-1 rounded-full">🔊 Audio Narration</span>
                     @endif
-                    @if($book->translations->count() > 0)
-                        <span class="bg-blue-100 text-blue-700 text-xs px-3 py-1 rounded-full">🌍 {{ $book->translations->count() + 1 }} Languages</span>
+                    @if($book->languageCount() > 1)
+                        <span class="bg-blue-100 text-blue-700 text-xs px-3 py-1 rounded-full">🌍 {{ $book->languageCount() }} Languages</span>
                     @endif
                     <span class="bg-yellow-100 text-yellow-700 text-xs px-3 py-1 rounded-full">✨ Interactive</span>
                 </div>
@@ -71,8 +71,10 @@
                 <div class="mt-6">
                     <h3 class="text-sm font-medium text-gray-700 mb-2">Available in:</h3>
                     <div class="flex gap-2">
-                        <span class="border border-brand-300 bg-brand-50 text-brand-600 text-xs px-3 py-1.5 rounded-lg font-medium">English</span>
-                        @foreach($book->translations as $t)
+                        {{-- The book's own language first, then real translations (task 6.4: a source-language
+                             edition row must not list the language twice). --}}
+                        <span class="border border-brand-300 bg-brand-50 text-brand-600 text-xs px-3 py-1.5 rounded-lg font-medium">{{ \App\Models\Language::nameFor($book->sourceLanguageCode()) }}</span>
+                        @foreach($book->translatedEditions() as $t)
                             <span class="border border-gray-200 text-gray-600 text-xs px-3 py-1.5 rounded-lg">{{ $t->language_name }}</span>
                         @endforeach
                     </div>

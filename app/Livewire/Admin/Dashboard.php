@@ -123,7 +123,7 @@ class Dashboard extends Component
         } elseif ($this->filter === 'processing') {
             $query->where('status', 'processing');
         } elseif ($this->filter === 'translated') {
-            $query->whereHas('translations');
+            $query->withTranslatedEditions(); // a source-language row is not a translation (task 6.4)
         } elseif ($this->filter === 'narrated') {
             $query->whereHas('narrations', fn($q) => $q->where('status', 'completed'));
         }
@@ -134,7 +134,7 @@ class Dashboard extends Component
         $totalBooks = Book::count();
         $readyBooks = Book::where('status', 'ready')->count();
         $processingBooks = Book::where('status', 'processing')->count();
-        $translatedBooks = Book::whereHas('translations')->count();
+        $translatedBooks = Book::withTranslatedEditions()->count();
         $narratedBooks = Book::whereHas('narrations', fn($q) => $q->where('status', 'completed'))->count();
 
         // Estimate total cost (translations + narrations)

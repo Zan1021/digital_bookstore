@@ -119,11 +119,11 @@
             <div class="space-y-6">
                 <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
                     <h3 class="font-semibold text-gray-800 mb-4">Translations</h3>
-                    @if($book->translations->isEmpty())
+                    @if($book->translatedEditions()->isEmpty())
                         <p class="text-gray-400 text-sm">No translations yet. Go to the Translate tab to get started.</p>
                     @else
                         <div class="space-y-2">
-                            @foreach($book->translations as $translation)
+                            @foreach($book->translatedEditions() as $translation)
                                 <div class="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
                                     <span class="text-sm font-medium">{{ $translation->language_name }}</span>
                                     <span class="text-xs px-2 py-1 rounded-full
@@ -236,10 +236,10 @@
             </div>
 
             {{-- Existing Translations --}}
-            @if($book->translations->isNotEmpty())
+            @if($book->translatedEditions()->isNotEmpty())
                 <div class="mt-8 pt-6 border-t">
                     <h4 class="font-medium text-gray-700 mb-4">Editions</h4>
-                    @foreach($book->translations as $translation)
+                    @foreach($book->translatedEditions() as $translation)
                         <div class="mb-6 border border-gray-200 rounded-xl p-4">
                             <div class="flex items-center justify-between mb-3">
                                 <div class="flex items-center gap-2">
@@ -395,7 +395,7 @@
                         <select wire:model="selectedLanguage" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
                             <option value="">Select language...</option>
                             <option value="en">English (Original)</option>
-                            @foreach($book->translations as $t)
+                            @foreach($book->translatedEditions() as $t)
                                 @if($t->isApprovedForNarration())
                                     <option value="{{ $t->language_code }}">{{ $t->language_name }}</option>
                                 @else

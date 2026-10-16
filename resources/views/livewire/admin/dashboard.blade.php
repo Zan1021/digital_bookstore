@@ -134,8 +134,8 @@
 
                         {{-- Language/narration badges --}}
                         <div class="absolute bottom-2 left-2 flex gap-1">
-                            @if($book->translations->isNotEmpty())
-                                <span class="bg-blue-500 text-white text-[9px] px-1.5 py-0.5 rounded font-medium">{{ $book->translations->count() }} lang</span>
+                            @if($book->translatedEditions()->isNotEmpty())
+                                <span class="bg-blue-500 text-white text-[9px] px-1.5 py-0.5 rounded font-medium">{{ $book->languageCount() }} lang</span>
                             @endif
                             @if($book->narrations->where('status', 'completed')->isNotEmpty())
                                 <span class="bg-purple-500 text-white text-[9px] px-1.5 py-0.5 rounded font-medium">🎙️</span>
@@ -153,8 +153,7 @@
                             <select class="flex-1 text-xs border border-gray-200 rounded px-2 py-1 bg-gray-50"
                                     onchange="if(this.value) window.open(this.value, '_blank')">
                                 <option value="{{ route('reader', $book) }}">English</option>
-                                @foreach($book->translations as $t)
-                                    @continue($t->language_code === 'en')
+                                @foreach($book->translatedEditions() as $t)
                                     <option value="{{ route('reader', ['book' => $book->id, 'lang' => $t->language_code]) }}">{{ $t->language_name }}</option>
                                 @endforeach
                             </select>

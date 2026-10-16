@@ -64,14 +64,15 @@ Work top to bottom. Each phase ends with a **checkpoint** that must pass before 
     - _Note:_ `jobs_runs` (book, stage, status, attempt, started/finished at ms precision, duration_ms from a monotonic clock, error, meta) + `App\Support\StageTimer::run()`; rows survive book deletion (book_id nulled). Timed at the service level so jobs and admin buttons are measured alike: intake.upload, intake.cover, intake.classify, translate.text, translate.render, translate.edition, ai.page_repair, narration.generate. Cost per run joins via meta once the AI ledger exists (task 7). `processing_jobs` stays the live-progress row. First real timing: intake.cover for book 10002 ≈ 0.9 s.
   - _Requirements: 3.1, 3.3; design §20_
 
-- [ ] 6. Core data model corrections
+- [x] 6. Core data model corrections
   - [x] 6.1 Add `publishers` and `publisher_id` on publisher-owned tables; seed Mthombothi Studios.
     - _Note:_ `publishers` (name, slug, settings) created with Mthombothi Studios in the migration, plus an idempotent `PublisherSeeder`. Of the publisher-owned tables in design §4 only `books` exists yet: it gets `publisher_id` (backfilled, restrict on delete; new books default to `config('publisher.default_slug')`). Series (6.2), fonts, font profiles, text templates and products get `publisher_id` when created; book children reach the publisher through the book; classification/discovery tables stay store-wide. Checked on SQLite and PostgreSQL (migrations up/down, full suite).
   - [x] 6.2 Add `series` and `contributors`; migrate the existing `books.series` / `series_volume` values into them.
     - _Note:_ `series` (design §4 columns, publisher-owned) with `books.series_id` / `series_position`; the migration moves the old text values (trimmed, case-insensitive per publisher) and drops `books.series` / `series_volume`; its rollback restores them. Discovery filter, facet, search and `nextInSeries` use the record. `contributors` + `book_contributor` (role author/illustrator/narrator) backfilled from `author` / `illustrator`, which stay the edited fields for now — `Book` keeps the links in step one way; switch editing to contributors when the book workspace is built (task 41.1, Source tab). Checked on SQLite and PostgreSQL; pages unchanged.
   - [x] 6.3 Add `languages` (code, name, direction, script, enabled).
     - _Note:_ `languages` (code PK, name, direction, script ISO 15924, hyphenation, enabled, sort_order) seeded with English + the 15 targets that were hard-coded, same order (Arabic rtl/Arab, Chinese Hans). `TranslationService::SUPPORTED_LANGUAGES` removed; the translate tab, upload wizard, narration, TranscreateBook and the translation guard (enabled and not the book's own language) read the table. Checked on SQLite and PostgreSQL; Translate tab dropdown looked at (same 15, same order). `scripts/translation_request.py` keeps its own Python name map for now (Scene Engine work).
-  - [ ] 6.4 Stop storing the source language as a translation: migrate away the "en · draft" row for English books and update screens that read it.
+  - [x] 6.4 Stop storing the source language as a translation: migrate away the "en · draft" row for English books and update screens that read it.
+    - _Note (scope reduced, agreed with Zan 2026-10-16):_ the source-language row still carries the English version's store data (published flag, price, reading level, education phase, features, edition rights) that the catalogue and publish flow use, and its real home is the per-language products of task 32. Done here: screens stop treating it as a translation — `Book::translatedEditions()`, `languageCount()`, `scopeWithTranslatedEditions()`; fixed the store book page listing "English, Afrikaans, English" / "3 Languages"; store/browse language counts, dashboard "Translated" stat, filter and badge, book-manager Translations/Editions lists and narration menu. **Removing the row itself moved to task 32.5.**
   - _Requirements: 16.1–16.3, 25.2, 6.8_
 
 - [ ] 7. AI provider layer and cost ledger
@@ -269,6 +270,7 @@ Work top to bottom. Each phase ends with a **checkpoint** that must pass before 
   - [ ] 32.2 Products tab: formats × languages matrix showing enabled, blocked (with reason) and missing assets.
   - [ ] 32.3 Publish gate: no product without approved edition, required assets and rights for that language, format and territory (reuse the existing edition-rights gate).
   - [ ] 32.4 Bundles data model.
+  - [ ] 32.5 (moved from 6.4) Stop storing the source language as a translation: move the source edition's store data (publication, price, reading level, education phase, features, edition rights) to the book/products, switch the catalogue gate, filters and publish flow to it, then migrate away the source-language translation rows and `Book::ensureSourceEdition()`; `Translation::isSourceLanguage()` stops hard-coding 'en'.
   - _Requirements: 17.1–17.4, 17.6, 25.1_
 
 - [ ] 33. Stock

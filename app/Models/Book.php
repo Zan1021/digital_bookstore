@@ -386,6 +386,43 @@ class Book extends Model
      * (Services\Discovery\BookQuery::base): the book is published AND has at least one
      * store-visible published edition. Keeps the "is it live?" answer in one place.
      */
+    /**
+     * The book's own language (English unless set). The source is the book itself, not a
+     * translation (design §4); task 6.4 hides any leftover source-language edition row
+     * from screens, and task 17 moves its store data off translations.
+     */
+    public function sourceLanguageCode(): string
+    {
+        return $this->original_language ?: 'en';
+    }
+
+    /**
+     * Real translations: editions in another language than the book's own. Excludes the
+     * source-language "edition" row that publishing still creates (removed in task 17).
+     *
+     * @return \Illuminate\Support\Collection<int, Translation>
+     */
+    public function translatedEditions(): \Illuminate\Support\Collection
+    {
+        $source = $this->sourceLanguageCode();
+
+        return $this->translations->reject(fn (Translation $t) => $t->language_code === $source)->values();
+    }
+
+    /** Languages the book is in: its own plus each real translation. */
+    public function languageCount(): int
+    {
+        return 1 + $this->translatedEditions()->count();
+    }
+
+    /** Books with at least one real translation (not just a source-language row). */
+    public function scopeWithTranslatedEditions(\Illuminate\Database\Eloquent\Builder $query): \Illuminate\Database\Eloquent\Builder
+    {
+        return $query->whereHas('translations', fn ($t) => $t->whereColumn(
+            'translations.language_code', '!=', 'books.original_language'
+        ));
+    }
+
     public function isPublished(): bool
     {
         return $this->status === 'published'
