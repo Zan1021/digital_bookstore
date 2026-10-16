@@ -17,8 +17,8 @@ Work rules for the task list:
 
 ## Where we are (update at the end of each session)
 
-- **Resume at Checkpoint 0 prep**: V8 baseline done for the 13 house books (R19.65, 0 publishable, 51 flagged pages, almost all on cover / copyright / word table / back cover). 8.1 and 8.3 wait only for the three outside books. 8.1 waits for three outside books from Zan; 8.2 done. Zan should check the AI prices in config/ai.php. Then Checkpoint 0. (6.4 was reduced; its data move is task 32.5.)
-- Task 1.4 (CI) is the first unticked task but is **blocked on Zan**: revoke the GitHub token in the git remote URL, then push. Skip it until Zan says it's done.
+- **Resume at Checkpoint 0 prep**: CI passes on GitHub (1.4 ticked). The V8 baseline must be re-run (it used the fallback path because manifests were on the public disk — fixed). 8.1 and 8.3 also wait for the three outside books. 8.1 waits for three outside books from Zan; 8.2 done. Zan should check the AI prices in config/ai.php. Then Checkpoint 0. (6.4 was reduced; its data move is task 32.5.)
+- Pushing: the remote URL has no token; Git Credential Manager uses Zan's browser login. Zan should delete the old token on GitHub.
 - Zan's open items: set `SUPER_ADMIN_EMAIL` in `.env` + run `SuperAdminSeeder` (local DB has no users); `APP_URL=http://127.0.0.1:8080`; confirm sky/leaf/sun colours in `resources/css/tokens.css`; try a reader page turn by hand.
 - Explain decisions to Zan in plain words with simple numbered options, and offer to do the simple thing for them.
 

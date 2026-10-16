@@ -272,7 +272,10 @@ class PdfService
     public function rebuildManifest(Book $book, ?string $pdfPath = null): bool
     {
         $scriptPath = base_path('scripts/page_manifest.py');
-        $manifestPath = storage_path("app/public/books/manifests/{$book->id}_manifest.json");
+        // The manifest holds the book's full text: private asset disk, where every reader
+        // (TranslationService, IllustrationTextService) looks for it (Req 20.1).
+        $manifestRel = "books/manifests/{$book->id}_manifest.json";
+        $manifestPath = AssetStorage::disk()->path($manifestRel);
 
         if ($pdfPath === null) {
             if (!$book->pdf_path || !AssetStorage::disk()->exists($book->pdf_path)) {
@@ -307,7 +310,7 @@ class PdfService
             $process->run();
 
             if ($process->isSuccessful()) {
-                $book->update(['manifest_path' => "books/manifests/{$book->id}_manifest.json"]);
+                $book->update(['manifest_path' => $manifestRel]);
                 Log::info("V8 scene-graph manifest generated for book {$book->id}: {$manifestPath}");
                 return true;
             }
