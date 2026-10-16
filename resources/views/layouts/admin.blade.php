@@ -22,7 +22,7 @@
                 </a>
                 <a href="{{ route('admin.dashboard') }}" class="px-3 py-1 rounded hover:bg-brand-700 transition text-sm">Dashboard</a>
                 @can('books.manage')
-                <a href="{{ route('admin.upload') }}" class="px-3 py-1 rounded hover:bg-brand-700 transition text-sm">Upload Books</a>
+                <a href="{{ route('admin.intake') }}" class="px-3 py-1 rounded hover:bg-brand-700 transition text-sm">Add Books</a>
                 @endcan
                 @can('ai_costs.view')
                 <a href="{{ route('admin.ai-costs') }}" class="px-3 py-1 rounded hover:bg-brand-700 transition text-sm">AI Costs</a>

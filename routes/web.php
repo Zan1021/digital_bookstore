@@ -1,7 +1,6 @@
 <?php
 
 use App\Livewire\Admin\BookManager;
-use App\Livewire\Admin\BookUpload;
 use App\Livewire\Admin\Dashboard;
 use App\Models\Book;
 use Illuminate\Support\Facades\Route;
@@ -44,8 +43,10 @@ require __DIR__.'/auth.php';
 // it needs (config/roles.php); denials are logged (Req 1.4, EnsureStaffPermission).
 Route::prefix('admin')->middleware(['auth', 'verified', 'staff:admin.access'])->group(function () {
     Route::get('/', Dashboard::class)->name('admin.dashboard');
-    Route::get('/upload', BookUpload::class)->middleware('staff:books.manage')->name('admin.upload');
-    Route::get('/onboard', \App\Livewire\Admin\BookOnboarding::class)->middleware('staff:books.manage')->name('admin.onboard');
+    Route::get('/intake', \App\Livewire\Admin\Intake::class)->middleware('staff:books.manage')->name('admin.intake');
+    // The two old upload flows (Req 2.1 replaced them); old links land on the intake screen.
+    Route::get('/upload', fn () => redirect()->route('admin.intake'))->middleware('staff:books.manage')->name('admin.upload');
+    Route::get('/onboard', fn () => redirect()->route('admin.intake'))->middleware('staff:books.manage')->name('admin.onboard');
     Route::get('/books/{book}', BookManager::class)->middleware('staff:books.view')->name('admin.book');
     Route::get('/books/{book}/details', \App\Livewire\Admin\BookReviewDetails::class)->middleware('staff:books.view')->name('admin.book-details');
     Route::get('/books/{book}/review/{language?}', \App\Livewire\Admin\BookReviewer::class)

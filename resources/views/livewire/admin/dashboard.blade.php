@@ -13,12 +13,14 @@
 
     <div class="flex items-center justify-between mb-8">
         <h1 class="text-3xl font-bold text-gray-800">My Books</h1>
-        <a href="{{ route('admin.upload') }}" class="bg-brand-500 text-white px-5 py-2.5 rounded-lg text-sm font-medium hover:bg-brand-600 transition flex items-center">
+        @can('books.manage')
+        <a href="{{ route('admin.intake') }}" class="bg-brand-500 text-white px-5 py-2.5 rounded-lg text-sm font-medium hover:bg-brand-600 transition flex items-center">
             <svg class="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
             </svg>
-            Upload Books
+            Add Books
         </a>
+        @endcan
     </div>
 
     {{-- Stats row --}}

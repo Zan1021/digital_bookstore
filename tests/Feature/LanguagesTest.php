@@ -3,7 +3,6 @@
 namespace Tests\Feature;
 
 use App\Livewire\Admin\BookManager;
-use App\Livewire\Admin\BookUpload;
 use App\Models\Book;
 use App\Models\Language;
 use App\Services\TranslationService;
@@ -85,9 +84,5 @@ class LanguagesTest extends TestCase
 
         $manager = Livewire::test(BookManager::class, ['book' => $this->book()])->set('activeTab', 'translate');
         $manager->assertSee('Tshivenda')->assertDontSee('German');
-
-        $upload = Livewire::test(BookUpload::class);
-        $this->assertArrayHasKey('ve', $upload->get('languageOptions'));
-        $this->assertArrayNotHasKey('de', $upload->get('languageOptions'));
     }
 }

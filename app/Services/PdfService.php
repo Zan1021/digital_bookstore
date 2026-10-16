@@ -35,6 +35,35 @@ class PdfService
 
     private function processUploadUntimed(UploadedFile $file): Book
     {
+        $book = $this->createBookFromUpload($file, 'processing');
+        try {
+            return $this->processBookUntimed($book);
+        } catch (\Throwable $e) {
+            // Synchronous callers (bulk import, corpus) keep no half-built book.
+            $book->delete();
+            throw $e;
+        }
+    }
+
+    /**
+     * Intake step 1 (task 10.1, Req 2.2): store the original privately and create the book
+     * record before any processing starts. Instant, so it can run in the upload request; the
+     * processing itself runs in IntakeBookJob.
+     */
+    public function storeIntake(UploadedFile $file): Book
+    {
+        return $this->createBookFromUpload($file, 'queued');
+    }
+
+    /** Intake step 2 (task 10.1): process a stored book. Timed as intake.process; safe to retry. */
+    public function processBook(Book $book): Book
+    {
+        return \App\Support\StageTimer::run('intake.process', fn () => $this->processBookUntimed($book),
+            $book->id, ['bytes' => @filesize(AssetStorage::disk()->path($book->pdf_path)) ?: null]);
+    }
+
+    private function createBookFromUpload(UploadedFile $file, string $status): Book
+    {
         // Store the PDF under a URL-SAFE filename. The original name often contains
         // spaces and apostrophes (e.g. "Kolulu's Home.pdf"); stored verbatim those break
         // the public /storage URL the reader hands to PDF.js (the apostrophe HTML-entity
@@ -43,26 +72,28 @@ class PdfService
         // ORIGINAL name below, so nothing user-facing is lost.
         $originalStem = pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME);
         $safeStem = \Illuminate\Support\Str::slug($originalStem) ?: 'book';
-        $filename = time() . '_' . $safeStem . '.pdf';
+        $filename = time() . '_' . \Illuminate\Support\Str::lower(\Illuminate\Support\Str::random(6)) . '_' . $safeStem . '.pdf';
         // Source PDFs are protected: private asset disk, never web-served (Req 20.1).
         $path = $file->storeAs('books/pdfs', $filename, config('assets.disk'));
 
+        return Book::create([
+            'title' => $this->cleanTitle($originalStem),
+            'pdf_path' => $path,
+            'page_count' => 0,
+            'status' => $status,
+            'original_language' => 'en',
+        ]);
+    }
+
+    private function processBookUntimed(Book $book): Book
+    {
         // Parse PDF for text and page count
-        $fullPath = AssetStorage::disk()->path($path);
+        $fullPath = AssetStorage::disk()->path($book->pdf_path);
         $pdf = $this->parser->parseFile($fullPath);
         $pages = $pdf->getPages();
 
-        // Create the book record
-        $title = pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME);
-        $title = $this->cleanTitle($title);
-
-        $book = Book::create([
-            'title' => $title,
-            'pdf_path' => $path,
-            'page_count' => count($pages),
-            'status' => 'processing',
-            'original_language' => 'en',
-        ]);
+        $book->update(['page_count' => count($pages), 'status' => 'processing']);
+        BookPage::where('book_id', $book->id)->delete(); // a retry starts clean
 
         // Extract text per page
         $hasText = false;

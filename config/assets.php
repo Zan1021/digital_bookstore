@@ -24,4 +24,8 @@ return [
     // long enough for a review page left open, still bound to the staff member.
     'staff_file_minutes' => (int) env('ASSETS_STAFF_FILE_MINUTES', 60),
 
+    // Largest PDF the intake screen accepts, in kilobytes (keep config/livewire.php's
+    // temporary upload rule and PHP's upload_max_filesize at least this large).
+    'max_upload_kb' => (int) env('ASSETS_MAX_UPLOAD_KB', 102400),
+
 ];
