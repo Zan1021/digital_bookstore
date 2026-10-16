@@ -217,6 +217,18 @@ class CorpusTest extends TestCase
         $this->assertSame(16.0, $runner->estimateZar('af', 32)); // R8 per 16 pages
     }
 
+    public function test_one_unusual_edition_does_not_swing_the_estimate(): void
+    {
+        foreach ([1.60, 1.60, 1.70, 39.47] as $i => $cost) { // the last: a run before a cost fix
+            $book = Book::create(['title' => "B{$i}", 'page_count' => 16, 'pdf_path' => "b{$i}.pdf"]);
+            $t = Translation::create(['book_id' => $book->id, 'language_code' => 'af', 'language_name' => 'Afrikaans', 'status' => 'draft']);
+            AiLedgerEntry::create(['provider' => 'openai', 'model' => 'gpt-4o', 'operation' => 'translate', 'translation_id' => $t->id,
+                'units' => [], 'cost_zar' => $cost, 'at' => now()]);
+        }
+
+        $this->assertSame(1.65, app(CorpusRunner::class)->estimateZar('af', 16)); // median, not the R11 average
+    }
+
     public function test_the_command_asks_before_spending_and_compares_with_the_last_run(): void
     {
         app(CorpusRegistry::class)->register();

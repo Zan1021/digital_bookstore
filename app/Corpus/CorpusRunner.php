@@ -43,12 +43,22 @@ class CorpusRunner
      */
     public function estimateZar(string $lang, int $pages): ?float
     {
-        $editions = Translation::where('language_code', $lang)->pluck('id');
-        $spent = AiLedgerEntry::whereIn('translation_id', $editions)->where('cache_hit', false)->sum('cost_zar');
-        $pagesDone = Translation::whereIn('id', AiLedgerEntry::whereIn('translation_id', $editions)->select('translation_id'))
-            ->with('book:id,page_count')->get()->sum(fn ($t) => (int) $t->book?->page_count);
+        // Typical (median) paid cost per page across editions, so one unusual edition (e.g.
+        // a run before a cost fix) does not swing the estimate.
+        $perEdition = AiLedgerEntry::query()->where('cache_hit', false)
+            ->whereIn('translation_id', Translation::where('language_code', $lang)->select('id'))
+            ->selectRaw('translation_id, SUM(cost_zar) AS spent')->groupBy('translation_id')->pluck('spent', 'translation_id');
+        $perPage = Translation::with('book:id,page_count')->whereIn('id', $perEdition->keys())->get()
+            ->filter(fn ($t) => (int) $t->book?->page_count > 0)
+            ->map(fn ($t) => (float) $perEdition[$t->id] / (int) $t->book->page_count)
+            ->sort()->values();
+        if ($perPage->isEmpty()) {
+            return null;
+        }
+        $mid = intdiv($perPage->count(), 2);
+        $median = $perPage->count() % 2 ? $perPage[$mid] : ($perPage[$mid - 1] + $perPage[$mid]) / 2;
 
-        return $pagesDone > 0 ? round($spent / $pagesDone * $pages, 2) : null;
+        return round($median * $pages, 2);
     }
 
     /**
@@ -137,7 +147,9 @@ class CorpusRunner
         ))));
         sort($flagged);
         $seconds = $timings['translate.edition'] ?? null;
-        $budget = (float) config('corpus.budget_translate_seconds') * max(1, (int) $book->page_count) / 16;
+        // Req 3.4's budget is for a 16-page book; longer books scale up, shorter books keep it
+        // (fixed per-book work such as manifest and gates does not shrink with page count).
+        $budget = (float) config('corpus.budget_translate_seconds') * max(16, (int) $book->page_count) / 16;
 
         $bookDir = $dir.DIRECTORY_SEPARATOR.$corpus->key;
         @mkdir($bookDir, 0775, true);
