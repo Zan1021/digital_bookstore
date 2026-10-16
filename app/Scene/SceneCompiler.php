@@ -90,7 +90,18 @@ class SceneCompiler
         return [
             'format' => self::FORMAT,
             'units' => 'pt',
-            'pages' => $pages->map(fn (SourcePage $p) => self::compact([
+            'pages' => $pages->map(fn (SourcePage $p) => $this->pagePayload($p))->values()->all(),
+        ];
+    }
+
+    /** One page of the scene: its size, plates and blocks in reading order (also a stage input, task 9.4). */
+    public function pagePayload(SourcePage $p): array
+    {
+        if (! $p->relationLoaded('blocks')) {
+            $p->load(['blocks' => fn ($q) => $q->orderBy('reading_order')->orderBy('id')]);
+        }
+
+        return self::compact([
                 'n' => (int) $p->number,
                 'w' => (float) $p->width_pt,
                 'h' => (float) $p->height_pt,
@@ -113,8 +124,7 @@ class SceneCompiler
                     'structure' => $b->structure,
                     'text' => $b->source_text,
                 ]))->values()->all(),
-            ]))->values()->all(),
-        ];
+            ]);
     }
 
     /** The edition's language layer without its version (design §5): keyed by block id. */
