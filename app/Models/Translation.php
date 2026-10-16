@@ -416,6 +416,17 @@ class Translation extends Model
         return $this->hasMany(TranslatedPage::class)->orderBy('page_number');
     }
 
+    /** Scene Engine: this edition's text per block (task 9.1). */
+    public function blockTranslations(): HasMany
+    {
+        return $this->hasMany(BlockTranslation::class);
+    }
+
+    public function pageChecks(): HasMany
+    {
+        return $this->hasMany(PageCheck::class);
+    }
+
     public function getFullText(): string
     {
         return $this->translatedPages()

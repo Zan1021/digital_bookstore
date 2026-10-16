@@ -235,6 +235,17 @@ class Book extends Model
         return $this->hasMany(BookPage::class)->orderBy('page_number');
     }
 
+    /** Scene Engine pages (task 9.1); `pages()` is the V8-era extracted-text table. */
+    public function sourcePages(): HasMany
+    {
+        return $this->hasMany(SourcePage::class)->orderBy('number');
+    }
+
+    public function blocks(): HasMany
+    {
+        return $this->hasMany(Block::class);
+    }
+
     public function publisher(): BelongsTo
     {
         return $this->belongsTo(Publisher::class);
