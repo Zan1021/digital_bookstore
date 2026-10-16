@@ -178,6 +178,24 @@ class CorpusTest extends TestCase
         $this->assertSame('spending_limit', $summary['stopped']);
     }
 
+    public function test_a_run_where_nothing_ran_is_not_used_for_comparison(): void
+    {
+        app(CorpusRegistry::class)->register();
+        $this->fakePipeline(new \RuntimeException('Request rate limit has been exceeded.'));
+        $runner = app(CorpusRunner::class);
+        $failed = $runner->run('af', 'v8', ['top']);
+        $this->assertSame(0, $failed['totals']['ok']);
+
+        $this->travel(2)->seconds();
+        $this->fakePipeline();
+        $good = $runner->run('af', 'v8', ['top']);
+        $this->assertNull($runner->previousRun($good), 'the failed run is no baseline');
+
+        $this->travel(2)->seconds();
+        $next = $runner->run('af', 'v8', ['top']);
+        $this->assertSame($good['run_id'], $runner->previousRun($next)['run_id']);
+    }
+
     public function test_only_available_engines_and_languages_run(): void
     {
         $this->expectExceptionMessage("Engine 'scene' is not available yet");

@@ -20,6 +20,31 @@ class AiLedgerEntry extends Model
         return ['units' => 'array', 'cost_zar' => 'float', 'cache_hit' => 'boolean', 'at' => 'datetime'];
     }
 
+    /** Plain names for the operation labels (config/ai.php operations); unknown labels show as stored. */
+    public const OPERATIONS = [
+        'translate' => 'Translation',
+        'metadata' => 'Book details suggestions',
+        'visual_qa' => 'Page checks',
+        'locate_art_text' => 'Finding text in artwork',
+        'art_repair' => 'Artwork repair',
+        'narrate' => 'Narration',
+    ];
+
+    public static function operationName(string $operation): string
+    {
+        return self::OPERATIONS[$operation] ?? ucfirst(str_replace('_', ' ', $operation));
+    }
+
+    public function book(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(Book::class);
+    }
+
+    public function translation(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(Translation::class);
+    }
+
     public function scopeThisMonth(Builder $query): Builder
     {
         return $query->where('at', '>=', now()->startOfMonth());

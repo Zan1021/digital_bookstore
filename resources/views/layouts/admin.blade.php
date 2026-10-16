@@ -24,6 +24,9 @@
                 @can('books.manage')
                 <a href="{{ route('admin.upload') }}" class="px-3 py-1 rounded hover:bg-brand-700 transition text-sm">Upload Books</a>
                 @endcan
+                @can('ai_costs.view')
+                <a href="{{ route('admin.ai-costs') }}" class="px-3 py-1 rounded hover:bg-brand-700 transition text-sm">AI Costs</a>
+                @endcan
                 @can('staff.manage')
                 <a href="{{ route('admin.staff') }}" class="px-3 py-1 rounded hover:bg-brand-700 transition text-sm">Staff</a>
                 @endcan

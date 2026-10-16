@@ -45,6 +45,7 @@ return [
         'customers.view'      => 'View customer accounts',
         'customers.manage'    => 'Change customer access and devices',
         'reviews.moderate'    => 'Approve, reject and hide customer reviews',
+        'ai_costs.view'       => 'See what AI has cost, by job, book and language',
         'settings.manage'     => 'Manage fonts, languages, templates and AI limits',
         'staff.manage'        => 'Invite, deactivate and change roles of staff',
         'audit.view'          => 'View the audit log',
@@ -54,6 +55,7 @@ return [
         'Content Manager' => [
             'admin.access', 'books.view', 'books.manage', 'catalogue.manage',
             'translations.manage', 'narration.manage', 'editions.publish', 'audit.view',
+            'ai_costs.view',
         ],
         'Language Reviewer' => [
             'admin.access', 'books.view', 'translations.review',

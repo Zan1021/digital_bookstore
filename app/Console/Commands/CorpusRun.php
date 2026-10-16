@@ -60,7 +60,7 @@ class CorpusRun extends Command
 
     private function printSummary(array $summary, ?array $previous): void
     {
-        $before = collect($previous['books'] ?? [])->keyBy('key');
+        $before = collect($previous['books'] ?? [])->where('status', 'ok')->keyBy('key');
         $delta = fn ($now, $was) => $was === null || $now === null ? '' : sprintf(' (%+.1f)', $now - $was);
 
         $rows = array_map(function ($b) use ($before, $delta) {

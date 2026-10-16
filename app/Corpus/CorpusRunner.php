@@ -96,7 +96,8 @@ class CorpusRunner
         foreach ($runs as $file) {
             $data = json_decode((string) file_get_contents($file), true);
             if (is_array($data) && $data['run_id'] < $current['run_id']
-                && $data['engine'] === $current['engine'] && $data['language'] === $current['language']) {
+                && $data['engine'] === $current['engine'] && $data['language'] === $current['language']
+                && ($data['totals']['ok'] ?? 0) > 0) { // a run where nothing ran is no baseline
                 return $data;
             }
         }

@@ -17,7 +17,7 @@ Work rules for the task list:
 
 ## Where we are (update at the end of each session)
 
-- **Resume at task 8.3** (V8 baseline run: needs Zan's OK to spend AI credit). 8.1 waits for three outside books from Zan; 8.2 done. Zan should check the AI prices in config/ai.php. Then Checkpoint 0. (6.4 was reduced; its data move is task 32.5.)
+- **Resume at task 8.3**: Kolulu's Home baseline done (R39.47, 958 s); the other 12 books wait for Zan's call on generative artwork repair (all 12 image edits were rejected by the quality check). 8.1 waits for three outside books from Zan; 8.2 done. Zan should check the AI prices in config/ai.php. Then Checkpoint 0. (6.4 was reduced; its data move is task 32.5.)
 - Task 1.4 (CI) is the first unticked task but is **blocked on Zan**: revoke the GitHub token in the git remote URL, then push. Skip it until Zan says it's done.
 - Zan's open items: set `SUPER_ADMIN_EMAIL` in `.env` + run `SuperAdminSeeder` (local DB has no users); `APP_URL=http://127.0.0.1:8080`; confirm sky/leaf/sun colours in `resources/css/tokens.css`; try a reader page turn by hand.
 - Explain decisions to Zan in plain words with simple numbered options, and offer to do the simple thing for them.

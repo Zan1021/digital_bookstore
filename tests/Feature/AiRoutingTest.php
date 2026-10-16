@@ -109,6 +109,16 @@ class AiRoutingTest extends TestCase
         }
     }
 
+    public function test_rate_limit_wording_in_any_case_is_retried_but_a_used_up_quota_is_not(): void
+    {
+        foreach (['Request rate limit has been exceeded.', 'Rate limit reached for gpt-4o', 'The engine is currently overloaded',
+            'HTTP 429 Too Many Requests', 'We are experiencing high volume'] as $busy) {
+            $this->assertTrue(TranslationService::isRetryable(new \RuntimeException($busy)), $busy);
+        }
+        $this->assertFalse(TranslationService::isRetryable(new \RuntimeException('You exceeded your current quota, please check your plan.')));
+        $this->assertFalse(TranslationService::isRetryable(new \RuntimeException('Incorrect API key provided')));
+    }
+
     public function test_metadata_suggestion_is_metered(): void
     {
         BookPage::create(['book_id' => $this->book->id, 'page_number' => 1, 'extracted_text' => 'Kolulu goes to school.']);

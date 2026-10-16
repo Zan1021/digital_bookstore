@@ -39,6 +39,26 @@ class TranslationService
     }
 
     /**
+     * A busy or rate-limited provider (HTTP 429/503, or its wording in any letter case) is
+     * worth retrying; a used-up account quota is not — waiting will not bring credit back.
+     */
+    public static function isRetryable(\Throwable $e): bool
+    {
+        $message = strtolower($e->getMessage());
+        $code = method_exists($e, 'getErrorCode') ? strtolower((string) $e->getErrorCode()) : '';
+        if ($code === 'insufficient_quota' || str_contains($message, 'exceeded your current quota')) {
+            return false;
+        }
+        $status = method_exists($e, 'getStatusCode') ? (int) $e->getStatusCode() : 0;
+
+        return in_array($status, [429, 503], true)
+            || str_contains($message, 'rate limit')
+            || str_contains($message, 'high volume')
+            || str_contains($message, 'overloaded')
+            || str_contains($message, '429');
+    }
+
+    /**
      * Make a chat completion through the AI provider layer with automatic retry and model
      * fallback (models from config/ai.php 'translate').
      * Handles rate limits, traffic overload, and transient errors gracefully.
@@ -67,10 +87,7 @@ class TranslationService
                     $message = $e->getMessage();
 
                     // Rate limit or overload — retry, honoring the server's requested wait.
-                    if (str_contains($message, 'high volume') ||
-                        str_contains($message, '429') ||
-                        str_contains($message, 'Rate limit') ||
-                        str_contains($message, 'overloaded')) {
+                    if (self::isRetryable($e)) {
 
                         $retryAfter = $this->parseRetryAfterSeconds($e);
                         Log::warning("OpenAI rate-limited/overloaded (model: {$model}, attempt {$attempt})", [
