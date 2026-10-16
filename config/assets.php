@@ -28,4 +28,7 @@ return [
     // temporary upload rule and PHP's upload_max_filesize at least this large).
     'max_upload_kb' => (int) env('ASSETS_MAX_UPLOAD_KB', 102400),
 
+    // Most pages an uploaded PDF may have (intake security check, Req 2.3).
+    'max_pages' => (int) env('ASSETS_MAX_PAGES', 500),
+
 ];

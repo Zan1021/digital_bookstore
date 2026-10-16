@@ -33,7 +33,7 @@ class Intake extends Component
      * @return array{ok: bool, book_id?: int, title?: string, error?: string}
      */
     #[Can('books.manage')]
-    public function finishUpload(string $clientName): array
+    public function finishUpload(string $clientName, bool $addAnyway = false): array
     {
         $validator = Validator::make(['upload' => $this->upload], [
             'upload' => ['required', 'file', 'mimes:pdf', 'max:'.(int) config('assets.max_upload_kb', 102400)],
@@ -48,6 +48,15 @@ class Intake extends Component
             $this->reset('upload');
 
             return ['ok' => false, 'error' => $validator->errors()->first('upload')];
+        }
+
+        // Req 2.6: the same file again is a warning with a choice, not a silent second copy.
+        if (! $addAnyway && ($existing = PdfService::findDuplicate(PdfService::checksum($this->upload)))) {
+            $this->reset('upload');
+
+            return ['ok' => false, 'duplicate' => true, 'existing_id' => $existing->id,
+                'existing_url' => route('admin.book', $existing), 'existing_title' => $existing->title,
+                'error' => "This file is already in your books as \u{201C}{$existing->title}\u{201D}."];
         }
 
         $book = app(PdfService::class)->storeIntake($this->upload);
@@ -70,12 +79,22 @@ class Intake extends Component
         IntakeBookJob::dispatch($bookId);
     }
 
-    /** Remove a finished or failed entry from the list (the book itself stays). */
+    /**
+     * Remove a finished entry from the list. A ready or failed book stays; a refused upload
+     * (its file already deleted by the security check) is removed with its book record.
+     */
     #[Can('books.manage')]
     public function dismiss(int $bookId): void
     {
-        ProcessingJob::where('type', 'intake')->where('book_id', $bookId)
-            ->whereIn('status', ['completed', 'failed'])->delete();
+        $row = ProcessingJob::with('book')->where('type', 'intake')->where('book_id', $bookId)
+            ->whereIn('status', ['completed', 'failed', 'rejected'])->first();
+        if (! $row) {
+            return;
+        }
+        if ($row->status === 'rejected' && $row->book?->status === 'rejected') {
+            $row->book->delete();
+        }
+        $row->delete();
     }
 
     public function render()

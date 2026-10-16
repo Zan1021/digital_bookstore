@@ -2,10 +2,12 @@
 
 namespace Tests\Feature;
 
+use App\Intake\IntakePreflight;
 use App\Jobs\IntakeBookJob;
 use App\Livewire\Admin\Intake;
 use App\Models\Book;
 use App\Models\ProcessingJob;
+use App\Models\SourcePage;
 use App\Models\User;
 use App\Services\PdfService;
 use Database\Seeders\RolesAndPermissionsSeeder;
@@ -53,7 +55,8 @@ class IntakeTest extends TestCase
         Queue::fake();
         $page = Livewire::test(Intake::class);
         foreach (['Book one.pdf', 'Book two.pdf', 'Book three.pdf'] as $name) {
-            $page->set('upload', $this->pdf($name))->call('finishUpload', $name);
+            // Different contents: identical files would (rightly) be caught as duplicates.
+            $page->set('upload', UploadedFile::fake()->createWithContent($name, "%PDF-1.7 {$name}"))->call('finishUpload', $name);
         }
 
         $this->assertSame(3, Book::count());
@@ -77,8 +80,29 @@ class IntakeTest extends TestCase
         Queue::assertNothingPushed();
     }
 
+    /** Stand-in for scripts/intake_preflight.py (its own Python tests cover the real checks). */
+    private function fakePreflight(array $result): void
+    {
+        $this->app->instance(IntakePreflight::class, new class($result) extends IntakePreflight
+        {
+            public function __construct(private array $result) {}
+
+            public function run(string $absolutePath): array
+            {
+                return $this->result + ['ok' => true, 'rejections' => [], 'warnings' => [], 'page_count' => 0, 'pages' => [], 'crop' => null];
+            }
+        });
+    }
+
+    private static function page(int $n, string $kind = 'live_text', bool $review = false): array
+    {
+        return ['number' => $n, 'width_pt' => 538.06, 'height_pt' => 750.66, 'trim_box' => [35.2, 35.2, 502.9, 715.5],
+            'trim_source' => 'trim_box_metadata', 'trim_review' => $review, 'has_live_text' => $kind === 'live_text', 'kind' => $kind, 'text_chars' => 40];
+    }
+
     private function fakePdfService(?\Throwable $fail = null): void
     {
+        $this->fakePreflight(['pages' => [self::page(1), self::page(2)], 'page_count' => 2]);
         $this->app->instance(PdfService::class, new class($fail) extends PdfService
         {
             public function __construct(private ?\Throwable $fail) {}
@@ -186,5 +210,112 @@ class IntakeTest extends TestCase
 
         $this->actingAs($reviewer)->get(route('admin.intake'))->assertForbidden();
         $this->actingAs($reviewer)->get(route('admin.dashboard'))->assertDontSee('Add Books');
+    }
+
+    public function test_the_same_file_again_is_a_warning_with_a_choice(): void
+    {
+        Queue::fake();
+        $file = fn () => UploadedFile::fake()->createWithContent('Play with me.pdf', '%PDF-1.7 same bytes');
+        $first = Livewire::test(Intake::class)->set('upload', $file())->call('finishUpload', 'Play with me.pdf')->effects['returns'][0];
+        $book = Book::findOrFail($first['book_id']);
+        $this->assertSame(hash('sha256', '%PDF-1.7 same bytes'), $book->source_checksum, 'checksum recorded (Req 2.2)');
+
+        $again = Livewire::test(Intake::class)->set('upload', $file())->call('finishUpload', 'Copy of Play with me.pdf')->effects['returns'][0];
+        $this->assertFalse($again['ok']);
+        $this->assertTrue($again['duplicate']);
+        $this->assertSame([$book->id, route('admin.book', $book)], [$again['existing_id'], $again['existing_url']]);
+        $this->assertStringContainsString('already in your books', $again['error']);
+        $this->assertSame(1, Book::count(), 'no second copy without the publisher saying so');
+
+        $anyway = Livewire::test(Intake::class)->set('upload', $file())->call('finishUpload', 'Copy of Play with me.pdf', true)->effects['returns'][0];
+        $this->assertTrue($anyway['ok']);
+        $this->assertSame(2, Book::count());
+    }
+
+    public function test_a_refused_upload_is_not_a_duplicate(): void
+    {
+        Queue::fake();
+        $file = fn () => UploadedFile::fake()->createWithContent('Bad.pdf', '%PDF-1.7 refused bytes');
+        $first = Livewire::test(Intake::class)->set('upload', $file())->call('finishUpload', 'Bad.pdf')->effects['returns'][0];
+        Book::whereKey($first['book_id'])->update(['status' => 'rejected']);
+
+        $this->assertTrue(Livewire::test(Intake::class)->set('upload', $file())->call('finishUpload', 'Bad.pdf')->effects['returns'][0]['ok']);
+    }
+
+    public function test_an_unsafe_file_is_refused_with_its_reason_and_not_kept(): void
+    {
+        $this->fakePreflight(['ok' => false, 'rejections' => [
+            ['code' => 'javascript', 'message' => 'The PDF contains JavaScript, which is not allowed.'],
+            ['code' => 'attachments', 'message' => 'The PDF contains 1 attached file(s). Remove the attachments and upload again.'],
+        ]]);
+        $spy = new class extends PdfService
+        {
+            public bool $processed = false;
+
+            public function processBook(Book $book): Book
+            {
+                $this->processed = true;
+
+                return $book;
+            }
+        };
+        $this->app->instance(PdfService::class, $spy);
+        $book = app(PdfService::class)->storeIntake($this->pdf());
+        IntakeBookJob::row($book->id);
+
+        dispatch_sync(new IntakeBookJob($book->id));
+
+        $this->assertFalse($spy->processed, 'nothing else reads a refused file');
+        $this->assertFalse(Storage::disk(config('assets.disk'))->exists($book->pdf_path), 'the unsafe file is deleted');
+        $this->assertSame('rejected', $book->refresh()->status);
+        $row = IntakeBookJob::row($book->id);
+        $this->assertSame('rejected', $row->status);
+        $this->assertStringContainsString('JavaScript', $row->error_message);
+        $this->assertSame(['javascript', 'attachments'], array_column($row->details['rejections'], 'code'));
+
+        Livewire::test(Intake::class)
+            ->assertSee('Refused')->assertSee('which is not allowed')->assertSee('The file was not kept')->assertDontSee('Retry')
+            ->call('retry', $book->id)
+            ->call('dismiss', $book->id);
+        $this->assertFalse(Book::whereKey($book->id)->exists(), 'removing a refused upload removes its empty record');
+    }
+
+    public function test_page_facts_are_saved_and_explained(): void
+    {
+        $this->fakePdfService();
+        $this->fakePreflight(['page_count' => 4, 'warnings' => [['code' => 'restricted', 'message' => 'The PDF has usage restrictions; it can still be processed.']],
+            'crop' => ['has_crop_marks' => true, 'consensus_trim_box' => [35.2, 35.2, 502.9, 715.5], 'confidence' => 0.9],
+            'pages' => [self::page(1, 'live_text', true), self::page(2, 'scanned'), self::page(3, 'no_text'), self::page(4, 'scanned')]]);
+        $book = $this->storedBook();
+        SourcePage::create(['book_id' => $book->id, 'number' => 9, 'width_pt' => 1, 'height_pt' => 1]); // from an older, longer file
+
+        dispatch_sync(new IntakeBookJob($book->id));
+
+        $pages = $book->sourcePages()->get();
+        $this->assertSame([1, 2, 3, 4], $pages->pluck('number')->all(), 'one source page per PDF page; leftovers removed');
+        $this->assertSame([true, false, false, false], $pages->pluck('has_live_text')->all());
+        $this->assertSame([35.2, 35.2, 502.9, 715.5], $pages[0]->trim_box);
+        $this->assertSame(538.06, $pages[0]->width_pt);
+        $intake = $book->refresh()->metadata['intake'];
+        $this->assertSame([[2, 4], [3], [1]], [$intake['scanned_pages'], $intake['no_text_pages'], $intake['trim_review_pages']]);
+
+        Livewire::test(Intake::class)->assertSee('Ready')
+            ->assertSee('2 scanned pages (2, 4): the text will be read from the image.')
+            ->assertSee('1 page has no text (3).')
+            ->assertSee('Check where page 1 is trimmed: the crop marks are faint.')
+            ->assertSee('usage restrictions');
+    }
+
+    public function test_the_checksum_backfill_fills_only_what_is_missing(): void
+    {
+        $disk = Storage::disk(config('assets.disk'));
+        $disk->put('books/pdfs/old.pdf', '%PDF-1.4 old book');
+        $old = Book::create(['title' => 'Old', 'pdf_path' => 'books/pdfs/old.pdf', 'page_count' => 1]);
+        $gone = Book::create(['title' => 'Gone', 'pdf_path' => 'books/pdfs/gone.pdf', 'page_count' => 1]);
+
+        $this->artisan('books:backfill-checksums')->expectsOutputToContain('Checksums recorded: 1; originals not found: 1.')->assertSuccessful();
+
+        $this->assertSame(hash('sha256', '%PDF-1.4 old book'), $old->refresh()->source_checksum);
+        $this->assertNull($gone->refresh()->source_checksum);
     }
 }

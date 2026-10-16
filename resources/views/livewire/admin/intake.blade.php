@@ -27,16 +27,19 @@
                         await new Promise((resolve, reject) => this.$wire.upload('upload', item.file, resolve,
                             () => reject(new Error('The upload did not finish. Only PDF files up to {{ $maxMb }} MB can be uploaded; keep this page open while files are sending.')),
                             (event) => { item.progress = event.detail.progress; }));
-                        const result = await this.$wire.finishUpload(item.name);
-                        if (result.ok) { item.state = 'done'; item.progress = 100; } else { item.state = 'error'; item.error = result.error; }
+                        const result = await this.$wire.finishUpload(item.name, item.addAnyway === true);
+                        if (result.ok) { item.state = 'done'; item.progress = 100; }
+                        else if (result.duplicate) { item.state = 'duplicate'; item.error = result.error; item.existingUrl = result.existing_url; }
+                        else { item.state = 'error'; item.error = result.error; }
                     } catch (e) {
                         item.state = 'error'; item.error = e.message;
                     }
-                    item.file = null;
+                    if (item.state !== 'duplicate') item.file = null; // kept so 'Add anyway' can send it again
                 }
                 this.sending = false;
                 if (this.items.some(i => i.state === 'waiting')) this.send();
             },
+            addAnyway(item) { item.addAnyway = true; item.state = 'waiting'; item.error = null; item.progress = 0; this.send(); },
             clearFinished() { this.items = this.items.filter(i => i.state === 'waiting' || i.state === 'sending'); },
         }"
         @beforeunload.window="if (sending) { $event.preventDefault(); $event.returnValue = ''; }"
@@ -65,14 +68,18 @@
                     <div class="px-4 py-3 flex items-center gap-4 text-sm">
                         <div class="min-w-0 flex-1">
                             <div class="truncate text-gray-900" x-text="item.name"></div>
-                            <div x-show="item.error" class="text-red-700 text-xs mt-0.5" x-text="item.error"></div>
+                            <div x-show="item.error" class="text-xs mt-0.5" :class="item.state === 'duplicate' ? 'text-amber-700' : 'text-red-700'" x-text="item.error"></div>
+                            <div x-show="item.state === 'duplicate'" class="mt-1 flex gap-4 text-xs">
+                                <a :href="item.existingUrl" class="font-medium text-brand-700 hover:underline">Open the existing book</a>
+                                <button type="button" @click="addAnyway(item)" class="text-gray-600 hover:text-gray-900 underline">Add it anyway</button>
+                            </div>
                         </div>
                         <div class="w-40 h-2 rounded-full bg-gray-100 overflow-hidden" x-show="item.state === 'sending' || item.state === 'done'">
                             <div class="h-full bg-brand-500 transition-all" :style="`width: ${item.progress}%`"></div>
                         </div>
                         <span class="w-28 text-right text-xs"
-                              :class="{ 'text-gray-400': item.state === 'waiting', 'text-brand-700': item.state === 'sending', 'text-green-700': item.state === 'done', 'text-red-700': item.state === 'error' }"
-                              x-text="{ waiting: 'Waiting', sending: 'Sending ' + item.progress + '%', done: 'Saved', error: 'Not uploaded' }[item.state]"></span>
+                              :class="{ 'text-gray-400': item.state === 'waiting', 'text-brand-700': item.state === 'sending', 'text-green-700': item.state === 'done', 'text-red-700': item.state === 'error', 'text-amber-700': item.state === 'duplicate' }"
+                              x-text="{ waiting: 'Waiting', sending: 'Sending ' + item.progress + '%', done: 'Saved', error: 'Not uploaded', duplicate: 'Already added' }[item.state]"></span>
                     </div>
                 </template>
                 <div class="px-4 py-2 text-right" x-show="! sending">
@@ -129,6 +136,14 @@
                                             @break
                                         @case('completed')
                                             <span class="text-xs px-2 py-0.5 rounded bg-green-50 text-green-700">Ready</span>
+                                            @foreach ($row->details['notes'] ?? [] as $note)
+                                                <div class="text-xs text-gray-500 mt-1 max-w-sm">{{ $note }}</div>
+                                            @endforeach
+                                            @break
+                                        @case('rejected')
+                                            <span class="text-xs px-2 py-0.5 rounded bg-red-50 text-red-700">Refused</span>
+                                            <div class="text-xs text-red-700 mt-1 max-w-sm">{{ $row->error_message }}</div>
+                                            <div class="text-xs text-gray-500 mt-0.5">The file was not kept.</div>
                                             @break
                                         @default
                                             <span class="text-xs px-2 py-0.5 rounded bg-red-50 text-red-700">Failed</span>
@@ -144,7 +159,7 @@
                                     @if ($row->book && $row->status === 'completed')
                                         <a href="{{ route('admin.book', $row->book) }}" class="text-xs font-medium text-brand-700 hover:underline mr-3">Open book</a>
                                     @endif
-                                    @if (in_array($row->status, ['completed', 'failed'], true))
+                                    @if (in_array($row->status, ['completed', 'failed', 'rejected'], true))
                                         <button type="button" wire:click="dismiss({{ $row->book_id }})" class="text-xs text-gray-400 hover:text-gray-600" aria-label="Remove {{ $row->book?->title }} from this list">Remove</button>
                                     @endif
                                 </td>

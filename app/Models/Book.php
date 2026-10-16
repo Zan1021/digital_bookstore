@@ -26,6 +26,7 @@ class Book extends Model
         'page_count',
         'cover_image',
         'pdf_path',
+        'source_checksum',
         'manifest_path',
         'render_engine',
         'status',

@@ -79,10 +79,23 @@ class PdfService
         return Book::create([
             'title' => $this->cleanTitle($originalStem),
             'pdf_path' => $path,
+            'source_checksum' => self::checksum($file),
             'page_count' => 0,
             'status' => $status,
             'original_language' => 'en',
         ]);
+    }
+
+    /** SHA-256 of an uploaded original (Req 2.2). */
+    public static function checksum(UploadedFile $file): string
+    {
+        return hash_file('sha256', $file->getRealPath());
+    }
+
+    /** A book already made from exactly this file (Req 2.6); refused uploads do not count. */
+    public static function findDuplicate(string $checksum): ?Book
+    {
+        return Book::where('source_checksum', $checksum)->where('status', '!=', 'rejected')->orderBy('id')->first();
     }
 
     private function processBookUntimed(Book $book): Book
