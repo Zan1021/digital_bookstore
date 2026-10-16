@@ -78,9 +78,11 @@ Work top to bottom. Each phase ends with a **checkpoint** that must pass before 
 - [ ] 7. AI provider layer and cost ledger
   - [x] 7.1 Interfaces `TranslationProvider`, `VisionProvider`, `ImageEditProvider`, `TtsProvider`; OpenAI and ElevenLabs implementations wrapping today's calls.
     - Done: `app/Ai/Contracts/*`, `App\Ai\OpenAi\{OpenAiTextProvider, OpenAiImageEditProvider}`, `App\Ai\ElevenLabs\ElevenLabsTtsProvider`; each call returns its result plus a `Usage` (provider, model, operation, units, ms). Bound in AppServiceProvider. One call each, no retry: callers are not switched over yet (task 7.4), and their retry/fallback moves then.
-  - [ ] 7.2 `MeteredProvider` decorator: writes `ai_ledger`, caches by input hash, enforces spending limits.
+  - [x] 7.2 `MeteredProvider` decorator: writes `ai_ledger`, caches by input hash, enforces spending limits.
+    - Done: `App\Ai\MeteredProvider` wraps all four interfaces (the container resolves every interface to it). Tables `ai_ledger` (design §4 columns + `input_hash`), `ai_cache` (text in the row; image/audio bytes under `ai-cache/` on the private disk) and `ai_spending_limits` (operation null = monthly total; no row = no limit). Cost in rand from `config/ai.php` rates × `AI_USD_TO_ZAR` (rates are list-price estimates, unknown models priced at the provider default). Cache hits are logged at R0 and still served when a limit is reached; a used-up limit throws `App\Ai\SpendingLimitReached` before the call. The cache key leaves out bookkeeping options (`operation`, `book_id`, `translation_id`, `fresh`); images are keyed by content. Link-only image results and failed calls are not cached or logged. Admin screen for limits stays with 39.2 / 41.3.
   - [ ] 7.3 Move model names to `config/ai.php` per operation.
   - [ ] 7.4 Route every existing AI call in `TranslationService`, `VisualQaService`, `IllustrationTextService`, `PdfService` and `NarrationService` through the layer.
+    - Pass `book_id` / `translation_id` / `operation` on each call so the ledger can show cost per book and edition. Jobs that hit `SpendingLimitReached` pause (release with a delay and show "paused: spending limit") instead of failing.
   - _Requirements: 3.5, 22.3, 22.5, 13.2; design §18_
 
 - [ ] 8. Golden corpus and baseline

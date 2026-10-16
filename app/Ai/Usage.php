@@ -16,5 +16,6 @@ final class Usage
         public readonly string $operation,
         public readonly array $units,
         public readonly int $durationMs,
+        public readonly bool $cached = false,
     ) {}
 }

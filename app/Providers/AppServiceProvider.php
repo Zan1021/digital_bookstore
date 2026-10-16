@@ -27,11 +27,18 @@ class AppServiceProvider extends ServiceProvider
         // Customer entitlements arrive with commerce (Phase 4); until then nobody owns a book.
         $this->app->bind(\App\Assets\Entitlements::class, \App\Assets\NoEntitlements::class);
 
-        // AI provider layer (task 7.1). Task 7.2 wraps these in the metered decorator.
-        $this->app->bind(\App\Ai\Contracts\TranslationProvider::class, \App\Ai\OpenAi\OpenAiTextProvider::class);
-        $this->app->bind(\App\Ai\Contracts\VisionProvider::class, \App\Ai\OpenAi\OpenAiTextProvider::class);
-        $this->app->bind(\App\Ai\Contracts\ImageEditProvider::class, \App\Ai\OpenAi\OpenAiImageEditProvider::class);
-        $this->app->bind(\App\Ai\Contracts\TtsProvider::class, \App\Ai\ElevenLabs\ElevenLabsTtsProvider::class);
+        // AI provider layer (tasks 7.1–7.2): every interface resolves to the metered decorator
+        // (ledger, cache, spending limits) around the real provider.
+        $this->app->bind(\App\Ai\MeteredProvider::class, fn ($app) => new \App\Ai\MeteredProvider(
+            $app->make(\App\Ai\OpenAi\OpenAiTextProvider::class),
+            $app->make(\App\Ai\OpenAi\OpenAiTextProvider::class),
+            $app->make(\App\Ai\OpenAi\OpenAiImageEditProvider::class),
+            $app->make(\App\Ai\ElevenLabs\ElevenLabsTtsProvider::class),
+        ));
+        foreach ([\App\Ai\Contracts\TranslationProvider::class, \App\Ai\Contracts\VisionProvider::class,
+            \App\Ai\Contracts\ImageEditProvider::class, \App\Ai\Contracts\TtsProvider::class] as $contract) {
+            $this->app->bind($contract, \App\Ai\MeteredProvider::class);
+        }
     }
 
     /**

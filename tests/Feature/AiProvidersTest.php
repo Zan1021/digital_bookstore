@@ -7,6 +7,7 @@ use App\Ai\Contracts\TranslationProvider;
 use App\Ai\Contracts\TtsProvider;
 use App\Ai\Contracts\VisionProvider;
 use App\Ai\ElevenLabs\ElevenLabsTtsProvider;
+use App\Ai\MeteredProvider;
 use App\Ai\OpenAi\OpenAiImageEditProvider;
 use App\Ai\OpenAi\OpenAiTextProvider;
 use Illuminate\Http\Client\Request;
@@ -48,19 +49,18 @@ class AiProvidersTest extends TestCase
         return $path;
     }
 
-    public function test_the_container_binds_each_interface(): void
+    public function test_the_container_wraps_each_interface_in_the_metered_provider(): void
     {
-        $this->assertInstanceOf(OpenAiTextProvider::class, app(TranslationProvider::class));
-        $this->assertInstanceOf(OpenAiTextProvider::class, app(VisionProvider::class));
-        $this->assertInstanceOf(OpenAiImageEditProvider::class, app(ImageEditProvider::class));
-        $this->assertInstanceOf(ElevenLabsTtsProvider::class, app(TtsProvider::class));
+        foreach ([TranslationProvider::class, VisionProvider::class, ImageEditProvider::class, TtsProvider::class] as $contract) {
+            $this->assertInstanceOf(MeteredProvider::class, app($contract));
+        }
     }
 
     public function test_complete_sends_the_messages_and_reports_token_usage(): void
     {
         OpenAI::fake([$this->chatReply('  Hallo wêreld  ')]);
 
-        $result = app(TranslationProvider::class)->complete(
+        $result = app(OpenAiTextProvider::class)->complete(
             [['role' => 'user', 'content' => 'Hello world']],
             ['model' => 'gpt-4o', 'temperature' => 0.3, 'operation' => 'translate'],
         );
@@ -83,7 +83,7 @@ class AiProvidersTest extends TestCase
     {
         OpenAI::fake([$this->chatReply('{"title":"Kolulu"}')]);
 
-        $result = app(TranslationProvider::class)->complete([['role' => 'user', 'content' => 'x']], ['json' => true]);
+        $result = app(OpenAiTextProvider::class)->complete([['role' => 'user', 'content' => 'x']], ['json' => true]);
 
         $this->assertSame(['title' => 'Kolulu'], $result->json());
         OpenAI::assertSent(Chat::class, fn ($m, array $p) => $p['response_format'] === ['type' => 'json_object']
@@ -96,7 +96,7 @@ class AiProvidersTest extends TestCase
         $a = $this->png();
         $b = $this->png();
 
-        $result = app(VisionProvider::class)->analyze('You compare pages.', 'IMAGE 1 = original, IMAGE 2 = translated.', [$a, $b],
+        $result = app(OpenAiTextProvider::class)->analyze('You compare pages.', 'IMAGE 1 = original, IMAGE 2 = translated.', [$a, $b],
             ['temperature' => 0.0, 'json' => true, 'operation' => 'visual_qa']);
 
         $this->assertSame(['ok' => true], $result->json());
@@ -119,7 +119,7 @@ class AiProvidersTest extends TestCase
         OpenAI::fake([new \RuntimeException('Rate limit reached')]);
 
         $this->expectExceptionMessage('Rate limit reached');
-        app(TranslationProvider::class)->complete([['role' => 'user', 'content' => 'x']]);
+        app(OpenAiTextProvider::class)->complete([['role' => 'user', 'content' => 'x']]);
     }
 
     public function test_image_edit_returns_the_image_or_its_link(): void
@@ -132,13 +132,13 @@ class AiProvidersTest extends TestCase
             EditResponse::fake(),
         ]);
 
-        $bytes = app(ImageEditProvider::class)->edit($image, $mask, 'Rebuild the background.', ['size' => '1024x1024']);
+        $bytes = app(OpenAiImageEditProvider::class)->edit($image, $mask, 'Rebuild the background.', ['size' => '1024x1024']);
         $this->assertSame('PNGBYTES', $bytes->bytes);
         $this->assertNull($bytes->url);
         $this->assertSame(['images' => 1, 'input_tokens' => 0, 'output_tokens' => 0], $bytes->usage->units);
         $this->assertSame('gpt-image-1', $bytes->usage->model);
 
-        $link = app(ImageEditProvider::class)->edit($image, $mask, 'Rebuild the background.');
+        $link = app(OpenAiImageEditProvider::class)->edit($image, $mask, 'Rebuild the background.');
         $this->assertNull($link->bytes);
         $this->assertSame('https://openai.com/fake-image.png', $link->url);
 
@@ -158,7 +158,7 @@ class AiProvidersTest extends TestCase
         $this->assertSame([[
             'voice_id' => 'v1', 'name' => 'Thandi', 'category' => 'premade',
             'labels' => ['accent' => 'south african'], 'preview_url' => null,
-        ]], app(TtsProvider::class)->voices());
+        ]], app(ElevenLabsTtsProvider::class)->voices());
 
         Http::assertSent(fn (Request $r) => $r->hasHeader('xi-api-key', 'test-key'));
     }
@@ -171,7 +171,7 @@ class AiProvidersTest extends TestCase
         ])]);
 
         $settings = ['stability' => 0.1, 'similarity_boost' => 0.75, 'style' => 1.0, 'use_speaker_boost' => true];
-        $speech = app(TtsProvider::class)->speak('Hi', 'v1', $settings, ['operation' => 'narrate']);
+        $speech = app(ElevenLabsTtsProvider::class)->speak('Hi', 'v1', $settings, ['operation' => 'narrate']);
 
         $this->assertSame('MP3', $speech->audio);
         $this->assertSame(['characters' => ['H', 'i']], $speech->alignment);
@@ -188,6 +188,6 @@ class AiProvidersTest extends TestCase
         Http::fake(['api.elevenlabs.io/*' => Http::response(['detail' => 'quota_exceeded'], 401)]);
 
         $this->expectExceptionMessage('ElevenLabs TTS failed');
-        app(TtsProvider::class)->speak('Hi', 'v1');
+        app(ElevenLabsTtsProvider::class)->speak('Hi', 'v1');
     }
 }
