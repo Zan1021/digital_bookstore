@@ -857,6 +857,7 @@ class PdfTranslationService
                 }
                 $illustrationReview = $illus['review_pages'] ?? [];
             } catch (\Throwable $e) {
+                \App\Ai\SpendingLimitReached::rethrow($e); // pause the job, never skip silently
                 // Non-fatal: a failure here must not sink the whole render.
                 Log::warning("Illustration-text pass threw (non-fatal)", [
                     'book' => $book->id, 'error' => $e->getMessage(),
@@ -1136,6 +1137,7 @@ class PdfTranslationService
                     }
                 }
             } catch (\Throwable $e) {
+                \App\Ai\SpendingLimitReached::rethrow($e); // pause the job, never skip the gate silently
                 Log::warning('Visual QA gate errored (non-blocking)', ['error' => $e->getMessage()]);
             }
         }

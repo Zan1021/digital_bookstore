@@ -6,46 +6,23 @@ use App\Assets\AssetStorage;
 use App\Models\Book;
 use App\Models\Narration;
 use App\Models\Translation;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 
 class NarrationService
 {
-    private string $apiKey;
-    private string $baseUrl = 'https://api.elevenlabs.io/v1';
     private float $currentStability = 0.10;
     private float $currentStyle = 1.0;
     private int $currentSpeed = 30;
 
-    public function __construct()
-    {
-        $this->apiKey = (string) config('services.elevenlabs.api_key');
-    }
+    /** Who AI cost is charged to (task 7.4). */
+    private array $aiContext = [];
 
     /**
      * Get available voices from ElevenLabs.
      */
     public function getVoices(): array
     {
-        $response = Http::withHeaders([
-            'xi-api-key' => $this->apiKey,
-        ])->get("{$this->baseUrl}/voices");
-
-        if ($response->failed()) {
-            throw new \RuntimeException('Failed to fetch ElevenLabs voices: ' . $response->body());
-        }
-
-        $voices = $response->json('voices', []);
-
-        return collect($voices)->map(function ($voice) {
-            return [
-                'voice_id' => $voice['voice_id'],
-                'name' => $voice['name'],
-                'category' => $voice['category'] ?? 'premade',
-                'labels' => $voice['labels'] ?? [],
-                'preview_url' => $voice['preview_url'] ?? null,
-            ];
-        })->toArray();
+        return app(\App\Ai\Contracts\TtsProvider::class)->voices();
     }
 
     /**
@@ -74,6 +51,9 @@ class NarrationService
                 );
             }
         }
+
+        $this->aiContext = ['book_id' => $book->id, 'translation_id' => $book->translations()
+            ->where('language_code', $languageCode)->value('id')];
 
         $narration = Narration::updateOrCreate(
             ['book_id' => $book->id, 'language_code' => $languageCode],
@@ -132,13 +112,19 @@ class NarrationService
 
         $pageAudioPaths = [];
 
-        foreach ($pages as $pageNumber => $text) {
-            if (empty(trim($text))) {
-                continue;
-            }
+        try {
+            foreach ($pages as $pageNumber => $text) {
+                if (empty(trim($text))) {
+                    continue;
+                }
 
-            $audioPath = $this->generateAudio($text, $voiceId, $book->id, $languageCode, $pageNumber);
-            $pageAudioPaths[$pageNumber] = $audioPath;
+                $audioPath = $this->generateAudio($text, $voiceId, $book->id, $languageCode, $pageNumber);
+                $pageAudioPaths[$pageNumber] = $audioPath;
+            }
+        } catch (\Throwable $e) {
+            // A provider error or a used-up spending limit must not leave the row 'processing'.
+            $narration->update(['status' => 'failed']);
+            throw $e;
         }
 
         // Use the first story page audio as the "main" audio
@@ -178,39 +164,19 @@ class NarrationService
         // Limit text per request
         $text = mb_substr($text, 0, 2000);
 
-        // Use the WITH TIMESTAMPS endpoint for word-level sync
-        $response = Http::withHeaders([
-            'xi-api-key' => $this->apiKey,
-            'Content-Type' => 'application/json',
-        ])->timeout(120)->post("{$this->baseUrl}/text-to-speech/{$voiceId}/with-timestamps", [
-            'text' => $text,
-            'model_id' => \App\Ai\AiModels::for('narrate'),
-            'voice_settings' => [
-                'stability' => $this->currentStability,
-                'similarity_boost' => 0.75,
-                'style' => $this->currentStyle,
-                'use_speaker_boost' => true,
-            ],
-        ]);
+        // Speech with character timestamps for word-level sync, through the AI provider layer.
+        $speech = app(\App\Ai\Contracts\TtsProvider::class)->speak($text, $voiceId, [
+            'stability' => $this->currentStability,
+            'similarity_boost' => 0.75,
+            'style' => $this->currentStyle,
+            'use_speaker_boost' => true,
+        ], ['operation' => 'narrate'] + $this->aiContext);
 
-        if ($response->failed()) {
-            throw new \RuntimeException('ElevenLabs TTS failed: ' . $response->body());
-        }
-
-        $data = $response->json();
-
-        // Extract audio (base64 encoded)
-        $audioBase64 = $data['audio_base64'] ?? null;
-        if (!$audioBase64) {
-            throw new \RuntimeException('No audio data in response');
-        }
-
-        $audioContent = base64_decode($audioBase64);
         $path = "narrations/book-{$bookId}/{$langCode}/page-{$identifier}.mp3";
-        AssetStorage::disk()->put($path, $audioContent);
+        AssetStorage::disk()->put($path, $speech->audio);
 
         // Save word timestamps if available
-        $alignment = $data['alignment'] ?? null;
+        $alignment = $speech->alignment;
         if ($alignment) {
             $timingPath = "narrations/book-{$bookId}/{$langCode}/page-{$identifier}-timing.json";
             AssetStorage::disk()->put($timingPath, json_encode($alignment));

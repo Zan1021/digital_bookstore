@@ -7,7 +7,6 @@ use App\Models\Translation;
 use App\Models\TranslatedPage;
 use App\Models\TranslationMemory;
 use Illuminate\Support\Facades\Log;
-use OpenAI\Laravel\Facades\OpenAI;
 
 class TranslationService
 {
@@ -26,8 +25,22 @@ class TranslationService
     /** Hard cap on how long we will sleep for a single rate-limit backoff (safety valve). */
     private const MAX_RETRY_WAIT_SECONDS = 60;
 
+    /** Who AI cost is charged to (task 7.4): set once the edition is known. */
+    private array $aiContext = [];
+
+    private function ai(): \App\Ai\Contracts\TranslationProvider
+    {
+        return app(\App\Ai\Contracts\TranslationProvider::class);
+    }
+
+    private function chargeTo(Translation $translation): void
+    {
+        $this->aiContext = ['book_id' => $translation->book_id, 'translation_id' => $translation->id];
+    }
+
     /**
-     * Make an OpenAI chat completion with automatic retry and model fallback.
+     * Make a chat completion through the AI provider layer with automatic retry and model
+     * fallback (models from config/ai.php 'translate').
      * Handles rate limits, traffic overload, and transient errors gracefully.
      */
     private function chatWithRetry(array $params): string
@@ -40,8 +53,15 @@ class TranslationService
 
             for ($attempt = 1; $attempt <= self::MAX_RETRIES; $attempt++) {
                 try {
-                    $response = OpenAI::chat()->create($params);
-                    return trim($response->choices[0]->message->content);
+                    return $this->ai()->complete($params['messages'], array_filter([
+                        'model' => $model,
+                        'operation' => 'translate',
+                        'temperature' => $params['temperature'] ?? null,
+                        'max_tokens' => $params['max_tokens'] ?? null,
+                        'json' => ($params['response_format']['type'] ?? null) === 'json_object',
+                    ], fn ($v) => $v !== null && $v !== false) + $this->aiContext)->text;
+                } catch (\App\Ai\SpendingLimitReached $e) {
+                    throw $e; // not a provider hiccup: no retry, no fallback
                 } catch (\Exception $e) {
                     $lastError = $e;
                     $message = $e->getMessage();
@@ -159,6 +179,7 @@ class TranslationService
             ['book_id' => $book->id, 'language_code' => $languageCode],
             ['language_name' => $languageName, 'status' => 'processing']
         );
+        $this->chargeTo($translation);
 
         // Build glossary from book (character names, etc.)
         $this->glossary = $this->buildGlossary($book);
@@ -892,6 +913,7 @@ PROMPT;
             ['book_id' => $book->id, 'language_code' => $languageCode],
             ['language_name' => $languageName, 'status' => 'processing']
         );
+        $this->chargeTo($translation);
 
         // Load manifest
         $manifestJson = \App\Assets\AssetStorage::disk()->get($book->manifest_path);
@@ -1047,6 +1069,7 @@ PROMPT;
                 }
             }
         } catch (\Throwable $e) {
+            \App\Ai\SpendingLimitReached::rethrow($e);
             Log::warning('IllustrationText: up-front artwork inventory failed (non-fatal)', [
                 'error' => $e->getMessage(),
             ]);
@@ -1266,6 +1289,7 @@ PROMPT;
                 'temperature' => 0.5,
             ]);
         } catch (\Throwable $e) {
+            \App\Ai\SpendingLimitReached::rethrow($e);
             Log::warning("Phonics regeneration call failed for page {$pageNumber}", ['error' => $e->getMessage()]);
             return [];
         }
@@ -1336,6 +1360,7 @@ PROMPT;
                     'temperature' => 0.3,
                 ]);
             } catch (\Throwable $e) {
+                \App\Ai\SpendingLimitReached::rethrow($e);
                 Log::warning("Phonics correction call failed for page {$pageNumber}", ['error' => $e->getMessage()]);
                 break;
             }

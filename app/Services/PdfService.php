@@ -8,7 +8,6 @@ use App\Models\BookPage;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
-use OpenAI\Laravel\Facades\OpenAI;
 use Smalot\PdfParser\Parser;
 
 class PdfService
@@ -202,25 +201,10 @@ class PdfService
         // Limit text to avoid token overload
         $text = mb_substr($text, 0, 3000);
 
-        $response = OpenAI::chat()->create([
-            'model' => \App\Ai\AiModels::for('metadata'),
-            'messages' => [
-                [
-                    'role' => 'system',
-                    'content' => "You are a children's book cataloguer. Based on the extracted text from a children's book, suggest metadata. Return JSON with these fields: title, author (if mentioned), description (2-3 sentences), short_description (1 sentence), category, age_group (e.g., '3-5', '6-8'), themes (array), tags (array), language.",
-                ],
-                [
-                    'role' => 'user',
-                    'content' => "Book text:\n\n{$text}",
-                ],
-            ],
-            'temperature' => 0.3,
-            'response_format' => ['type' => 'json_object'],
-        ]);
-
-        $content = $response->choices[0]->message->content;
-
-        return json_decode($content, true) ?? [];
+        return app(\App\Ai\Contracts\TranslationProvider::class)->complete([
+            ['role' => 'system', 'content' => "You are a children's book cataloguer. Based on the extracted text from a children's book, suggest metadata. Return JSON with these fields: title, author (if mentioned), description (2-3 sentences), short_description (1 sentence), category, age_group (e.g., '3-5', '6-8'), themes (array), tags (array), language."],
+            ['role' => 'user', 'content' => "Book text:\n\n{$text}"],
+        ], ['operation' => 'metadata', 'temperature' => 0.3, 'json' => true, 'book_id' => $book->id])->json();
     }
 
     /**

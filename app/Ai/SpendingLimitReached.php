@@ -17,4 +17,15 @@ class SpendingLimitReached extends \RuntimeException
         parent::__construct(sprintf('The %s spending limit of R%.2f is reached (R%.2f spent this month).',
             $scope, $limitZar, $spentZar));
     }
+
+    /**
+     * For catch-all blocks around AI calls: a used-up limit must stop the work (and pause
+     * the job), never be swallowed as an ordinary provider failure.
+     */
+    public static function rethrow(\Throwable $e): void
+    {
+        if ($e instanceof self) {
+            throw $e;
+        }
+    }
 }

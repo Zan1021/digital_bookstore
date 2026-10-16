@@ -137,6 +137,19 @@ class TranslateEditionJob implements ShouldQueue
                     'render_status' => $edition->render_status,
                 ],
             ]);
+        } catch (\App\Ai\SpendingLimitReached $e) {
+            // Paused, not failed (task 7.4, Req 22.5): no retry until the limit is raised or
+            // the month turns over. A re-run reuses every answer already paid for (AI cache).
+            Log::warning("TranslateEditionJob paused for edition #{$edition->id}: " . $e->getMessage());
+            $edition->forceFill([
+                'render_status' => Translation::STATE_NEEDS_LANGUAGE_REVIEW,
+                'qa_report' => json_encode(['error' => $e->getMessage(), 'paused' => 'spending_limit'], JSON_UNESCAPED_UNICODE),
+            ])->save();
+            $job->update([
+                'status' => 'paused',
+                'error_message' => 'Paused: '.$e->getMessage(),
+                'completed_at' => now(),
+            ]);
         } catch (\Throwable $e) {
             Log::error("TranslateEditionJob failed for edition #{$edition->id}: " . $e->getMessage());
             // Route to a language-review state so a failed edition is visible and NOT

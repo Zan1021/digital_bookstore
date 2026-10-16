@@ -464,7 +464,7 @@ class ReviewQueue extends Component
             $this->fixCurrentImage = $this->publicUrlForTemp($row->details['current_image'] ?? null);
             $this->fixCandidateImage = $this->publicUrlForTemp($row->details['candidate_image'] ?? null);
             $this->fixState = 'choose';
-        } elseif (in_array($row->status, ['completed', 'failed'], true)) {
+        } elseif (in_array($row->status, ['completed', 'failed', 'paused'], true)) {
             $this->fixReason = $row->details['reason'] ?? $row->error_message ?? 'UNKNOWN';
             $this->fixState = 'failed';
         }

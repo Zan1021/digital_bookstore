@@ -7,7 +7,6 @@ use App\Models\Book;
 use App\Models\Translation;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
-use OpenAI\Laravel\Facades\OpenAI;
 use Symfony\Component\Process\Process;
 
 /**
@@ -37,6 +36,14 @@ class IllustrationTextService
 {
     private string $fontsDir;
 
+    /** Who AI cost is charged to (task 7.4): set by each public entry point. */
+    private array $aiContext = [];
+
+    private function chargeTo(Translation $translation): void
+    {
+        $this->aiContext = ['book_id' => $translation->book_id, 'translation_id' => $translation->id];
+    }
+
     public function __construct(private ?VisualQaService $visualQa = null)
     {
         $this->fontsDir = storage_path('app/fonts');
@@ -57,6 +64,7 @@ class IllustrationTextService
      */
     public function inventoryArtworkRegions(Book $book, Translation $translation): array
     {
+        $this->chargeTo($translation);
         if (!config('bookstore.illustration_text.enabled')) {
             return [];
         }
@@ -101,6 +109,7 @@ class IllustrationTextService
                 try {
                     $regions = $this->detect($pdfPath, $pageIndex, $ppi, $model);
                 } catch (\Throwable $e) {
+                    \App\Ai\SpendingLimitReached::rethrow($e);
                     Log::warning('IllustrationText: inventory detect failed (non-fatal)', [
                         'page' => $pageIndex, 'error' => $e->getMessage(),
                     ]);
@@ -144,6 +153,7 @@ class IllustrationTextService
      */
     public function process(Book $book, Translation $translation): array
     {
+        $this->chargeTo($translation);
         $model = \App\Ai\AiModels::for('locate_art_text');
         $ppi = (int) config('bookstore.illustration_text.ppi', 300);
         $generative = (bool) config('bookstore.illustration_text.generative', false);
@@ -194,6 +204,7 @@ class IllustrationTextService
                 try {
                     $regions = $this->detect($pdfPath, $pageIndex, $ppi, $model);
                 } catch (\Throwable $e) {
+                    \App\Ai\SpendingLimitReached::rethrow($e);
                     Log::warning("IllustrationText: detect failed (non-fatal)", [
                         'page' => $pageIndex, 'error' => $e->getMessage(),
                     ]);
@@ -653,24 +664,15 @@ text is busy artwork you could not cleanly sample. If there is no baked-in text,
 {"regions":[]}.
 SYS;
 
-        $data = 'data:image/png;base64,' . base64_encode(file_get_contents($imgPath));
-        @unlink($imgPath);
-
-        $response = OpenAI::chat()->create([
-            'model' => $model,
-            'messages' => [
-                ['role' => 'system', 'content' => $system],
-                ['role' => 'user', 'content' => [
-                    ['type' => 'text', 'text' =>
-                        "Image is {$wPx}x{$hPx} pixels. Locate baked-in text. Return the JSON."],
-                    ['type' => 'image_url', 'image_url' => ['url' => $data]],
-                ]],
-            ],
-            'temperature' => 0.0,
-            'response_format' => ['type' => 'json_object'],
-        ]);
-
-        $parsed = json_decode($response->choices[0]->message->content ?? '{}', true) ?: [];
+        try {
+            $parsed = app(\App\Ai\Contracts\VisionProvider::class)->analyze($system,
+                "Image is {$wPx}x{$hPx} pixels. Locate baked-in text. Return the JSON.",
+                [$imgPath],
+                ['operation' => 'locate_art_text', 'model' => $model, 'temperature' => 0.0, 'json' => true] + $this->aiContext,
+            )->json();
+        } finally {
+            @unlink($imgPath);
+        }
         $out = [];
         foreach (($parsed['regions'] ?? []) as $r) {
             if (!($r['is_baked_in'] ?? true)) {
@@ -718,6 +720,7 @@ SYS;
      */
     public function repairPageGenerative(Book $book, Translation $translation, int $page): array
     {
+        $this->chargeTo($translation);
         $fail = fn (string $reason) => [
             'ok' => false, 'candidate_image' => null, 'current_image' => null,
             'candidate_pdf' => null, 'reason' => $reason,
@@ -793,6 +796,7 @@ SYS;
                 'reason' => null,
             ];
         } catch (\Throwable $e) {
+            \App\Ai\SpendingLimitReached::rethrow($e);
             Log::warning('IllustrationText: repairPageGenerative failed (fail-closed)', [
                 'book' => $book->id, 'page' => $page, 'error' => $e->getMessage(),
             ]);
@@ -1029,6 +1033,7 @@ SYS;
      */
     protected function locateRegionsForGenerative(string $pdfPath, int $pageIndex, int $ppi, Translation $translation): array
     {
+        $this->chargeTo($translation);
         $model = \App\Ai\AiModels::for('locate_art_text');
         $regions = $this->nativeTextRegions($pdfPath, $pageIndex, $ppi, $translation);
         if (empty($regions)) {
@@ -1166,22 +1171,18 @@ SYS;
 
             // One retry: the images edit endpoint occasionally times out on the first hit.
             // Since the deterministic erase already ran, a null return here is harmless.
-            $response = null;
-            $editParams = [
-                'model' => $model,
-                'image' => fopen($base, 'r'),
-                'mask' => fopen($mask, 'r'),
-                'prompt' => $prompt,
-                'n' => 1,
-                'size' => $this->squareSizeFor($base),
-            ];
-            for ($attempt = 1; $attempt <= 2 && $response === null; $attempt++) {
+            $edited = null;
+            $editOptions = ['operation' => 'art_repair', 'model' => $model,
+                'size' => $this->squareSizeFor($base)] + $this->aiContext;
+            for ($attempt = 1; $attempt <= 2 && $edited === null; $attempt++) {
                 try {
-                    // reopen streams for a retry (a consumed handle can't be re-sent)
-                    $editParams['image'] = fopen($base, 'r');
-                    $editParams['mask'] = fopen($mask, 'r');
-                    $response = OpenAI::images()->edit($editParams);
+                    // The provider opens fresh file handles on every call, so a retry is safe.
+                    $edited = app(\App\Ai\Contracts\ImageEditProvider::class)->edit($base, $mask, $prompt, $editOptions);
                 } catch (\Throwable $ex) {
+                    if ($ex instanceof \App\Ai\SpendingLimitReached) {
+                        @unlink($base); @unlink($mask);
+                        throw $ex;
+                    }
                     Log::warning("IllustrationText: images.edit attempt {$attempt} failed", [
                         'error' => $ex->getMessage(),
                     ]);
@@ -1192,16 +1193,11 @@ SYS;
                 }
             }
 
-            $item = $response->data[0] ?? null;
-            $b64 = $item->b64_json ?? null;
-            $url = $item->url ?? null;
-            // The SDK types these as non-nullable strings; treat empty string as absent.
-            $b64 = ($b64 !== null && $b64 !== '') ? $b64 : null;
-            $url = ($url !== null && $url !== '') ? $url : null;
+            $url = $edited->url;
 
             $out = "{$dir}/illus_genout_" . uniqid() . '.png';
-            if ($b64) {
-                file_put_contents($out, base64_decode($b64));
+            if ($edited->bytes !== null) {
+                file_put_contents($out, $edited->bytes);
             } elseif ($url) {
                 $bytes = @file_get_contents($url);
                 if ($bytes === false) {
@@ -1239,6 +1235,7 @@ SYS;
             // discarding any off-region drift.
             return $out;
         } catch (\Throwable $e) {
+            \App\Ai\SpendingLimitReached::rethrow($e);
             Log::warning('IllustrationText: generative bg failed (non-fatal)', ['error' => $e->getMessage()]);
             return null;
         }

@@ -7,7 +7,6 @@ use App\Models\Book;
 use App\Models\Translation;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
-use OpenAI\Laravel\Facades\OpenAI;
 use Symfony\Component\Process\Process;
 
 /**
@@ -27,6 +26,9 @@ use Symfony\Component\Process\Process;
  */
 class VisualQaService
 {
+    /** Who AI cost is charged to (task 7.4). */
+    private array $aiContext = [];
+
     private const DPI = 120;
     private const MAX_API_ATTEMPTS = 2;
 
@@ -57,6 +59,7 @@ class VisualQaService
      */
     public function review(Book $book, Translation $translation, ?array $pageNumbers = null): array
     {
+        $this->aiContext = ['book_id' => $book->id, 'translation_id' => $translation->id];
         $fingerprint = (string) ($translation->render_fingerprint ?? '');
         $sourcePath = AssetStorage::disk()->path($book->pdf_path);
         $translatedRel = $translation->rendered_pdf_path
@@ -142,6 +145,7 @@ class VisualQaService
             try {
                 $verdict = $this->askModel($srcImg, $transImg, $pageNum);
             } catch (\Throwable $e) {
+                \App\Ai\SpendingLimitReached::rethrow($e);
                 $lastError = $e->getMessage();
                 Log::warning("VisualQa: model call failed for page {$pageNum} (attempt {$attempt})", ['error' => $lastError]);
             }
@@ -196,25 +200,11 @@ Return STRICT JSON: {"ok": boolean, "severity": "minor"|"major", "issues": [stri
 "ok" is false only if there is at least one real defect above. Keep issues concise.
 SYS;
 
-        $srcData = 'data:image/png;base64,' . base64_encode(file_get_contents($sourceImgPath));
-        $transData = 'data:image/png;base64,' . base64_encode(file_get_contents($translatedImgPath));
-
-        $response = OpenAI::chat()->create([
-            'model' => \App\Ai\AiModels::for('visual_qa'),
-            'messages' => [
-                ['role' => 'system', 'content' => $system],
-                ['role' => 'user', 'content' => [
-                    ['type' => 'text', 'text' => "Page {$pageNum}. IMAGE 1 = original, IMAGE 2 = translated. Compare and return the JSON verdict."],
-                    ['type' => 'image_url', 'image_url' => ['url' => $srcData]],
-                    ['type' => 'image_url', 'image_url' => ['url' => $transData]],
-                ]],
-            ],
-            'temperature' => 0.0,
-            'response_format' => ['type' => 'json_object'],
-        ]);
-
-        $content = $response->choices[0]->message->content ?? '{}';
-        $data = json_decode($content, true) ?: [];
+        $data = app(\App\Ai\Contracts\VisionProvider::class)->analyze($system,
+            "Page {$pageNum}. IMAGE 1 = original, IMAGE 2 = translated. Compare and return the JSON verdict.",
+            [$sourceImgPath, $translatedImgPath],
+            ['operation' => 'visual_qa', 'temperature' => 0.0, 'json' => true] + $this->aiContext,
+        )->json();
         return [
             'ok' => (bool) ($data['ok'] ?? true),
             'severity' => $data['severity'] ?? 'minor',

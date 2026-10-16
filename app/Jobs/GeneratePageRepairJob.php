@@ -93,6 +93,10 @@ class GeneratePageRepairJob implements ShouldQueue
                     'reason' => $res['reason'] ?? null,
                 ],
             ]);
+        } catch (\App\Ai\SpendingLimitReached $e) {
+            Log::warning("GeneratePageRepairJob paused for {$jobKey}: " . $e->getMessage());
+            $row->update(['status' => 'paused', 'error_message' => 'Paused: '.$e->getMessage(),
+                          'completed_at' => now()]);
         } catch (\Throwable $e) {
             Log::error("GeneratePageRepairJob failed for {$jobKey}: " . $e->getMessage());
             $row->update(['status' => 'failed', 'error_message' => $e->getMessage(),
