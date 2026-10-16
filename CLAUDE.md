@@ -17,7 +17,7 @@ Work rules for the task list:
 
 ## Where we are (update at the end of each session)
 
-- **Resume at task 6.3** — find the "RESUME HERE" note under it in `tasks.md` (code committed, three checks left, then tick). Then 6.4, 7, 8, Checkpoint 0.
+- **Resume at task 6.4** (stop storing the source language as a translation). Then 7, 8, Checkpoint 0.
 - Task 1.4 (CI) is the first unticked task but is **blocked on Zan**: revoke the GitHub token in the git remote URL, then push. Skip it until Zan says it's done.
 - Zan's open items: set `SUPER_ADMIN_EMAIL` in `.env` + run `SuperAdminSeeder` (local DB has no users); `APP_URL=http://127.0.0.1:8080`; confirm sky/leaf/sun colours in `resources/css/tokens.css`; try a reader page turn by hand.
 - Explain decisions to Zan in plain words with simple numbered options, and offer to do the simple thing for them.
