@@ -111,7 +111,8 @@ Work top to bottom. Each phase ends with a **checkpoint** that must pass before 
     - Fixed while running: OpenAI's "Request rate limit has been exceeded." was not retried (case-sensitive match); `TranslationService::isRetryable()` now matches any case and HTTP 429/503, and never retries a used-up quota. A failed run is not used as the comparison baseline.
   - _Requirements: 26.2, 26.3; design §22_
 
-- [ ] **Checkpoint 0:** all suites green in CI; `/admin` requires login; no protected file reachable by a public URL; corpus baseline stored.
+- [x] **Checkpoint 0:** all suites green in CI; `/admin` requires login; no protected file reachable by a public URL; corpus baseline stored.
+  - **Signed off by Captain Zan, 2026-10-16.** Evidence: CI run 38881116405 green (PHP SQLite + PostgreSQL, Python); `/admin` pages redirect to login (checked live); source PDFs, translated PDFs and manifests refuse public access (manifest leak fixed the same day); V8 baseline for the 13 house books (run `20261016-094205-v8-af`). Agreed exception: the three outside books (8.1) are added to the baseline when Zan sends them — 8.1 and 8.3 stay unticked until then.
 
 ## Phase 1 — Scene Engine core
 
