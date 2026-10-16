@@ -27,7 +27,6 @@ use Symfony\Component\Process\Process;
  */
 class VisualQaService
 {
-    private const MODEL = 'gpt-4o';
     private const DPI = 120;
     private const MAX_API_ATTEMPTS = 2;
 
@@ -201,7 +200,7 @@ SYS;
         $transData = 'data:image/png;base64,' . base64_encode(file_get_contents($translatedImgPath));
 
         $response = OpenAI::chat()->create([
-            'model' => self::MODEL,
+            'model' => \App\Ai\AiModels::for('visual_qa'),
             'messages' => [
                 ['role' => 'system', 'content' => $system],
                 ['role' => 'user', 'content' => [

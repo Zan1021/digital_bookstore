@@ -213,8 +213,6 @@ return [
         'enabled' => env('ILLUSTRATION_TEXT_ENABLED', false),
         'generative' => env('ILLUSTRATION_TEXT_GENERATIVE', false),
         'ppi' => (int) env('ILLUSTRATION_TEXT_PPI', 300),
-        'model' => env('ILLUSTRATION_TEXT_MODEL', 'gpt-4o'),
-        'image_model' => env('ILLUSTRATION_TEXT_IMAGE_MODEL', 'gpt-image-1'),
         'verify' => env('ILLUSTRATION_TEXT_VERIFY', true),
     ],
 

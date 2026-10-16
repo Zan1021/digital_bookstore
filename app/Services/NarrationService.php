@@ -184,7 +184,7 @@ class NarrationService
             'Content-Type' => 'application/json',
         ])->timeout(120)->post("{$this->baseUrl}/text-to-speech/{$voiceId}/with-timestamps", [
             'text' => $text,
-            'model_id' => 'eleven_multilingual_v2',
+            'model_id' => \App\Ai\AiModels::for('narrate'),
             'voice_settings' => [
                 'stability' => $this->currentStability,
                 'similarity_boost' => 0.75,

@@ -21,8 +21,6 @@ class TranslationService
     private array $phonicsNeedsReview = [];
 
     /** Primary and fallback models for API resilience */
-    private const PRIMARY_MODEL = 'gpt-4o';
-    private const FALLBACK_MODEL = 'gpt-4o-mini';
     private const MAX_RETRIES = 3;
     private const RETRY_DELAY_SECONDS = 2;
     /** Hard cap on how long we will sleep for a single rate-limit backoff (safety valve). */
@@ -34,7 +32,7 @@ class TranslationService
      */
     private function chatWithRetry(array $params): string
     {
-        $models = [self::PRIMARY_MODEL, self::FALLBACK_MODEL];
+        $models = \App\Ai\AiModels::chain('translate'); // main model, then fallback (config/ai.php)
         $lastError = null;
 
         foreach ($models as $model) {

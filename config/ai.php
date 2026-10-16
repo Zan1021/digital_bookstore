@@ -9,6 +9,31 @@
  */
 return [
 
+    /*
+     * Model per operation (task 7.3). The operation name is also the ledger's label.
+     * 'fallback' is tried when the main model is overloaded (translation only today).
+     * Each model can be overridden in .env.
+     */
+    'operations' => [
+        'translate' => [
+            'model' => env('AI_TRANSLATE_MODEL', 'gpt-4o'),
+            'fallback' => env('AI_TRANSLATE_FALLBACK_MODEL', 'gpt-4o-mini'),
+        ],
+        'metadata' => ['model' => env('AI_METADATA_MODEL', 'gpt-4o')],
+        'visual_qa' => ['model' => env('AI_VISUAL_QA_MODEL', 'gpt-4o')],
+        'locate_art_text' => ['model' => env('AI_LOCATE_ART_TEXT_MODEL', env('ILLUSTRATION_TEXT_MODEL', 'gpt-4o'))],
+        'art_repair' => ['model' => env('AI_ART_REPAIR_MODEL', env('ILLUSTRATION_TEXT_IMAGE_MODEL', 'gpt-image-1'))],
+        'narrate' => ['model' => env('AI_NARRATE_MODEL', 'eleven_multilingual_v2')],
+    ],
+
+    // Model used when a call names no configured operation, per interface.
+    'defaults' => [
+        'text' => 'gpt-4o',
+        'vision' => 'gpt-4o',
+        'image_edit' => 'gpt-image-1',
+        'tts' => 'eleven_multilingual_v2',
+    ],
+
     'usd_to_zar' => (float) env('AI_USD_TO_ZAR', 18.5),
 
     'rates' => [

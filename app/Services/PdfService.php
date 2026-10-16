@@ -203,7 +203,7 @@ class PdfService
         $text = mb_substr($text, 0, 3000);
 
         $response = OpenAI::chat()->create([
-            'model' => 'gpt-4o',
+            'model' => \App\Ai\AiModels::for('metadata'),
             'messages' => [
                 [
                     'role' => 'system',

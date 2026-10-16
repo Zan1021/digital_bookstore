@@ -35,23 +35,23 @@ class MeteredProvider implements ImageEditProvider, TranslationProvider, TtsProv
 
     public function complete(array $messages, array $options = []): TextResult
     {
-        return $this->metered('text', 'complete', $options,
+        return $this->metered('text', 'text', 'complete', $options,
             ['messages' => $messages],
-            fn () => $this->text->complete($messages, $options));
+            fn (array $o) => $this->text->complete($messages, $o));
     }
 
     public function analyze(string $system, string $prompt, array $imagePaths, array $options = []): TextResult
     {
-        return $this->metered('text', 'analyze', $options,
+        return $this->metered('text', 'vision', 'analyze', $options,
             ['system' => $system, 'prompt' => $prompt, 'images' => array_map(self::fileHash(...), $imagePaths)],
-            fn () => $this->vision->analyze($system, $prompt, $imagePaths, $options));
+            fn (array $o) => $this->vision->analyze($system, $prompt, $imagePaths, $o));
     }
 
     public function edit(string $imagePath, string $maskPath, string $prompt, array $options = []): ImageResult
     {
-        return $this->metered('image', 'image_edit', $options,
+        return $this->metered('image', 'image_edit', 'image_edit', $options,
             ['image' => self::fileHash($imagePath), 'mask' => self::fileHash($maskPath), 'prompt' => $prompt],
-            fn () => $this->images->edit($imagePath, $maskPath, $prompt, $options));
+            fn (array $o) => $this->images->edit($imagePath, $maskPath, $prompt, $o));
     }
 
     /** The voice list is free: no ledger row, no limit. */
@@ -62,14 +62,17 @@ class MeteredProvider implements ImageEditProvider, TranslationProvider, TtsProv
 
     public function speak(string $text, string $voiceId, array $settings = [], array $options = []): SpeechResult
     {
-        return $this->metered('speech', 'speak', $options,
+        return $this->metered('speech', 'tts', 'speak', $options,
             ['text' => $text, 'voice' => $voiceId, 'settings' => $settings],
-            fn () => $this->tts->speak($text, $voiceId, $settings, $options));
+            fn (array $o) => $this->tts->speak($text, $voiceId, $settings, $o));
     }
 
-    private function metered(string $kind, string $defaultOperation, array $options, array $input, \Closure $call): TextResult|ImageResult|SpeechResult
+    private function metered(string $kind, string $interface, string $defaultOperation, array $options, array $input, \Closure $call): TextResult|ImageResult|SpeechResult
     {
         $operation = (string) ($options['operation'] ?? $defaultOperation);
+        // Settle the model first so it is part of the cache key: a model change in
+        // config/ai.php never reuses another model's answer.
+        $options['model'] = AiModels::resolve($options, $interface);
         $hash = $this->inputHash($kind, $defaultOperation, $input, $options);
 
         if (empty($options['fresh']) && ($hit = $this->fromCache($kind, $hash))) {
@@ -80,7 +83,7 @@ class MeteredProvider implements ImageEditProvider, TranslationProvider, TtsProv
 
         $this->ensureWithinLimits($operation);
 
-        $result = $call();
+        $result = $call($options);
         $this->record($result->usage, $operation, $options, $hash, Pricing::costZar($result->usage));
         $this->saveToCache($kind, $hash, $result);
 

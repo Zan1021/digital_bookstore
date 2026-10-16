@@ -61,7 +61,7 @@ class IllustrationTextService
             return [];
         }
         $ppi = (int) config('bookstore.illustration_text.ppi', 300);
-        $model = (string) config('bookstore.illustration_text.model', 'gpt-4o');
+        $model = \App\Ai\AiModels::for('locate_art_text');
 
         // Inventory from the SOURCE PDF (I5), not the translated edition.
         $sourceRel = $book->pdf_path ?? $book->source_pdf_path ?? null;
@@ -144,7 +144,7 @@ class IllustrationTextService
      */
     public function process(Book $book, Translation $translation): array
     {
-        $model = (string) config('bookstore.illustration_text.model', 'gpt-4o');
+        $model = \App\Ai\AiModels::for('locate_art_text');
         $ppi = (int) config('bookstore.illustration_text.ppi', 300);
         $generative = (bool) config('bookstore.illustration_text.generative', false);
 
@@ -738,7 +738,7 @@ SYS;
         $liveHashBefore = @md5_file($livePath);
 
         $ppi = (int) config('bookstore.illustration_text.ppi', 300);
-        $model = (string) config('bookstore.illustration_text.model', 'gpt-4o');
+        $model = \App\Ai\AiModels::for('locate_art_text');
         $temp = storage_path('app/temp');
         if (!is_dir($temp)) {
             @mkdir($temp, 0755, true);
@@ -1029,7 +1029,7 @@ SYS;
      */
     protected function locateRegionsForGenerative(string $pdfPath, int $pageIndex, int $ppi, Translation $translation): array
     {
-        $model = (string) config('bookstore.illustration_text.model', 'gpt-4o');
+        $model = \App\Ai\AiModels::for('locate_art_text');
         $regions = $this->nativeTextRegions($pdfPath, $pageIndex, $ppi, $translation);
         if (empty($regions)) {
             $regions = $this->detect($pdfPath, $pageIndex, $ppi, $model);
@@ -1128,7 +1128,7 @@ SYS;
     private function generativeBackground(string $pdfPath, int $pageIndex, int $ppi, array $regions): ?string
     {
         try {
-            $model = (string) config('bookstore.illustration_text.image_model', 'gpt-image-1');
+            $model = \App\Ai\AiModels::for('art_repair');
             $dir = storage_path('app/temp');
             if (!is_dir($dir)) {
                 mkdir($dir, 0755, true);

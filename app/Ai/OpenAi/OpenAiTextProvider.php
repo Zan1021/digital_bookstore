@@ -2,6 +2,7 @@
 
 namespace App\Ai\OpenAi;
 
+use App\Ai\AiModels;
 use App\Ai\Contracts\TranslationProvider;
 use App\Ai\Contracts\VisionProvider;
 use App\Ai\TextResult;
@@ -14,11 +15,9 @@ use OpenAI\Laravel\Facades\OpenAI;
  */
 class OpenAiTextProvider implements TranslationProvider, VisionProvider
 {
-    public const DEFAULT_MODEL = 'gpt-4o';
-
     public function complete(array $messages, array $options = []): TextResult
     {
-        return $this->chat($messages, $options, 'complete');
+        return $this->chat($messages, $options, 'complete', 'text');
     }
 
     public function analyze(string $system, string $prompt, array $imagePaths, array $options = []): TextResult
@@ -31,12 +30,12 @@ class OpenAiTextProvider implements TranslationProvider, VisionProvider
         return $this->chat([
             ['role' => 'system', 'content' => $system],
             ['role' => 'user', 'content' => $content],
-        ], $options, 'analyze');
+        ], $options, 'analyze', 'vision');
     }
 
-    private function chat(array $messages, array $options, string $defaultOperation): TextResult
+    private function chat(array $messages, array $options, string $defaultOperation, string $interface): TextResult
     {
-        $model = (string) ($options['model'] ?? self::DEFAULT_MODEL);
+        $model = AiModels::resolve($options, $interface);
         $params = ['model' => $model, 'messages' => $messages];
         if (array_key_exists('temperature', $options)) {
             $params['temperature'] = $options['temperature'];

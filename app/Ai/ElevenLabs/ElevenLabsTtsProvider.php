@@ -2,6 +2,7 @@
 
 namespace App\Ai\ElevenLabs;
 
+use App\Ai\AiModels;
 use App\Ai\Contracts\TtsProvider;
 use App\Ai\SpeechResult;
 use App\Ai\Usage;
@@ -13,8 +14,6 @@ use Illuminate\Support\Facades\Http;
  */
 class ElevenLabsTtsProvider implements TtsProvider
 {
-    public const DEFAULT_MODEL = 'eleven_multilingual_v2';
-
     private const BASE_URL = 'https://api.elevenlabs.io/v1';
 
     public function voices(): array
@@ -36,7 +35,7 @@ class ElevenLabsTtsProvider implements TtsProvider
 
     public function speak(string $text, string $voiceId, array $settings = [], array $options = []): SpeechResult
     {
-        $model = (string) ($options['model'] ?? self::DEFAULT_MODEL);
+        $model = AiModels::resolve($options, 'tts');
 
         $started = hrtime(true);
         $response = Http::withHeaders([

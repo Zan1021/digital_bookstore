@@ -87,7 +87,7 @@ class AiProvidersTest extends TestCase
 
         $this->assertSame(['title' => 'Kolulu'], $result->json());
         OpenAI::assertSent(Chat::class, fn ($m, array $p) => $p['response_format'] === ['type' => 'json_object']
-            && $p['model'] === OpenAiTextProvider::DEFAULT_MODEL);
+            && $p['model'] === 'gpt-4o');
     }
 
     public function test_analyze_sends_the_prompt_then_each_image_in_order(): void
