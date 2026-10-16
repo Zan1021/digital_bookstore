@@ -143,7 +143,7 @@ class TranslateEditionJob implements ShouldQueue
             Log::warning("TranslateEditionJob paused for edition #{$edition->id}: " . $e->getMessage());
             $edition->forceFill([
                 'render_status' => Translation::STATE_NEEDS_LANGUAGE_REVIEW,
-                'qa_report' => json_encode(['error' => $e->getMessage(), 'paused' => 'spending_limit'], JSON_UNESCAPED_UNICODE),
+                'qa_report' => ['error' => $e->getMessage(), 'paused' => 'spending_limit'], // array cast: encode once
             ])->save();
             $job->update([
                 'status' => 'paused',
@@ -156,7 +156,7 @@ class TranslateEditionJob implements ShouldQueue
             // silently publishable; keep it retryable.
             $edition->forceFill([
                 'render_status' => Translation::STATE_NEEDS_LANGUAGE_REVIEW,
-                'qa_report' => json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE),
+                'qa_report' => ['error' => $e->getMessage()], // array cast: encode once
             ])->save();
             $job->update([
                 'status' => 'failed',
