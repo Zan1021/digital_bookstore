@@ -249,6 +249,8 @@ The layout service renders each page as an absolutely positioned HTML page at th
 
 For each block it runs the ladder (Req 8.2) in the page context with `getBoundingClientRect` and `scrollHeight` checks: original → line-height −8% → letter-spacing −2% → font-size steps down to the role minimum (85%) → expand into free space → short alternative → flag. Expanding uses a free-space mask computed once per page from the plate (pixels close to the background colour, excluding regions marked protected); the block may grow only into free space inside the trim box.
 
+**Visual size (Req 7.8):** different fonts look different sizes at the same point size, so every block starts at the source's *visual* size. At analysis time, for each source font: extract the embedded font from the PDF (PyMuPDF `extract_font`) and read its x-height (OS/2 `sxHeight`, or the ink height of "x" via fontTools when the table lacks it); if the font cannot be extracted, measure lowercase glyph heights on the rendered source page. Do the same for the profile font. Starting size = source size × (source x-height ÷ target x-height), capped to 0.7–1.3 with a flag outside that range, recorded on the block. Reuses `scripts/optical_calibration.py` (x-height factor and caps); unlike V8's `font_policy` path it does **not** need the source font installed — the V8 baseline ran with factor 1.0 on every block because Edu-Aid is only embedded. Measured: Edu-Aid 0.530 em vs Playpen Sans 0.539 em → 12 pt becomes 11.8 pt.
+
 **Role consistency (Req 7.7):** after all pages are laid out, the most common resolved size per role is chosen as the edition size for that role; blocks that needed a smaller size keep theirs only if it is within one step, otherwise they are flagged. This prevents the "mixed sizes" defect.
 
 **Hyphenation and breaking:** CSS `hyphens:auto` with `lang` set per block; Chromium's dictionaries cover the major languages. For languages without dictionaries, hyphenation is off and the ladder handles fit.
@@ -257,13 +259,14 @@ For each block it runs the ladder (Req 8.2) in the page context with `getBoundin
 
 ## 10. Derived and rewritten content
 
-**Word list (`derive`, Req 10.1–10.2):**
-1. Tokenise the approved translated story blocks (`translate_reflow` and `translate_fixed` on story pages) with a language-aware tokenizer.
-2. First-appearance order, lower-case for comparison, keep original casing of first appearance.
-3. HF words = story words ∩ `hf_word_lists(language, grade)`; vocabulary = story words − HF words.
-4. Column count = smallest count whose tallest column fits the table body at the role size (Req 9.3).
+**Word list (`derive`, Req 10.1–10.2, 10.9–10.10)** — AI-first, code-checked (decided with Captain Zan, 2026-10-16):
+1. **Measure the source table** (book-agnostic, from the page itself): sections and their headings, columns per section, entries per column (the *target*), column width and body height, the source visual size (Req 7.8) → each column's *capacity* = lines that fit at that size.
+2. **Candidates:** tokenise the approved translated story blocks (`translate_reflow` and `translate_fixed` on story pages) with a language-aware tokenizer; first-appearance order, lower-case for comparison, original casing of first appearance kept.
+3. **AI selection:** one structured call gets the source page's sections and words (so it sees what the page teaches), the candidate list, the book's age group, and per section the target and capacity. It returns `{section: [words]}`: words only from the candidates, high-frequency words chosen for the language and age (or taken from `hf_word_lists(language, grade)` when the publisher has uploaded one), the most useful words kept when there are more candidates than room.
+4. **Code checks:** every word is a candidate; no duplicates; each section's count within `[ceil(target × min_share), capacity]` (`min_share` default 0.9, one setting for all books) unless the candidates run out; every word fits its column width at the source visual size, measured in the layout service. Failures go back to the AI once with the problems listed, then the page is flagged.
+5. **Fill like the source:** columns filled top to bottom, left to right, so they end at heights like the original (e.g. 40 / 39 / 33). The column count stays the source's; Req 9.3 (adding a column) is only the fallback when the content cannot fit otherwise.
 
-Checked against Kolulu's Home: 108 of 112 English vocabulary words are story words in near first-appearance order, so the generator reproduces how the publisher built these pages.
+Checked against Kolulu's Home: 108 of 112 English vocabulary words are story words in near first-appearance order, so building from the story reproduces how the publisher made these pages. The V8 baseline (2026-10-16) shows why word-by-word translation fails: wrong cells, duplicates, words out of story context.
 
 **Rewrite (`rewrite`, Req 10.3–10.5):** per content type a rule file (YAML) defines the prompt, the JSON schema and validators:
 
@@ -276,7 +279,7 @@ rules:
 validators: [example_contains_pattern, example_is_word(dictionary|story), no_source_language]
 ```
 
-Validation failures are retried once with the failures listed, then routed to educational review.
+The rewrite call also receives the source section's items (so the AI sees what the English page teaches, e.g. "a vowel digraph: oo as in wood") and returns the same number of items, each fitting its column width at the source visual size. Validation failures are retried once with the failures listed, then the page is flagged; the publisher approves rewritten content on the edition review screen with the rest of the page (a separate educational reviewer is an optional setting, Req 10.6).
 
 **Templates (Req 10.7):** `text_templates` per publisher and language, e.g. `copyright_notice.af`. Variables (`{publisher}`, `{year}`, `{isbn}`) come from the source block's parsed values.
 

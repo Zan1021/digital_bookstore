@@ -147,6 +147,7 @@ Sources: `digital bookstore_brief.md` (product brief, cited as **PB §n**), `com
 5. WHEN a language uses another script (Arabic, Hebrew, Thai, Devanagari), THE SYSTEM SHALL use the matching family from the profile (e.g. the Playpen Sans variant for that script), and block if none is configured.
 6. THE SYSTEM SHALL render with OpenType features enabled, so Playpen Sans's automatic letter alternates work in the reader and exports.
 7. THE SYSTEM SHALL apply one size scale per role across the whole edition, so peer blocks (e.g. all body text) do not drift in size from page to page.
+8. WHEN the translation font differs from the source font, THE SYSTEM SHALL match the **visual** size, not the point size: it measures the source font's lowercase height (x-height) from the font embedded in the source PDF (or, if it cannot be extracted, from the rendered source glyphs) and the profile font's x-height, and sets the starting size so both look the same size. The measured factor SHALL be recorded per block; a factor outside 0.7–1.3 SHALL be capped and flagged. The source font does not need to be installed.
 
 ## Requirement 8 — Layout and text fitting
 
@@ -154,7 +155,7 @@ Sources: `digital bookstore_brief.md` (product brief, cited as **PB §n**), `com
 
 1. THE SYSTEM SHALL lay out translated text with the same browser engine and CSS as the reader, so what the layout engine measures is what readers see.
 2. FOR each block, THE SYSTEM SHALL apply this fit ladder in order and stop at the first step that fits:
-   1. Original size and spacing.
+   1. Original visual size (Req 7.8) and spacing.
    2. Line-height reduction, no more than 8%.
    3. Letter-spacing reduction, no more than 2%.
    4. Font-size reduction, no further than 85% of the role's size (configurable per role).
@@ -181,14 +182,16 @@ Sources: `digital bookstore_brief.md` (product brief, cited as **PB §n**), `com
 
 **User story:** As the publisher, I want word lists, phonics pages, rhymes and exercises to be correct for the target language, not literal translations.
 
-1. FOR a word list with treatment `derive`, THE SYSTEM SHALL build the list from the approved translated story text: each word once, in order of first appearance, with the high-frequency words removed.
-2. THE SYSTEM SHALL build a high-frequency words section from the intersection of the story's words with an admin-managed high-frequency list per language and grade (importable from CSV).
+1. FOR a word list with treatment `derive`, THE SYSTEM SHALL take the candidate words from the approved translated story text (each word once, in order of first appearance) and let the AI choose and sort them into the list's sections (e.g. vocabulary and high-frequency words), following what the source page does. The AI SHALL never add a word that is not in the translated story.
+2. THE SYSTEM SHALL let the AI decide which story words are high-frequency words for the target language and the book's age group. An admin-managed high-frequency list per language and grade (importable from CSV) is optional; when one exists, it takes precedence over the AI's choice.
 3. FOR content with treatment `rewrite` (phonics, rhymes, alphabet pages, puns, exercises), THE SYSTEM SHALL ask the AI for new target-language content as structured data, following a rule set per content type.
 4. THE SYSTEM SHALL validate rewritten content with code before it is laid out. For phonics: every example word contains its pattern; every example word is a real word (dictionary or story); nothing remains in the source language. For alphabet pages: the word starts with the letter in the target language.
 5. THE SYSTEM SHALL let a series define a curriculum plan (e.g. phonics focus per book), and the rewrite step SHALL follow it.
-6. THE SYSTEM SHALL route every `rewrite` result to the educational review track; `derive` results need no educational review unless their inputs changed after approval.
+6. THE SYSTEM SHALL show every `rewrite` and `derive` result on the edition review screen, where the publisher approves it with the rest of the page; a page whose rewritten content failed validation after one retry SHALL be flagged with the reason. A separate educational reviewer is optional (a per-publisher setting).
 7. THE SYSTEM SHALL keep per-language templates for `template` blocks (copyright notice, credits) that the publisher approves once and reuses for every book.
 8. WHEN the story translation changes after a derived page was approved, THE SYSTEM SHALL regenerate the derived page and mark it changed.
+9. FOR derived and rewritten content laid out in a structure (e.g. a word table), THE SYSTEM SHALL keep each column's amount of content close to the source, so the page looks as full as the original at the original visual size: measured from the source page, each column has a **capacity** (lines that fit at the original visual size) and a **target** (the source's count). The result SHALL be at most the capacity and at least a configurable share of the target (default 90%), except when the translated story does not contain enough words, in which case fewer words are shown and nothing is invented. Rewritten sections (e.g. phonics) SHALL have the same number of items as the source.
+10. THE SYSTEM SHALL check every entry fits its column width at the original visual size; an entry that does not fit is sent back to the AI once to be replaced by a shorter story word (or a shorter phonics example), then flagged.
 
 ## Requirement 11 — Automated quality gates
 

@@ -131,7 +131,8 @@ Work top to bottom. Each phase ends with a **checkpoint** that must pass before 
   - [ ] 11.3 Tables (rows, columns, header, merged cells), reusing logic from `borderless_table.py` and `document_model.py`.
   - [ ] 11.4 OCR blocks for scanned pages via `ocr_integration.py`; text-in-image detection via the `illustration_*` modules.
   - [ ] 11.5 Tests on corpus pages: cover, copyright page, story page, word-list page, back cover.
-  - _Requirements: 4.1, 4.2, 5.4_
+  - [ ] 11.6 Visual size per source font (Req 7.8, design §9): x-height from the font embedded in the PDF (fallback: rendered glyphs), reusing `optical_calibration.py`; store the factor per block. Test: Edu-Aid → Playpen Sans gives ≈ 0.98 without Edu-Aid installed.
+  - _Requirements: 4.1, 4.2, 5.4, 7.8_
 
 - [ ] 12. Art plates (Python `scene_plates.py`)
   - [ ] 12.1 Text-only redaction (images and line art kept) → vector plate PDF per page (proven in `evidence/art-plate-test-*.jpg`).
@@ -143,12 +144,12 @@ Work top to bottom. Each phase ends with a **checkpoint** that must pass before 
 - [ ] 13. Layout service (Node + Playwright, `layout-service/`)
   - [ ] 13.1 Long-lived service with one Chromium and a page pool; HTTP endpoints `layout`, `check`, `screenshot`, `pdf-text-layer`.
   - [ ] 13.2 Page HTML template (design §9) shared with the reader as one module.
-  - [ ] 13.3 Fit ladder (Req 8.2) with the step used recorded per block.
+  - [ ] 13.3 Fit ladder (Req 8.2) with the step used recorded per block; step 1 starts from the block's visual size (11.6).
   - [ ] 13.4 Free-space mask from the plate for the "grow" step.
   - [ ] 13.5 Role consistency pass across the edition (design §9).
   - [ ] 13.6 Language-aware hyphenation and widow control.
   - [ ] 13.7 Tests with synthetic blocks: fits, needs shrink, needs grow, needs short alternative, impossible → flagged.
-  - _Requirements: 8.1–8.7, 7.6, 7.7_
+  - _Requirements: 8.1–8.7, 7.6–7.8_
 
 - [ ] 14. Treatment classification
   - [ ] 14.1 Deterministic signals (design §7) with confidence per block.
@@ -205,19 +206,21 @@ Work top to bottom. Each phase ends with a **checkpoint** that must pass before 
   - _Requirements: 9.1–9.5_
 
 - [ ] 22. Derived word lists
-  - [ ] 22.1 Word-list generator (design §10) with a language-aware tokenizer.
-  - [ ] 22.2 `hf_word_lists` table with CSV import screen per language and grade.
-  - [ ] 22.3 Test: on Kolulu's Home in English, the generator reproduces the publisher's list (≥ 95% of words, near-identical order).
-  - [ ] 22.4 Regenerate when approved story text changes.
-  - _Requirements: 10.1, 10.2, 10.8_
+  - [ ] 22.1 Measure the source table (design §10 step 1): sections, headings, columns, entries per column (target), capacity at the source visual size.
+  - [ ] 22.2 Story candidates with a language-aware tokenizer (first appearance, each word once).
+  - [ ] 22.3 AI selection through the provider layer: words only from the candidates, sections (vocabulary / high-frequency) chosen for language and age, counts within [90% of target, capacity]; code checks (candidate-only, no duplicates, range, every word fits its column width at the visual size); one retry, then flag.
+  - [ ] 22.4 Optional `hf_word_lists` per language and grade (CSV import); when present it overrides the AI's high-frequency choice.
+  - [ ] 22.5 Tests: on Kolulu's Home in English the candidates reproduce the publisher's list (≥ 95% of words, near-identical order); range and width checks reject a too-long or too-short list; an invented word is rejected.
+  - [ ] 22.6 Regenerate when approved story text changes.
+  - _Requirements: 10.1, 10.2, 10.8–10.10_
 
 - [ ] 23. Rewrite framework
   - [ ] 23.1 Rule files (YAML) with prompt, schema and validators; loader and runner.
-  - [ ] 23.2 Phonics rules and validators (pattern in example, real word, no source language).
+  - [ ] 23.2 Phonics rules and validators (pattern in example, real word, no source language); the AI sees the source items and returns the same number, each fitting its column width at the visual size.
   - [ ] 23.3 Alphabet-page and rhyme rules.
   - [ ] 23.4 Series curriculum plan editor on the series page.
-  - [ ] 23.5 Educational review track wiring.
-  - _Requirements: 10.3–10.6_
+  - [ ] 23.5 Rewritten content approved on the edition review screen; optional educational reviewer setting per publisher.
+  - _Requirements: 10.3–10.6, 10.9, 10.10_
 
 - [ ] 24. Text inside artwork
   - [ ] 24.1 Keep / replace / flag choice per `in_art` block, defaulting as in design §11.
