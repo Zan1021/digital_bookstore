@@ -26,6 +26,12 @@ class AppServiceProvider extends ServiceProvider
 
         // Customer entitlements arrive with commerce (Phase 4); until then nobody owns a book.
         $this->app->bind(\App\Assets\Entitlements::class, \App\Assets\NoEntitlements::class);
+
+        // AI provider layer (task 7.1). Task 7.2 wraps these in the metered decorator.
+        $this->app->bind(\App\Ai\Contracts\TranslationProvider::class, \App\Ai\OpenAi\OpenAiTextProvider::class);
+        $this->app->bind(\App\Ai\Contracts\VisionProvider::class, \App\Ai\OpenAi\OpenAiTextProvider::class);
+        $this->app->bind(\App\Ai\Contracts\ImageEditProvider::class, \App\Ai\OpenAi\OpenAiImageEditProvider::class);
+        $this->app->bind(\App\Ai\Contracts\TtsProvider::class, \App\Ai\ElevenLabs\ElevenLabsTtsProvider::class);
     }
 
     /**

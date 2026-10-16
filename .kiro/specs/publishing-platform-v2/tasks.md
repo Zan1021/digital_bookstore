@@ -76,7 +76,8 @@ Work top to bottom. Each phase ends with a **checkpoint** that must pass before 
   - _Requirements: 16.1–16.3, 25.2, 6.8_
 
 - [ ] 7. AI provider layer and cost ledger
-  - [ ] 7.1 Interfaces `TranslationProvider`, `VisionProvider`, `ImageEditProvider`, `TtsProvider`; OpenAI and ElevenLabs implementations wrapping today's calls.
+  - [x] 7.1 Interfaces `TranslationProvider`, `VisionProvider`, `ImageEditProvider`, `TtsProvider`; OpenAI and ElevenLabs implementations wrapping today's calls.
+    - Done: `app/Ai/Contracts/*`, `App\Ai\OpenAi\{OpenAiTextProvider, OpenAiImageEditProvider}`, `App\Ai\ElevenLabs\ElevenLabsTtsProvider`; each call returns its result plus a `Usage` (provider, model, operation, units, ms). Bound in AppServiceProvider. One call each, no retry: callers are not switched over yet (task 7.4), and their retry/fallback moves then.
   - [ ] 7.2 `MeteredProvider` decorator: writes `ai_ledger`, caches by input hash, enforces spending limits.
   - [ ] 7.3 Move model names to `config/ai.php` per operation.
   - [ ] 7.4 Route every existing AI call in `TranslationService`, `VisualQaService`, `IllustrationTextService`, `PdfService` and `NarrationService` through the layer.
